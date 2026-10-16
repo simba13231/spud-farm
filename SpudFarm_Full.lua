@@ -132,6 +132,7 @@ local CONFIG = {
     confirmKey    = "E",             -- E confirms the sell popup
     sellPlatformNames = { "Platform", "LoadInPlatform", "SellBoard", "SellPlatform", "Sell Pad", "SellPad" },
     leverPrompt   = "Lever",         -- factory interior levers
+    stallMarker   = "Adornee_BarnStallMenu", -- barn stall points (dump: 16 across the barns)
 
     -- What the farm cycle plants (set from the Farm tab crop dropdown)
     crop = "Wheat",
@@ -1055,10 +1056,54 @@ function Presets.stop()
 end
 
 ------------------------------------------------------------
+-- BARN STALL CLEANING — dump-confirmed context: CleanAnimalContainer = V
+-- Stall points are parts named "Adornee_BarnStallMenu" (16 across the
+-- barns). We go to OUR plot first so we never wander into a neighbour's
+-- barn, then stand at each stall and press V — the game no-ops on stalls
+-- that are already clean. EVTFilthCleaning is the server side of this.
+------------------------------------------------------------
+local function cleanBarnStalls()
+    local plot = findMyPlot()
+    if plot then
+        driveTo(plot:GetPivot().Position, 5)
+        hwait(0.8)
+    end
+    local stalls = findAll(CONFIG.stallMarker, 700)
+    if #stalls == 0 then
+        log("no barn stalls near your farm — barn not built yet? (marker: " .. CONFIG.stallMarker .. ")")
+        return 0
+    end
+    log("cleaning " .. #stalls .. " barn stall(s)…")
+    local cleaned = 0
+    for _, s in ipairs(stalls) do
+        if Active and Active.stop then break end
+        driveTo(s.part.Position, 3)
+        hwait(0.7)
+        pressKey("V")   -- CleanAnimalContainer (dump-confirmed bind)
+        cleaned += 1
+        hwait(1.2)
+    end
+    pressKey("X")   -- drop anything a stall handed us
+    hwait(0.3)
+    log("stall cleaning pass done (" .. cleaned .. "/" .. #stalls .. ")")
+    return cleaned
+end
+
+Presets.register("Barn Care", function()
+    log("[Barn] 1/1 cleaning stalls")
+    local n = cleanBarnStalls()
+    webhookSend("🧹 Barn Care pass · " .. n .. " stall(s) cleaned" .. coinsNote())
+end)
+
+------------------------------------------------------------
 -- PRESET: CHOCOLATE MILK (8 steps, wiki-accurate)
 ------------------------------------------------------------
 Presets.register("Chocolate Milk", function()
     local C = CONFIG.presets.chocolateMilk
+
+    log("[CM] 0/8 cleaning barn stalls (clean stalls = happier cows)")
+    if Active.stop then return end
+    cleanBarnStalls()
 
     log("[CM] 1/8 milking cows")
     local milker = getTool(C.milkerTool)
@@ -2514,34 +2559,38 @@ makeTextbox(settingsTab, "Tractor", CONFIG.tractorName, function(v)
     CONFIG.tractorName = v
     notify("Tractor: " .. v)
 end, 14)
+makeTextbox(settingsTab, "Barn stall", CONFIG.stallMarker, function(v)
+    CONFIG.stallMarker = v
+    notify("Barn stall marker: " .. v)
+end, 15)
 
-sectionLabel(settingsTab, "Tools & Cake chain", 15)
+sectionLabel(settingsTab, "Tools & Cake chain", 16)
 makeTextbox(settingsTab, "Planter tool", CONFIG.plantTool, function(v)
     CONFIG.plantTool = v
     notify("Planter: " .. v)
-end, 16)
+end, 17)
 makeTextbox(settingsTab, "Harvester tool", CONFIG.harvestTool, function(v)
     CONFIG.harvestTool = v
     notify("Harvester: " .. v)
-end, 17)
+end, 18)
 makeTextbox(settingsTab, "Batter drop", CONFIG.presets.cakeEggs.batterDrop, function(v)
     CONFIG.presets.cakeEggs.batterDrop = v
     notify("Batter drop: " .. v)
-end, 18)
+end, 19)
 makeTextbox(settingsTab, "Oven", CONFIG.presets.cakeEggs.ovenName, function(v)
     CONFIG.presets.cakeEggs.ovenName = v
     notify("Oven: " .. v)
-end, 19)
+end, 20)
 
-sectionLabel(settingsTab, "Info", 20)
-makeInfo(settingsTab, "RIGHT SHIFT shows/hides all windows. 📡 in the title bar opens the webhook panel; 🥔 (potato, left edge of screen) hides every window and brings them back when pressed again. Planter defaults to KGF, harvester to SRC6 (both wiki-confirmed). Names marked as guesses — dump real workspace names (explorer) and type them above; you can list several guesses separated by commas (e.g. \"Milker, Udder Tool\"). Join the Dunn Games group (Farmer's Club) for +5% sell value, and prefer FREE VIP servers for farming sessions.", 21)
+sectionLabel(settingsTab, "Info", 21)
+makeInfo(settingsTab, "RIGHT SHIFT shows/hides all windows. 📡 in the title bar opens the webhook panel; 🥔 (potato, left edge of screen) hides every window and brings them back when pressed again. Planter defaults to KGF, harvester to SRC6 (both wiki-confirmed). Names marked as guesses — dump real workspace names (explorer) and type them above; you can list several guesses separated by commas (e.g. \"Milker, Udder Tool\"). Join the Dunn Games group (Farmer's Club) for +5% sell value, and prefer FREE VIP servers for farming sessions.", 22)
 makeButton(settingsTab, "⏏ Unload Script", COL.Red, function()
     Farm.enabled = false
     Presets.stop()
     Webhook.enabled = false
     if hotGui then hotGui:Destroy() end
     screen:Destroy()
-end, 22)
+end, 23)
 
 selectTab("Farm")
 

@@ -21,7 +21,9 @@ Everything merged into one paste-and-run file:
   requirements · price-rotation tip), auto seed-loading during PLANT, Auto-Sell,
   Grow time slider, Skip Stage / Reset buttons, live status line,
   **live sell-price readout** (reads the in-game SellValueBoards every 3s)
-- **Presets tab** — Chocolate Milk (milk cows → deposit → cocoa → levers → collect → sell),
+- **Presets tab** — **Barn Care** (walks every stall near your plot and cleans it —
+  uses the game's own CleanAnimalContainer = V context), Chocolate Milk
+  (clean stalls → milk cows → deposit → cocoa → levers → collect → sell),
   Cake & Eggs (**7 steps**: eggs → milk → wheat/milk/egg deposits → 4 levers →
   **batter → oven bake** → collect + sell), Wool Run (shear → spindel bundles,
   5 wool each → sell); LOOP toggle, STOP button
