@@ -122,7 +122,7 @@ local CONFIG = {
     tractorName   = "ZM80",          -- starter tractor (substring)
     plowTool      = "S4204",         -- plow implement
     cultivateTool = "KADL",          -- cultivator implement
-    plantTool     = "KGF",           -- planter (matches "KGF 3000")
+    plantTool     = "KQF, KGF",       -- planter (IN-GAME: "KQF3000" — wiki "KGF 3000" was wrong; dump-confirmed)
     harvestTool   = "SRC6",          -- combine harvester
     growWait      = 8 * 60,          -- seconds (crop selection / slider sets this)
     shopName      = "FarmCo",        -- crop sell store
@@ -236,7 +236,7 @@ local CONFIG = {
         { label = "TractorCo",  names = { "VehicleStore", "TractorCo", "Vehicle Store" } },
         { label = "LumberCo",   names = { "LumberStore", "LumberCo", "Lumber Co" } },
         { label = "Bulk Store", names = { "BulkStore", "OneStop", "One Stop", "SellPoint" } },
-        { label = "Warehouse",  names = { "Warehouse", "CompanyArea" } },
+        { label = "Warehouse",  names = { "TrainTimerPart", "WarehouseArea", "Warehouse" } },
         { label = "My Farm",    names = { "PlotBillboard", "FrontPlot" } },
         { label = "Spawn",      names = { "SpawnLocation", "SpawnPoint", "Spawn" } },
     },
@@ -2237,19 +2237,29 @@ RunService.RenderStepped:Connect(function()
 end)
 
 -- live sell prices (read from the in-game SellValueBoards; read-only)
+-- selected crop is shown first (⭐) with singular/plural matching
+-- (board uses "Tomato", dropdown says "Tomatoes")
 local priceStatus = makeStatus(farmTab, 11)
 task.spawn(function()
     while screen and screen.Parent do
         local rows = readSellBoards()
         if #rows > 0 then
+            local cropKey = tostring(CONFIG.crop):lower()
             local parts, seen = {}, {}
-            for _, r in ipairs(rows) do
+            local function add(r, star)
                 local key = r.name .. "=" .. r.value
                 if not seen[key] and #parts < 6 then
                     seen[key] = true
-                    table.insert(parts, r.name .. " " .. r.value)
+                    table.insert(parts, (star and "⭐" or "") .. r.name .. " " .. r.value)
                 end
             end
+            for _, r in ipairs(rows) do
+                local n = r.name:lower()
+                if n == cropKey or (n .. "s") == cropKey or n == cropKey:gsub("s$", "") then
+                    add(r, true)
+                end
+            end
+            for _, r in ipairs(rows) do add(r, false) end
             priceStatus.Text = "💰 " .. table.concat(parts, " · ")
         else
             priceStatus.Text = "💰 price board not loaded — walk near the stores"

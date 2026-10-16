@@ -73,9 +73,20 @@ local ok, err = pcall(function()
     ------------------------------------------------------------------
     w("SPUD DUMP — Farming and Friends structure report")
     w("placeId: " .. tostring(game.PlaceId) .. "   jobId: " .. tostring(game.JobId))
-    w("player: " .. LocalPlayer.Name .. "   pos: " ..
-        (LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("HumanoidRootPart")
-            and tostring(LocalPlayer.Character.HumanoidRootPart.Position) or "?"))
+    local ch = LocalPlayer.Character
+    local hrp = ch and ch:FindFirstChildOfClass("HumanoidRootPart")
+    w("player: " .. LocalPlayer.Name .. "   pos: " .. (hrp and tostring(hrp.Position) or "?"))
+    w("character diagnostics:")
+    w("  LocalPlayer.Character = " .. tostring(ch))
+    if ch then
+        w("  character parent = " .. tostring(ch.Parent) .. "  children = " .. #ch:GetChildren()
+            .. "  has HRP = " .. tostring(hrp ~= nil))
+        local hum = ch:FindFirstChildOfClass("Humanoid")
+        w("  humanoid = " .. tostring(hum) .. (hum and ("  state=" .. tostring(hum:GetState())) or ""))
+    end
+    local wsMe = Workspace:FindFirstChild(LocalPlayer.Name)
+    w("  workspace self-model = " .. tostring(wsMe)
+        .. (wsMe and ("  HRP=" .. tostring(wsMe:FindFirstChild("HumanoidRootPart") ~= nil)) or ""))
     if identifyexecutor then
         pcall(function() w("executor: " .. tostring(identifyexecutor())) end)
     end
@@ -104,27 +115,49 @@ local ok, err = pcall(function()
     end
 
     ------------------------------------------------------------------
-    -- 2. PROXIMITY PROMPTS (deduped — this is the gold mine)
+    -- 2. PROXIMITY PROMPTS + CLICK DETECTORS (WHOLE GAME, not just
+    --    workspace — two runs found 0 prompts in workspace, so check
+    --    ReplicatedStorage/PlayerGui/StarterGui too)
     ------------------------------------------------------------------
-    header("PROXIMITY PROMPTS  (ActionText | ObjectText  ×count  path)")
-    local prompts = {}
-    for _, o in ipairs(desc) do
+    header("PROMPTS + CLICK DETECTORS (whole-game scan)")
+    local prompts, clicks = {}, {}
+    local gdesc = game:GetDescendants()
+    for _, o in ipairs(gdesc) do
         if o:IsA("ProximityPrompt") then
             local key = tostring(o.ActionText) .. " | " .. tostring(o.ObjectText)
             local e = prompts[key]
             if e then
                 e.count += 1
             else
-                prompts[key] = { count = 1, path = pathOf(o.Parent, 5) }
+                prompts[key] = { count = 1, path = pathOf(o.Parent, 6) }
+            end
+        elseif o:IsA("ClickDetector") then
+            local e = clicks[o.Name]
+            if e then
+                e.count += 1
+            else
+                clicks[o.Name] = { count = 1, path = pathOf(o.Parent, 6) }
             end
         end
     end
+    w("  scanned instances: " .. #gdesc)
     local keys = {}
     for k in pairs(prompts) do keys[#keys + 1] = k end
     table.sort(keys)
+    if #keys == 0 then
+        w("  ProximityPrompts: NONE ANYWHERE (game uses custom menu/key interactions)")
+    end
     for _, k in ipairs(keys) do
         local e = prompts[k]
-        w("  \"" .. k .. "\"  ×" .. e.count .. "  @ " .. e.path)
+        w("  PROMPT \"" .. k .. "\"  ×" .. e.count .. "  @ " .. e.path)
+    end
+    local ckeys = {}
+    for k in pairs(clicks) do ckeys[#ckeys + 1] = k end
+    table.sort(ckeys)
+    if #ckeys == 0 then w("  ClickDetectors: NONE") end
+    for _, k in ipairs(ckeys) do
+        local e = clicks[k]
+        w("  CLICK  \"" .. k .. "\"  ×" .. e.count .. "  @ " .. e.path)
     end
 
     ------------------------------------------------------------------
@@ -435,6 +468,12 @@ local ok, err = pcall(function()
                             extra = "  visible=" .. tostring(c.Visible)
                                 .. "  bgTransp=" .. tostring(c.BackgroundTransparency)
                         end
+                        if c:IsA("TextLabel") then
+                            -- color reveals which tier (High/Low) is currently active
+                            local col = c.TextColor3
+                            extra = extra .. string.format("  textColor=%.2f,%.2f,%.2f",
+                                col.R, col.G, col.B)
+                        end
                         w("    - " .. c.Name .. " [" .. c.ClassName .. "]" .. extra)
                     end
                 end
@@ -469,6 +508,129 @@ local ok, err = pcall(function()
         end
     else
         w("  (no GuiViews)")
+    end
+
+    ------------------------------------------------------------------
+    -- 16. ANIMAL MENU — the FULL interaction button list
+    --     (menu replaces ProximityPrompts: cow click → menu → buttons)
+    ------------------------------------------------------------------
+    header("ANIMAL MENU BUTTONS (full interaction list)")
+    local foundMenu = false
+    if pGui then
+        for _, o in ipairs(pGui:GetDescendants()) do
+            if o.Name == "AnimalInteractionMenu" then
+                foundMenu = true
+                w("  menu @ " .. pathOf(o, 6))
+                local list = o:FindFirstChild("InteractionsList", true)
+                if list then
+                    w("  interaction buttons:")
+                    for _, b in ipairs(list:GetChildren()) do
+                        if b:IsA("GuiButton") then
+                            local t = ""
+                            local tt = b:FindFirstChild("temp_text", true)
+                            if tt and tt:IsA("TextLabel") then t = tostring(tt.Text) end
+                            w("    - " .. b.Name .. "  text=\"" .. t .. "\"")
+                        end
+                    end
+                else
+                    w("  (no InteractionsList inside)")
+                end
+                break
+            end
+        end
+    end
+    if not foundMenu then
+        w("  (menu not in PlayerGui — click a COW once, then re-run this script)")
+    end
+
+    ------------------------------------------------------------------
+    -- 17. COIN / MONEY DISPLAY HUNT (fixes getCoins)
+    ------------------------------------------------------------------
+    header("COIN / MONEY DISPLAY HUNT")
+    if pGui then
+        local hits = 0
+        for _, o in ipairs(pGui:GetDescendants()) do
+            if hits >= 60 then w("  … cap reached"); break end
+            local n = o.Name:lower()
+            if n:find("coin", 1, true) or n:find("cash", 1, true) or n:find("money", 1, true)
+                or n:find("balance", 1, true) or n:find("dollar", 1, true)
+                or n:find("wealth", 1, true) or n:find("bank", 1, true) then
+                local line = "  " .. o.Name .. " [" .. o.ClassName .. "]  @ " .. pathOf(o, 6)
+                if o:IsA("ValueBase") then
+                    line = line .. " = " .. tostring(o.Value)
+                elseif o:IsA("GuiObject") and (o:IsA("TextLabel") or o:IsA("TextButton")) then
+                    line = line .. "  text=\"" .. tostring(o.Text) .. "\""
+                end
+                w(line)
+                hits += 1
+            end
+        end
+        if hits == 0 then w("  (nothing named coin/cash/money… in PlayerGui)") end
+        -- every HUD text label (the coin counter lives in here somewhere)
+        local hud = gv and gv:FindFirstChild("HUD")
+        if hud then
+            w("  HUD text labels:")
+            for _, o in ipairs(hud:GetDescendants()) do
+                if o:IsA("GuiObject") and o:IsA("TextLabel") and o.Text ~= "" then
+                    w("    " .. o.Name .. " = \"" .. tostring(o.Text) .. "\"  @ " .. pathOf(o, 6))
+                end
+            end
+        end
+    end
+
+    ------------------------------------------------------------------
+    -- 18. SEEDBOX DEEP (how the crop TYPE is stored inside a seed box)
+    ------------------------------------------------------------------
+    header("SEEDBOX / DRAGGABLE DEEP")
+    local dobjs = objects and objects:FindFirstChild("DraggableObjects")
+    if dobjs then
+        local shown = 0
+        for _, m in ipairs(dobjs:GetChildren()) do
+            if (m.Name == "SeedBox" or m.Name == "AnimalFoodBox") and shown < 4 then
+                shown += 1
+                w("  " .. m.Name .. " #" .. shown .. "  @ " .. pathOf(m, 4))
+                for k, v in pairs(m:GetAttributes()) do
+                    w("    attr." .. tostring(k) .. " = " .. tostring(v))
+                end
+                local dshown = 0
+                for _, d in ipairs(m:GetDescendants()) do
+                    if dshown >= 30 then w("    … more"); break end
+                    local line = "    - " .. d.Name .. " [" .. d.ClassName .. "]"
+                    if d:IsA("ValueBase") then
+                        line = line .. " = " .. tostring(d.Value)
+                    elseif d:IsA("GuiObject") and (d:IsA("TextLabel") or d:IsA("TextButton")) then
+                        line = line .. "  text=\"" .. tostring(d.Text) .. "\""
+                    end
+                    w(line)
+                    dshown += 1
+                end
+            end
+        end
+        if shown == 0 then w("  (no SeedBox/AnimalFoodBox in DraggableObjects)") end
+    else
+        w("  (no DraggableObjects)")
+    end
+
+    ------------------------------------------------------------------
+    -- 19. PLOT CONFIGURATION (my plot's stored state)
+    ------------------------------------------------------------------
+    header("PLOT CONFIGURATION (my plot state)")
+    if myPlot then
+        local cfg = myPlot:FindFirstChild("Configurations")
+        if cfg then
+            for k, v in pairs(cfg:GetAttributes()) do
+                w("  attr." .. tostring(k) .. " = " .. tostring(v))
+            end
+            for _, d in ipairs(cfg:GetDescendants()) do
+                local line = "  - " .. d.Name .. " [" .. d.ClassName .. "]"
+                if d:IsA("ValueBase") then line = line .. " = " .. tostring(d.Value) end
+                w(line)
+            end
+        else
+            w("  (no Configurations child in plot)")
+        end
+    else
+        w("  (no myPlot)")
     end
 end)
 
