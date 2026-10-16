@@ -31,7 +31,9 @@
        • Walkspeed/Jump clamped to human-ish caps while Stealth is ON
        • NoClip auto-disables while Stealth is ON (walking through walls
          triggers the HumanoidState "StrafingNoPhysics" check in many games)
-       • All interactions go through real ProximityPrompts + E-key input
+       • All interactions go through the game's OWN context-key system
+          (zero ProximityPrompts exist in this game — dump-confirmed:
+          stand in range, press the bound key E/X/V/F like a player)
          (the server sees exactly what a real player press produces; no
          RemoteEvent guessing = no honeypot risk)
 
@@ -398,9 +400,19 @@ task.spawn(function()
     end
 end)
 
--- best-effort coin balance (for profit notes in webhook logs)
+-- coin balance for profit notes in webhook logs.
+-- dump-confirmed: coins live in the HUD balance label
+-- (GuiViews.HUD.MainHUD.TopRightBar.CoinsDisplay.Contents.Balance.Text)
 local LastCoins = nil
 local function getCoins()
+    local pGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    if pGui then
+        local bal = pGui:FindFirstChild("Balance", true)
+        if bal and bal:IsA("GuiObject") then
+            local v = tonumber((tostring(bal.Text):gsub(",", "")))
+            if v then return v end
+        end
+    end
     local function tryValue(v)
         if v and v:IsA("ValueBase") and typeof(v.Value) == "number" then
             return v.Value
@@ -600,28 +612,29 @@ local function pressKey(keyName)
     end
 end
 
--- trigger the nearest ProximityPrompt on/around a part
--- (server sees a normal prompt activation — same as a real E press)
-local function interactWith(part)
+-- interact with a world object. This game has NO ProximityPrompts at all
+-- (dump: 0 in 112,531 instances) — it uses a context-key system: stand in
+-- range and press the bound key (dump-confirmed binds: E interact/carry/
+-- lever/take-from-output, X hitch/drop/place-onto-input, V fill/shear/
+-- spindle-deposit, F drive/talk, R pour). So: walk to the target and press
+-- the caller's key (default E). A real prompt is still checked first so the
+-- script keeps working if a future update adds prompts.
+local function interactWith(part, key)
     if not part then return false end
     local prompt = part:FindFirstChildWhichIsA("ProximityPrompt", true)
-    if not prompt then
-        for _, obj in ipairs(Workspace:GetDescendants()) do
-            if obj:IsA("ProximityPrompt") and (obj.WorldCFrame.Position - part.Position).Magnitude <= 12 then
-                prompt = obj
-                break
-            end
-        end
-    end
     if prompt then
         driveTo(prompt.WorldCFrame.Position, 3)
         hwait(0.5)
-        prompt.MaxActivationDistance = 25
+        pcall(function() prompt.MaxActivationDistance = 25 end)
         pressKey("E")
         hwait(0.3)
         return true
     end
-    return false
+    driveTo(part.Position, 3)
+    hwait(0.5)
+    pressKey(key or "E")
+    hwait(0.4)
+    return true
 end
 
 local function getTool(name)
@@ -660,16 +673,19 @@ local function activate(name, duration)
     return false
 end
 
--- teleport-touch drops matching a name, up to `count`
+-- walk to drops matching a name and pick them up (context: Carry = E)
 local function collectDrops(substring, maxDist, count)
     if not RootPart then return 0 end
     local taken = 0
     for _, item in ipairs(findAll(substring, maxDist or 800)) do
         if taken >= (count or 10) then break end
-        if item.part and item.part.Parent then
+        -- skip spawn markers (e.g. "EggSpawn" parts are not the eggs)
+        if item.part and item.part.Parent and not item.part.Name:lower():find("spawn", 1, true) then
             driveTo(item.part.Position, 2)
-            taken += 1
             hwait(0.35)
+            pressKey("E")
+            taken += 1
+            hwait(0.45)
         end
     end
     return taken
@@ -694,21 +710,22 @@ local function sellAt(shopName, keyOverride)
     return true
 end
 
--- pull every factory lever in sequence (chocolate milk / cake factories)
+-- pull every factory lever in sequence (chocolate milk / cake factories).
+-- No prompts exist — levers are world parts; stand next to one and press E
+-- (game's own PullFactoryLever context bind, dump-confirmed).
 local function pullLevers(factoryPart, maxPulls)
+    local levers = findAll(CONFIG.leverPrompt, 250)
+    if #levers == 0 then
+        log("no lever parts found (" .. tostring(CONFIG.leverPrompt) .. ") — factory not built?")
+        return 0
+    end
+    log("found " .. #levers .. " lever part(s), pulling…")
     local pulled = 0
-    for _ = 1, (maxPulls or 8) do
-        local bestPrompt, bestDist = nil, math.huge
-        for _, obj in ipairs(Workspace:GetDescendants()) do
-            if obj:IsA("ProximityPrompt") and nameMatch(obj, CONFIG.leverPrompt) then
-                local d = (obj.WorldCFrame.Position - factoryPart.Position).Magnitude
-                if d < 120 and d < bestDist then bestPrompt, bestDist = obj, d end
-            end
-        end
-        if not bestPrompt then break end
-        driveTo(bestPrompt.WorldCFrame.Position, 3)
+    local limit = maxPulls or 8
+    for i = 1, limit do
+        local lever = levers[((i - 1) % #levers) + 1]
+        driveTo(lever.part.Position, 3)
         hwait(0.9)
-        bestPrompt.MaxActivationDistance = 25
         pressKey("E")
         pulled += 1
         hwait(3.0) -- levers take a few seconds each, like a player pulling them
@@ -738,29 +755,46 @@ local function readSellBoards()
     return rows
 end
 
+-- find a named piece of equipment (models in Objects.Equipment first —
+-- equipment models are named like "KQF3000" but their child parts are not)
+local function findEquipmentModel(name)
+    local eqRoot = Workspace:FindFirstChild("Objects")
+    local eq = eqRoot and eqRoot:FindFirstChild("Equipment")
+    if eq then
+        for _, v in ipairs(eq:GetChildren()) do
+            if nameMatch(v, name) then return v end
+        end
+    end
+    return nearest(name, 5000)
+end
+
+-- get into a vehicle seat. First the game's OWN way: context action
+-- EnterEquipment = F (dump-confirmed), then weld fallbacks for executors.
+local function enterSeat(seat)
+    if Humanoid and Humanoid.SeatPart then return true end
+    driveTo(seat.Position, 3)
+    hwait(0.5)
+    pressKey("F")
+    hwait(1.2)
+    if Humanoid and Humanoid.SeatPart then return true end
+    try(function() seat:Sit(Humanoid) end)
+    hwait(0.6)
+    if Humanoid and Humanoid.SeatPart then return true end
+    try(function() Humanoid:Sit(seat) end)
+    hwait(0.6)
+    return Humanoid and Humanoid.SeatPart ~= nil
+end
+
 -- sit in the tractor (needed for field sweeps to move the vehicle)
 local function sitTractor()
     if Humanoid and Humanoid.SeatPart then return true end
-    -- equipment (incl. tractors) lives in Objects.Equipment (confirmed by dump)
-    local eqRoot = Workspace:FindFirstChild("Objects")
-    local eq = eqRoot and eqRoot:FindFirstChild("Equipment")
-    local tractor
-    if eq then
-        for _, v in ipairs(eq:GetChildren()) do
-            if nameMatch(v, CONFIG.tractorName) then tractor = v break end
-        end
-    end
-    tractor = tractor or nearest(CONFIG.tractorName, 5000)
+    local tractor = findEquipmentModel(CONFIG.tractorName)
     if not tractor then return false end
     local vehicle = tractor:FindFirstAncestorOfClass("Model") or tractor
     local seat = vehicle:FindFirstChildWhichIsA("VehicleSeat", true)
         or vehicle:FindFirstChildWhichIsA("Seat", true)
     if not seat then return false end
-    driveTo(seat.Position, 2)
-    hwait(0.5)
-    try(function() Humanoid:Sit(seat) end)
-    hwait(0.8)
-    return Humanoid and Humanoid.SeatPart ~= nil
+    return enterSeat(seat)
 end
 
 -- sit inside a named piece of equipment (e.g. the SRC6 combine for HARVEST —
@@ -768,24 +802,12 @@ end
 local function sitInEquipment(name)
     if Humanoid and Humanoid.SeatPart then return true end
     if not name then return false end
-    local eqRoot = Workspace:FindFirstChild("Objects")
-    local eq = eqRoot and eqRoot:FindFirstChild("Equipment")
-    local model
-    if eq then
-        for _, v in ipairs(eq:GetChildren()) do
-            if nameMatch(v, name) then model = v break end
-        end
-    end
-    model = model or nearest(name, 5000)
+    local model = findEquipmentModel(name)
     if not model then return false end
     local seat = model:FindFirstChildWhichIsA("VehicleSeat", true)
         or model:FindFirstChildWhichIsA("Seat", true)
     if not seat then return false end
-    driveTo(seat.Position, 2)
-    hwait(0.5)
-    try(function() Humanoid:Sit(seat) end)
-    hwait(0.8)
-    return Humanoid and Humanoid.SeatPart ~= nil
+    return enterSeat(seat)
 end
 
 -- find MY farm plot: Workspace.Plots.<n> whose PlotBillboard.Owner reads
@@ -808,15 +830,24 @@ local function findMyPlot()
     return nil
 end
 
--- hitch a nearby implement to the tractor (back up + E, like a player)
+-- hitch an implement to the tractor. Dump-confirmed: the game's context
+-- action "Hitch" is bound to X (no prompts exist), and the implement's
+-- hitch point is a part named Hitch/HitchRoot.
 local function hitchTo(implementName)
-    local imp = nearest(implementName, 5000)
+    local imp = findEquipmentModel(implementName)
     if not imp then log("implement not found: " .. tostring(implementName)) return false end
-    driveTo(imp.Position, 4)
-    hwait(0.8)
-    if not interactWith(imp) then
-        pressKey("E") -- hitch prompt may not be a named ProximityPrompt
+    local aimPos
+    if imp:IsA("Model") then
+        local h = imp:FindFirstChild("HitchRoot", true) or imp:FindFirstChild("Hitch", true)
+        aimPos = h and h.Position or imp:GetPivot().Position
+    else
+        aimPos = imp.Position
     end
+    driveTo(aimPos, 4)
+    hwait(0.8)
+    pressKey("X")   -- Hitch
+    hwait(0.6)
+    pressKey("X")   -- again in case range synced late
     hwait(1.0)
     return true
 end
@@ -855,48 +886,58 @@ local function cropNameCandidates(crop)
     return out
 end
 
--- load the chosen crop's seeds before planting:
--- 1) a seed/load prompt mentioning the crop, 2) a seed tool in the backpack
+-- load the chosen crop's seeds before planting.
+-- dump-confirmed: seed boxes are Objects.DraggableObjects.SeedBox models
+-- whose Configurations.SeedType (StringValue) names the crop ("Corn").
+-- Chain: carry the box (context E) → walk it to the planter/seeder →
+-- press V (game's FillSeeder bind) → drop anything left (X).
 local function loadSeeds()
     local crop = CONFIG.crop
     if not crop or crop == "Custom" then return end
     local cands = cropNameCandidates(crop)
-    local primary, backup
-    for _, p in ipairs(Workspace:GetDescendants()) do
-        if p:IsA("ProximityPrompt") then
-            local txt = (tostring(p.ActionText or "") .. " " .. tostring(p.ObjectText or "")):lower()
-            local hitCrop
-            for _, cand in ipairs(cands) do
-                if txt:find(cand:lower(), 1, true) then hitCrop = true break end
-            end
-            if hitCrop then
-                local seedish = txt:find("seed", 1, true) or txt:find("load", 1, true) or txt:find("plant", 1, true)
-                if seedish then primary = p; break end
-                backup = backup or p
+    local box, seedType
+    local dobjs = Workspace:FindFirstChild("Objects")
+    dobjs = dobjs and dobjs:FindFirstChild("DraggableObjects")
+    if dobjs then
+        for _, m in ipairs(dobjs:GetChildren()) do
+            if m.Name == "SeedBox" then
+                local cfg = m:FindFirstChild("Configurations", true)
+                local st = cfg and cfg:FindFirstChild("SeedType")
+                local t = (st and st:IsA("StringValue")) and st.Value or nil
+                if t then
+                    for _, cand in ipairs(cands) do
+                        if t:lower() == cand:lower() then box, seedType = m, t break end
+                    end
+                end
+                if box then break end
             end
         end
     end
-    local prompt = primary or backup
-    if prompt then
-        driveTo(prompt.WorldCFrame.Position, 3)
-        hwait(0.6)
-        prompt.MaxActivationDistance = 25
-        pressKey("E")
+    if not box then
+        log("no SeedBox with SeedType for " .. crop .. " — buy one at FarmCo (seeds are sold per-box)")
+        return false
+    end
+    -- carry the box (context: Carry = E)
+    local boxPos = box:IsA("Model") and box:GetPivot().Position or box.Position
+    driveTo(boxPos, 3)
+    hwait(0.8)
+    pressKey("E")
+    hwait(1.0)
+    -- take it to the planter/seeder and fill (context: Fill = V)
+    local seeder = findEquipmentModel(CONFIG.plantTool) or findEquipmentModel("KADL")
+    if seeder then
+        local sp = seeder:IsA("Model") and seeder:GetPivot().Position or seeder.Position
+        driveTo(sp, 4)
+        hwait(0.8)
+        pressKey("V")   -- FillSeeder (dump-confirmed bind)
         hwait(1.0)
-        log("seed prompt used: " .. tostring(prompt.ActionText or prompt.ObjectText))
-        return
+    else
+        log("no seeder equipment found to fill (KQF3000 / KADL)")
     end
-    for _, cand in ipairs(cands) do
-        for _, suffix in ipairs({ "", " Seed", " Seeds" }) do
-            local tool = getTool(cand .. suffix)
-            if tool then
-                if not Humanoid or not Humanoid.SeatPart then equip(tool) end
-                log("seeds loaded from: " .. tool.Name)
-                return
-            end
-        end
-    end
-    log("no seed loader found for " .. crop .. " — load it once manually (in-game names may differ; commas = name guesses)")
+    pressKey("X")   -- drop the box if still held
+    hwait(0.3)
+    log("seeder fill attempted with " .. tostring(seedType) .. " seed box")
+    return true
 end
 
 -- best-effort sweep: hitch the stage's implement, then drive the tractor
@@ -1040,7 +1081,8 @@ Presets.register("Chocolate Milk", function()
     if Active.stop then return end
     log("[CM] 2/8 depositing milk on the factory platform")
     local mPad = nearest(C.milkDeposit, 2000)
-    if mPad then driveTo(mPad.Position); hwait(1.0); interactWith(mPad) end
+    -- deposit onto the factory input = context key X (dump-confirmed)
+    if mPad then driveTo(mPad.Position); hwait(1.0); interactWith(mPad, "X") end
 
     if Active.stop then return end
     log("[CM] 3/8 harvesting cocoa")
@@ -1053,7 +1095,7 @@ Presets.register("Chocolate Milk", function()
     if Active.stop then return end
     log("[CM] 4/8 depositing cocoa")
     local cPad = nearest(C.cocoaDeposit, 2000)
-    if cPad then driveTo(cPad.Position); hwait(1.0); interactWith(cPad) end
+    if cPad then driveTo(cPad.Position); hwait(1.0); interactWith(cPad, "X") end
 
     if Active.stop then return end
     log("[CM] 5/8 pulling factory levers")
@@ -1115,11 +1157,11 @@ Presets.register("Cake & Eggs", function()
     if Active.stop then return end
     log("[Cake] 3/7 depositing ingredients (wheat + milk left side, eggs on conveyor)")
     local wPad = nearest(C.wheatDeposit, 2000)
-    if wPad then driveTo(wPad.Position); hwait(1.0); interactWith(wPad) end
+    if wPad then driveTo(wPad.Position); hwait(1.0); interactWith(wPad, "X") end
     local mPad = nearest(C.milkDeposit, 2000)
-    if mPad then driveTo(mPad.Position); hwait(1.0); interactWith(mPad) end
+    if mPad then driveTo(mPad.Position); hwait(1.0); interactWith(mPad, "X") end
     local ePad = nearest(C.eggDeposit, 2000)
-    if ePad then driveTo(ePad.Position); hwait(1.0); interactWith(ePad) end
+    if ePad then driveTo(ePad.Position); hwait(1.0); interactWith(ePad, "X") end
 
     if Active.stop then return end
     log("[Cake] 4/7 pulling factory levers (right → opposite → below belt → upstairs)")
@@ -1141,7 +1183,7 @@ Presets.register("Cake & Eggs", function()
     if oven then
         driveTo(oven.Position, 3)
         hwait(1.0)
-        interactWith(oven)
+        interactWith(oven, "X") -- PlaceInMachine = X (dump-confirmed)
     end
     local baked = 0
     while baked < C.bakeWait and not Active.stop do
@@ -1178,7 +1220,9 @@ Presets.register("Wool Run", function()
                 try(function() t:Deactivate() end)
             end
         else
-            interactWith(s.part)
+            -- UseShears = V (dump-confirmed). V without shears held is a
+            -- safe no-op — unlike E, which could carry the sheep away.
+            interactWith(s.part, "V")
         end
     end
     collectDrops(C.woolDrop, 800, 20)
@@ -1191,7 +1235,8 @@ Presets.register("Wool Run", function()
             if Active.stop then return end
             driveTo(spindel.Position, 3)
             hwait(1.0)
-            if not interactWith(spindel) then break end -- no prompt = no wool left
+            -- Spindle.Deposit = V (dump-confirmed); loop is bounded to 3
+            interactWith(spindel, "V")
             hwait(1.5)
         end
     end

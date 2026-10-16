@@ -74,8 +74,12 @@ local ok, err = pcall(function()
     w("SPUD DUMP — Farming and Friends structure report")
     w("placeId: " .. tostring(game.PlaceId) .. "   jobId: " .. tostring(game.JobId))
     local ch = LocalPlayer.Character
-    local hrp = ch and ch:FindFirstChildOfClass("HumanoidRootPart")
-    w("player: " .. LocalPlayer.Name .. "   pos: " .. (hrp and tostring(hrp.Position) or "?"))
+    -- NOTE: HRP's ClassName is "Part" — must look up BY NAME, not class
+    local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+    w("player: " .. LocalPlayer.Name .. "   pos: " .. (hrp and tostring(hrp.Position) or "?")
+        .. (hrp and ("   hrpClass=" .. hrp.ClassName) or ""))
+    local ct = ch and ch:FindFirstChild("CurrentTool")
+    w("  CurrentTool = " .. tostring(ct and ct.Value or nil))
     w("character diagnostics:")
     w("  LocalPlayer.Character = " .. tostring(ch))
     if ch then
@@ -541,6 +545,63 @@ local ok, err = pcall(function()
     end
     if not foundMenu then
         w("  (menu not in PlayerGui — click a COW once, then re-run this script)")
+    end
+
+    ------------------------------------------------------------------
+    -- 16b. CONTEXT ACTIONS — what the game will accept RIGHT NOW.
+    --      Billboards mirror each action; Enabled=TRUE means the action
+    --      is in range at the player's current spot. Stand next to a cow
+    --      (or lever / coop / seeder) with production full, then dump.
+    ------------------------------------------------------------------
+    header("CONTEXT ACTIONS (HUD.PCGP_ContextActions — Enabled = active here)")
+    local cpa = pGui and pGui:FindFirstChild("GuiViews")
+        and pGui.GuiViews:FindFirstChild("HUD")
+        and pGui.GuiViews.HUD:FindFirstChild("MainHUD")
+    cpa = cpa and cpa:FindFirstChild("PCGP_ContextActions")
+        or (pGui and pGui:FindFirstChild("GuiViews")
+            and pGui.GuiViews:FindFirstChild("HUD")
+            and pGui.GuiViews.HUD:FindFirstChild("PCGP_ContextActions"))
+    if cpa then
+        local bills = cpa:FindFirstChild("Billboards")
+        if bills then
+            w("  billboards (Enabled = context active at player pos):")
+            local act = 0
+            for _, b in ipairs(bills:GetChildren()) do
+                if b:IsA("GuiBase2d") then
+                    local e = (b:IsA("GuiObject") and b.Enabled) or false
+                    if e then act += 1 end
+                    w("    - " .. b.Name .. "  Enabled=" .. tostring(e)
+                        .. (e and "  <== ACTIVE HERE" or ""))
+                end
+            end
+            w("  active count: " .. act)
+        else
+            w("  (no Billboards folder)")
+        end
+        local btns = cpa:FindFirstChild("Buttons")
+        if btns then
+            w("  button templates (Bind):")
+            local n = 0
+            local function listBtns(folder, depth)
+                for _, b in ipairs(folder:GetChildren()) do
+                    if n >= 120 then return end
+                    if b:IsA("GuiObject") then
+                        local bind, label = "", ""
+                        local bd = b:FindFirstChild("Bind")
+                        if bd then bind = tostring(bd.Text or bd.Value or "") end
+                        local al = b:FindFirstChild("ActionLabel")
+                        if al then label = tostring(al.Text or "") end
+                        local vis = (b.Visible and b:IsA("GuiObject")) and "visible" or "hidden"
+                        w("      " .. b.Name .. "  bind=" .. bind .. "  label=" .. label .. "  (" .. vis .. ")")
+                        n += 1
+                    end
+                    if b:IsA("Folder") and depth < 2 then listBtns(b, depth + 1) end
+                end
+            end
+            listBtns(btns, 0)
+        end
+    else
+        w("  (PCGP_ContextActions not found in PlayerGui)")
     end
 
     ------------------------------------------------------------------
