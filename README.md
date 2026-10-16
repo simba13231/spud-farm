@@ -19,14 +19,16 @@ Everything merged into one paste-and-run file:
   Carrots, Potatoes, Cocoa, **Grape**, Custom) with auto set grow-time from wiki data,
   a **live crop info line** (grow time · seed cost/box · avg $/hr · equipment
   requirements · price-rotation tip), auto seed-loading during PLANT, Auto-Sell,
-  Grow time slider, Skip Stage / Reset buttons, live status line
+  Grow time slider, Skip Stage / Reset buttons, live status line,
+  **live sell-price readout** (reads the in-game SellValueBoards every 3s)
 - **Presets tab** — Chocolate Milk (milk cows → deposit → cocoa → levers → collect → sell),
   Cake & Eggs (**7 steps**: eggs → milk → wheat/milk/egg deposits → 4 levers →
   **batter → oven bake** → collect + sell), Wool Run (shear → spindel bundles,
   5 wool each → sell); LOOP toggle, STOP button
 - **Player tab** — walkspeed, jump power, infinite jump, noclip, anti-AFK, FPS boost
 - **Teleport tab** — Ctrl+Click teleport + FarmCo / AnimalCo / TractorCo / LumberCo /
-  WoodNStuff / One-Stop / Factory / Spawn buttons (2026 central-town map layout)
+  Bulk Store / Warehouse / **My Farm** (resolves your plot by its "Your Farm"
+  billboard) / Spawn buttons (2026 central-town map, part names from in-game dump)
 - **Stealth tab** — detection-risk reduction (see below)
 - **Settings tab** — Movement mode (**VFly** = fast BodyVelocity fly + snap teleport,
   **Tween** = slow safe glide) + vfly speed slider; fix in-game names (cow, milker, shop,
@@ -86,6 +88,16 @@ Generic crop-plot script (attribute/remote auto-detection). Kept as a fallback;
 
 ### `spud-gui-preview.html` — GUI preview
 Interactive browser preview of the GUI look/feel — open it in any browser.
+
+### `SpudDump.lua` — in-game structure scraper (read-only)
+Run it **in game** (MuMu + Delta supported) to build a text report of the live game
+structure: proximity prompts, tools, your plot's tiles, equipment names, NPCs,
+vehicles, remotes, signs and the **live sell-price boards**. It sends nothing
+anywhere by itself — it uploads the report to a random unlisted paste link,
+prints the link and copies it to your clipboard. Roblox streams objects in
+near you, so run it twice: once **in town** (zoomed out) and once **at your
+farm standing among your fields/animals/barn**, then send both links back so
+guessed names in `CONFIG` can be replaced with real ones.
 
 ## Contributing / fixing names
 Found a wrong in-game name after a game update? Open an issue (or PR) with the

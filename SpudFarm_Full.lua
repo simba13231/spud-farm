@@ -128,7 +128,7 @@ local CONFIG = {
     shopName      = "FarmCo",        -- crop sell store
     sellKey       = "Q",             -- Q opens sell menu on the platform
     confirmKey    = "E",             -- E confirms the sell popup
-    sellPlatformNames = { "Platform", "SellPlatform", "Sell Pad", "SellPad" },
+    sellPlatformNames = { "Platform", "LoadInPlatform", "SellBoard", "SellPlatform", "Sell Pad", "SellPad" },
     leverPrompt   = "Lever",         -- factory interior levers
 
     -- What the farm cycle plants (set from the Farm tab crop dropdown)
@@ -179,8 +179,8 @@ local CONFIG = {
     -- happiness < 60%) cannot be used. Both drop on the elevated platform.
     presets = {
         chocolateMilk = {
-            cowName        = "Cow",
-            milkerTool     = "Milker",
+            cowName        = "Cow",              -- confirmed: models named "Cow"
+            milkerTool     = "Milker, Stall, Barn, Udder",  -- barn stalls = "Adornee_BarnStallMenu" (dump)
             milkDrop       = "Milk",
             factoryName    = "Chocolate Milk",
             milkDeposit    = "Milk",
@@ -228,16 +228,16 @@ local CONFIG = {
     },
 
     -- Teleport destinations (substrings, first match wins).
-    -- 2026 map: FarmCo / AnimalCo / LumberCo / TractorCo cluster on the
-    -- central roundabout; a one-stop sell point takes mixed loads.
+    -- Names confirmed by in-game dump (2026 map): store parts are literally
+    -- named VehicleStore / LumberStore / BulkStore / AnimalCo / AnimalCoDrive.
     teleports = {
-        { label = "FarmCo",     names = { "FarmCo", "Farm Co" } },
-        { label = "AnimalCo",   names = { "AnimalCo", "Animal Co", "Animal Store" } },
-        { label = "TractorCo",  names = { "TractorCo", "Vehicle Store", "VehicleStore" } },
-        { label = "LumberCo",   names = { "LumberCo", "Lumber Co" } },
-        { label = "WoodNStuff", names = { "WoodNStuff", "Wood N Stuff", "Wood" } },
-        { label = "One-Stop",   names = { "OneStop", "One Stop", "SellPoint", "Sell Point", "SellAll" } },
-        { label = "Factory",    names = { "Chocolate Milk", "Cake Factory", "Factory" } },
+        { label = "FarmCo",     names = { "FarmCo", "SellBoardSeeds", "Farm Co" } },
+        { label = "AnimalCo",   names = { "AnimalCo", "AnimalCoDrive", "Animal Co" } },
+        { label = "TractorCo",  names = { "VehicleStore", "TractorCo", "Vehicle Store" } },
+        { label = "LumberCo",   names = { "LumberStore", "LumberCo", "Lumber Co" } },
+        { label = "Bulk Store", names = { "BulkStore", "OneStop", "One Stop", "SellPoint" } },
+        { label = "Warehouse",  names = { "Warehouse", "CompanyArea" } },
+        { label = "My Farm",    names = { "PlotBillboard", "FrontPlot" } },
         { label = "Spawn",      names = { "SpawnLocation", "SpawnPoint", "Spawn" } },
     },
 }
@@ -716,10 +716,41 @@ local function pullLevers(factoryPart, maxPulls)
     return pulled
 end
 
+-- read the live sell-value boards (dump-confirmed: Stores.SellValueBoards
+-- → List rows with NameLabel + ValueLabel). Read-only, zero risk.
+local function readSellBoards()
+    local rows = {}
+    local stores = Workspace:FindFirstChild("Stores")
+    local sv = stores and stores:FindFirstChild("SellValueBoards")
+    if not sv then return rows end
+    for _, list in ipairs(sv:GetDescendants()) do
+        if list.Name == "List" and list:IsA("GuiObject") then
+            for _, row in ipairs(list:GetChildren()) do
+                local nl = row:FindFirstChild("NameLabel")
+                local vl = row:FindFirstChild("ValueLabel")
+                if nl and vl and nl:IsA("GuiObject") and vl:IsA("GuiObject")
+                    and nl.Text ~= "" and vl.Text ~= "" then
+                    table.insert(rows, { name = nl.Text, value = vl.Text })
+                end
+            end
+        end
+    end
+    return rows
+end
+
 -- sit in the tractor (needed for field sweeps to move the vehicle)
 local function sitTractor()
     if Humanoid and Humanoid.SeatPart then return true end
-    local tractor = nearest(CONFIG.tractorName, 5000)
+    -- equipment (incl. tractors) lives in Objects.Equipment (confirmed by dump)
+    local eqRoot = Workspace:FindFirstChild("Objects")
+    local eq = eqRoot and eqRoot:FindFirstChild("Equipment")
+    local tractor
+    if eq then
+        for _, v in ipairs(eq:GetChildren()) do
+            if nameMatch(v, CONFIG.tractorName) then tractor = v break end
+        end
+    end
+    tractor = tractor or nearest(CONFIG.tractorName, 5000)
     if not tractor then return false end
     local vehicle = tractor:FindFirstAncestorOfClass("Model") or tractor
     local seat = vehicle:FindFirstChildWhichIsA("VehicleSeat", true)
@@ -730,6 +761,51 @@ local function sitTractor()
     try(function() Humanoid:Sit(seat) end)
     hwait(0.8)
     return Humanoid and Humanoid.SeatPart ~= nil
+end
+
+-- sit inside a named piece of equipment (e.g. the SRC6 combine for HARVEST —
+-- combines are driven themselves, they are NOT hitched to the tractor)
+local function sitInEquipment(name)
+    if Humanoid and Humanoid.SeatPart then return true end
+    if not name then return false end
+    local eqRoot = Workspace:FindFirstChild("Objects")
+    local eq = eqRoot and eqRoot:FindFirstChild("Equipment")
+    local model
+    if eq then
+        for _, v in ipairs(eq:GetChildren()) do
+            if nameMatch(v, name) then model = v break end
+        end
+    end
+    model = model or nearest(name, 5000)
+    if not model then return false end
+    local seat = model:FindFirstChildWhichIsA("VehicleSeat", true)
+        or model:FindFirstChildWhichIsA("Seat", true)
+    if not seat then return false end
+    driveTo(seat.Position, 2)
+    hwait(0.5)
+    try(function() Humanoid:Sit(seat) end)
+    hwait(0.8)
+    return Humanoid and Humanoid.SeatPart ~= nil
+end
+
+-- find MY farm plot: Workspace.Plots.<n> whose PlotBillboard.Owner reads
+-- "Your Farm" (own plot) or my display name (dump-confirmed structure)
+local function findMyPlot()
+    local plots = Workspace:FindFirstChild("Plots")
+    if not plots then return nil end
+    for _, plot in ipairs(plots:GetChildren()) do
+        if plot:IsA("Model") then
+            local bb = plot:FindFirstChild("PlotBillboard")
+            local owner = bb and bb:FindFirstChild("Owner")
+            if owner and owner:IsA("TextLabel") then
+                local t = owner.Text
+                if t == "Your Farm" or t == LocalPlayer.DisplayName or t == LocalPlayer.Name then
+                    return plot
+                end
+            end
+        end
+    end
+    return nil
 end
 
 -- hitch a nearby implement to the tractor (back up + E, like a player)
@@ -824,15 +900,34 @@ local function loadSeeds()
 end
 
 -- best-effort sweep: hitch the stage's implement, then drive the tractor
--- over each field tile (implements work by proximity in this game)
+-- over each field tile (implements work by proximity in this game).
+-- HARVEST prefers sitting in the combine (SRC6) itself — combines are
+-- driven, not hitched. Tiles are searched inside MY plot first.
 local function sweepFields(stageName)
-    sitTractor()
-    local impl = stageImplement(stageName)
-    if impl then hitchTo(impl) end
+    local usedCombine = false
+    if stageName == "HARVEST" then
+        usedCombine = sitInEquipment(CONFIG.harvestTool)
+    end
+    if not usedCombine then
+        sitTractor()
+        local impl = stageImplement(stageName)
+        if impl and stageName ~= "HARVEST" then hitchTo(impl) end
+    end
     if stageName == "PLANT" then loadSeeds() end
+    local myPlot = findMyPlot()
+    if myPlot then log("sweeping plot " .. myPlot.Name .. " (\"Your Farm\")") end
     local hit = 0
     for _, name in ipairs(CONFIG.fieldNames) do
-        for _, item in ipairs(findAll(name, 4000)) do
+        local items = {}
+        if myPlot then
+            for _, v in ipairs(myPlot:GetDescendants()) do
+                if v:IsA("BasePart") and nameMatch(v, name) then
+                    table.insert(items, { part = v })
+                end
+            end
+        end
+        if #items == 0 then items = findAll(name, 4000) end
+        for _, item in ipairs(items) do
             if not Farm.enabled then return hit end
             Farm.status = stageName .. " tile " .. (hit + 1)
             driveTo(item.part.Position, 4)
@@ -2141,6 +2236,28 @@ RunService.RenderStepped:Connect(function()
     end
 end)
 
+-- live sell prices (read from the in-game SellValueBoards; read-only)
+local priceStatus = makeStatus(farmTab, 11)
+task.spawn(function()
+    while screen and screen.Parent do
+        local rows = readSellBoards()
+        if #rows > 0 then
+            local parts, seen = {}, {}
+            for _, r in ipairs(rows) do
+                local key = r.name .. "=" .. r.value
+                if not seen[key] and #parts < 6 then
+                    seen[key] = true
+                    table.insert(parts, r.name .. " " .. r.value)
+                end
+            end
+            priceStatus.Text = "💰 " .. table.concat(parts, " · ")
+        else
+            priceStatus.Text = "💰 price board not loaded — walk near the stores"
+        end
+        task.wait(3)
+    end
+end)
+
 -- PRESETS TAB
 sectionLabel(presetsTab, "Presets", 1)
 makeInfo(presetsTab, "Click a preset to run it once. Flip LOOP on first to repeat. Click again (or STOP) to halt — stop interrupts mid-chain. Names are wiki-based; fix in Settings if a step misses.", 2)
@@ -2224,6 +2341,17 @@ makeToggle(tpTab, "Ctrl + Click Teleport", false, function(v)
 end, 2)
 for i, dest in ipairs(CONFIG.teleports) do
     makeButton(tpTab, "📍 " .. dest.label, COL.Panel2, function()
+        if dest.label == "My Farm" then
+            -- resolve by ownership billboard, not by name search
+            local plot = findMyPlot()
+            if plot then
+                driveTo(plot:GetPivot().Position, 5)
+                notify("Teleported to your plot (" .. plot.Name .. ")")
+                return
+            end
+            notify("Your plot not found (plot billboards not loaded yet)")
+            return
+        end
         for _, n in ipairs(dest.names) do
             local target = nearest(n, 100000)
             if target then

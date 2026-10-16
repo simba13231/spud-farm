@@ -1,6 +1,10 @@
 # raw AI chat log — reference only, not for the public repo
 asd.txt
 
+# game dumps (private — contain your session info)
+game_dump*.txt
+spud_dump.txt
+
 # OS / editor noise
 Thumbs.db
 Desktop.ini
