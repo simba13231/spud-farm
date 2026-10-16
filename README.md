@@ -37,8 +37,8 @@ Everything merged into one paste-and-run file:
   factory, field tile, sell key, tractor, **planter, harvester, batter drop, oven**)
   without touching code; unload button
 - **Webhook window** (📡 button in the title bar) — its own UI with URL box, enable
-  toggle, test button, **live feed** (every farm round, preset cycle, stealth break and
-  crowd-guard pause appears instantly, even with logging off) and a queue status line.
+  toggle, test button, **live feed** (every farm round, preset cycle and stealth
+  break appears instantly, even with logging off) and a queue status line.
   Sends to your own Discord webhook, rate-limited (≈1 msg / 6.5s) with coin-gain notes
 - **🥔 potato button** (left edge of the screen, its own overlay) — press it to hide
   **every** window at once (main + webhook), press again to bring them all back. It
@@ -73,12 +73,11 @@ Roblox detection has three layers. **No Luau script can affect layer 1:**
    Mitigations built in: **two movement modes** — VFly (BodyVelocity fly +
    snap teleport, fast; the default) or Tween (slow stepped glide, safer) —
    Walkspeed/Jump clamps, NoClip force-blocked in stealth, all actions via
-   real ProximityPrompts + E-key virtual input (no RemoteEvent guessing =
+   real context-key binds (F/X/E/V) via virtual input (no RemoteEvent guessing =
    no honeypot risk).
 3. **Behavioral/ML scoring** — flags robotic timing, 24/7 sessions, crowded-server
    play. Mitigations built in: ±40% timing jitter, random micro-pauses, session
-   limiter (auto-break, default 45 min on / 4 min off), crowd guard (auto-pause
-   when the server fills up).
+   limiter (auto-break, default 45 min on / 4 min off).
 
 **Honest limits:** these reduce risk, they do not make you invisible. Use a **free VIP
 server** (this game has them), keep sessions short, and consider an alt account.

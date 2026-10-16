@@ -43,8 +43,6 @@
        • Jitter — every delay randomized ±40% (slider)
        • Micro-pauses — occasional 1–3s human "hesitations"
        • Session limiter — auto-pause after N minutes (default 45)
-       • Crowd guard — warns/pauses when many players are in the server
-         (report risk from other players is a real ban source)
 
   HONEST LIMITS: these reduce risk, they do not make you invisible. Use a
   private server (this game has FREE VIP servers), keep sessions short,
@@ -272,8 +270,6 @@ local Stealth = {
     sessionLimitOn = true,   -- auto-break after sessionLimit minutes
     sessionLimit   = 45,     -- minutes of active automation before a break
     breakLength    = 4,      -- minutes of auto-break
-    crowdGuard     = true,   -- pause when the server gets populated
-    crowdMax       = 5,      -- max players before guard triggers
 }
 
 -- humanized wait: jitter every delay, occasionally "hesitate"
@@ -693,6 +689,8 @@ local function collectDrops(substring, maxDist, count)
 end
 
 -- drive onto the sell platform at a store and sell (Q opens menu, E confirms)
+-- VERIFIED: the HUD balance must go UP before we call it done; if not,
+-- confirm once more (menu lag), then report honestly.
 local function sellAt(shopName, keyOverride)
     local shop = nearest(shopName, 20000)
     if not shop then log("shop not found: " .. tostring(shopName)) return false end
@@ -702,13 +700,30 @@ local function sellAt(shopName, keyOverride)
         platform = nearest(n, 400, shop.Position)
         if platform then break end
     end
+    local before = getCoins()
     driveTo((platform or shop).Position, platform and 2 or 5)
     hwait(1.2)
     pressKey(keyOverride or CONFIG.sellKey)   -- opens the sell menu
     hwait(1.4)
     pressKey(CONFIG.confirmKey)               -- confirms the popup
-    hwait(0.8)
-    return true
+    hwait(1.4)
+    local after = getCoins()
+    if before and after and after > before then
+        log("sold - coins " .. before .. " → " .. after)
+        return true
+    end
+    if before and after then
+        pressKey(CONFIG.confirmKey)           -- second confirm (menu may lag)
+        hwait(1.5)
+        after = getCoins()
+        if after and after > before then
+            log("sold (2nd confirm) - coins " .. before .. " → " .. after)
+            return true
+        end
+        log("sell UNVERIFIED (coins " .. before .. " → " .. tostring(after) .. ")")
+        return false
+    end
+    return true   -- coin label unavailable - cannot verify, don't stall
 end
 
 -- pull every factory lever in sequence (chocolate milk / cake factories).
@@ -771,24 +786,29 @@ end
 
 -- get into a vehicle seat. First the game's OWN way: context action
 -- EnterEquipment = F (dump-confirmed), then weld fallbacks for executors.
+-- VERIFIED: every return checks we are in THIS exact seat — if we were
+-- still sitting in another vehicle (the tractor), we stand up first.
 local function enterSeat(seat)
-    if Humanoid and Humanoid.SeatPart then return true end
+    if Humanoid and Humanoid.SeatPart then
+        if Humanoid.SeatPart == seat then return true end
+        try(function() Humanoid.Sit = false end)   -- seated in another vehicle
+        hwait(0.7)
+    end
     driveTo(seat.Position, 3)
     hwait(0.5)
     pressKey("F")
     hwait(1.2)
-    if Humanoid and Humanoid.SeatPart then return true end
+    if Humanoid and Humanoid.SeatPart == seat then return true end
     try(function() seat:Sit(Humanoid) end)
     hwait(0.6)
-    if Humanoid and Humanoid.SeatPart then return true end
+    if Humanoid and Humanoid.SeatPart == seat then return true end
     try(function() Humanoid:Sit(seat) end)
     hwait(0.6)
-    return Humanoid and Humanoid.SeatPart ~= nil
+    return Humanoid and Humanoid.SeatPart == seat
 end
 
 -- sit in the tractor (needed for field sweeps to move the vehicle)
 local function sitTractor()
-    if Humanoid and Humanoid.SeatPart then return true end
     local tractor = findEquipmentModel(CONFIG.tractorName)
     if not tractor then return false end
     local vehicle = tractor:FindFirstAncestorOfClass("Model") or tractor
@@ -801,7 +821,6 @@ end
 -- sit inside a named piece of equipment (e.g. the SRC6 combine for HARVEST —
 -- combines are driven themselves, they are NOT hitched to the tractor)
 local function sitInEquipment(name)
-    if Humanoid and Humanoid.SeatPart then return true end
     if not name then return false end
     local model = findEquipmentModel(name)
     if not model then return false end
@@ -832,25 +851,59 @@ local function findMyPlot()
 end
 
 -- hitch an implement to the tractor. Dump-confirmed: the game's context
--- action "Hitch" is bound to X (no prompts exist), and the implement's
--- hitch point is a part named Hitch/HitchRoot.
+-- action "Hitch" is bound to X (X TOGGLES Hitch/Unhitch — press it ONCE,
+-- a second press unhitches again) and the hitch point is a Hitch/HitchRoot
+-- part. VERIFIED: after pressing X we nudge the tractor forward — a
+-- hitched implement is pulled along with it, a missed one stays behind.
+-- On a miss: rotate the tractor 90° and attack from a new angle
+-- (HITCH_TRIES attempts), then return false so the caller restarts
+-- the whole loop.
+local HITCH_TRIES = 5
+
 local function hitchTo(implementName)
     local imp = findEquipmentModel(implementName)
     if not imp then log("implement not found: " .. tostring(implementName)) return false end
-    local aimPos
-    if imp:IsA("Model") then
-        local h = imp:FindFirstChild("HitchRoot", true) or imp:FindFirstChild("Hitch", true)
-        aimPos = h and h.Position or imp:GetPivot().Position
-    else
-        aimPos = imp.Position
+    local tractor = findEquipmentModel(CONFIG.tractorName)
+    if not tractor then log("tractor not found: " .. tostring(CONFIG.tractorName)) return false end
+    if not tractor:IsA("Model") then tractor = tractor:FindFirstAncestorOfClass("Model") or tractor end
+    local function pivotCF(m)
+        return m:IsA("Model") and m:GetPivot() or m.CFrame
     end
-    driveTo(aimPos, 4)
-    hwait(0.8)
-    pressKey("X")   -- Hitch
-    hwait(0.6)
-    pressKey("X")   -- again in case range synced late
-    hwait(1.0)
-    return true
+    local function aimPos()
+        if imp:IsA("Model") then
+            local h = imp:FindFirstChild("HitchRoot", true) or imp:FindFirstChild("Hitch", true)
+            return h and h.Position or imp:GetPivot().Position
+        end
+        return imp.Position
+    end
+    for attempt = 1, HITCH_TRIES do
+        driveTo(aimPos(), 4)
+        hwait(1.0)             -- let the context register before pressing
+        pressKey("X")          -- Hitch — ONCE (X toggles)
+        hwait(1.0)
+        -- verify: nudge forward — hitched gear is pulled along the tractor
+        local t0, i0 = pivotCF(tractor).Position, pivotCF(imp).Position
+        local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        local ok = false
+        if hrp then
+            driveTo(hrp.Position + hrp.CFrame.LookVector * 10, 2)
+            hwait(0.9)
+            local tMoved = (pivotCF(tractor).Position - t0).Magnitude
+            local iMoved = (pivotCF(imp).Position - i0).Magnitude
+            ok = tMoved > 4 and iMoved > tMoved * 0.4
+        end
+        if ok then
+            log("hitched " .. implementName .. " (attempt " .. attempt .. ")")
+            return true
+        end
+        -- missed: rotate the tractor 90° and try again from a new angle
+        log("hitch attempt " .. attempt .. "/" .. HITCH_TRIES .. " missed - rotating 90°")
+        pcall(function()
+            tractor:PivotTo(pivotCF(tractor) * CFrame.Angles(0, math.rad(90), 0))
+        end)
+        hwait(0.6)
+    end
+    return false
 end
 
 ------------------------------------------------------------
@@ -941,19 +994,31 @@ local function loadSeeds()
     return true
 end
 
--- best-effort sweep: hitch the stage's implement, then drive the tractor
--- over each field tile (implements work by proximity in this game).
--- HARVEST prefers sitting in the combine (SRC6) itself — combines are
--- driven, not hitched. Tiles are searched inside MY plot first.
+-- sweep: seat into the stage's machine, hitch the stage's implement
+-- (verified + retried, see hitchTo), then drive the tractor over each
+-- field tile (implements work by proximity in this game). HARVEST sits
+-- in the combine (SRC6) itself — combines are driven, not hitched.
+-- Tiles are searched inside MY plot first. Returns false when seating
+-- or hitching could NOT be confirmed — the caller restarts the loop.
 local function sweepFields(stageName)
     local usedCombine = false
     if stageName == "HARVEST" then
         usedCombine = sitInEquipment(CONFIG.harvestTool)
+        if not usedCombine then
+            log("could not enter the combine (" .. tostring(CONFIG.harvestTool) .. ") - restarting loop")
+            return false
+        end
     end
     if not usedCombine then
-        sitTractor()
+        if not sitTractor() then
+            log("could not enter the tractor seat - restarting loop")
+            return false
+        end
         local impl = stageImplement(stageName)
-        if impl and stageName ~= "HARVEST" then hitchTo(impl) end
+        if impl and stageName ~= "HARVEST" and not hitchTo(impl) then
+            log("could not hitch " .. tostring(impl) .. " - restarting loop")
+            return false
+        end
     end
     if stageName == "PLANT" then loadSeeds() end
     local myPlot = findMyPlot()
@@ -1000,7 +1065,15 @@ local function farmStep()
         log("farm round " .. Farm.round .. " complete")
         webhookSend("🌾 Farm round " .. Farm.round .. " complete · " .. tostring(CONFIG.crop) .. cropProfitNote() .. coinsNote())
     else
-        sweepFields(stage)
+        local ok = sweepFields(stage)
+        if ok == false then
+            -- nothing worked (seat / hitch not confirmed) → restart the loop
+            log(stage .. " could not run - restarting the loop from PLOW")
+            webhookSend("🔁 " .. stage .. " failed - restarting the loop")
+            Farm.stage = 1
+            hwait(4)
+            return
+        end
     end
     if Farm.enabled then
         Farm.stage = Farm.stage % #STAGES + 1
@@ -1334,27 +1407,6 @@ task.spawn(function()
                 end
             else
                 Session.activeMinutes = math.max(0, Session.activeMinutes - 1)
-            end
-        end
-    end
-end)
-
-local CrowdWarnedAt = 0
-task.spawn(function()
-    while task.wait(30) do
-        if Stealth.enabled and Stealth.crowdGuard and not Session.onBreak then
-            local count = #Players:GetPlayers()
-            if count > Stealth.crowdMax then
-                if Farm.enabled or Active.running then
-                    Farm.enabled = false
-                    Presets.stop()
-                    notify("Crowd guard: " .. count .. " players in server — automation paused (report risk)")
-                    log("crowd guard paused automation (" .. count .. " players)")
-                    webhookSend("⚠ Crowd guard paused automation (" .. count .. " players in server)")
-                elseif os.clock() - CrowdWarnedAt > 120 then
-                    CrowdWarnedAt = os.clock()
-                    notify(count .. " players in server — keep a low profile")
-                end
             end
         end
     end
@@ -2098,7 +2150,7 @@ makeButton(webhookContent, "📤 Send test message", COL.Panel2, function()
     Webhook.enabled = wasEnabled
     notify("Test queued (check your Discord in a few seconds)")
 end, 3)
-makeInfo(webhookContent, "Logs: load, farm rounds (crop + coin gains), preset cycles, stealth breaks, crowd guard. Queue is rate-limited for Discord (≈1 msg / 6.5s). Anyone with your webhook URL can post to your Discord — don't share your saved URL.", 4)
+makeInfo(webhookContent, "Logs: load, farm rounds (crop + coin gains), preset cycles, stealth breaks. Queue is rate-limited for Discord (≈1 msg / 6.5s). Anyone with your webhook URL can post to your Discord — don't share your saved URL.", 4)
 
 mk("TextLabel", {
     Parent = webhookContent,
@@ -2496,14 +2548,7 @@ end, 10, " min")
 makeSlider(stealthTab, "Break length", 1, 15, 4, function(v)
     Stealth.breakLength = v
 end, 11, " min")
-makeToggle(stealthTab, "Crowd guard (pause when busy)", true, function(v)
-    Stealth.crowdGuard = v
-end, 12)
-makeSlider(stealthTab, "Max players", 2, 16, 5, function(v)
-    Stealth.crowdMax = v
-end, 13)
-
-local stealthStatus = makeStatus(stealthTab, 14)
+local stealthStatus = makeStatus(stealthTab, 12)
 RunService.RenderStepped:Connect(function()
     if Session.onBreak then
         stealthStatus.Text = "ON BREAK · resumes automatically"
