@@ -72,6 +72,10 @@ local Lighting           = game:GetService("Lighting")
 local LocalPlayer = Players.LocalPlayer
 local UIS = UserInputService
 
+-- raw URL of THIS file on GitHub — the 🔄 Reload button in Settings
+-- downloads it, so updates never need a new paste
+local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
+
 ------------------------------------------------------------
 -- EXECUTOR COMPATIBILITY
 ------------------------------------------------------------
@@ -313,6 +317,18 @@ local Webhook = {
 
 -- forward-decls: GUI helpers/colors are defined in the GUI section below
 local COL, mk, corner
+
+-- settings carried over from the previous instance (🔄 Reload button):
+-- applied here so every widget below shows the carried values
+if type(_G.SpudCarry) == "table" then
+    local c = _G.SpudCarry
+    if c.crop then CONFIG.crop = c.crop end
+    if c.shopName then CONFIG.shopName = c.shopName end
+    if c.moveMode then Options.MoveMode = c.moveMode end
+    if c.vflySpeed then Options.VflySpeed = c.vflySpeed end
+    if c.webhookUrl then Webhook.url = c.webhookUrl end
+    if c.webhookOn ~= nil then Webhook.enabled = c.webhookOn end
+end
 
 local function jsonEscape(s)
     s = tostring(s)
@@ -2714,6 +2730,50 @@ makeButton(settingsTab, "⏏ Unload Script", COL.Red, function()
     screen:Destroy()
 end, 23)
 
+makeButton(settingsTab, "🔄 Reload latest update", COL.Accent2, function()
+    -- 1) fetch the newest version FIRST — if this fails, nothing changes
+    notify("Downloading the latest version…")
+    local ok, src = pcall(function() return game:HttpGet(SCRIPT_URL) end)
+    if not ok or type(src) ~= "string" or #src < 100 then
+        log("reload fetch failed: " .. tostring(src):sub(1, 120))
+        notify("Reload failed — keeping this version")
+        return
+    end
+    -- 2) carry live settings into the next instance
+    _G.SpudCarry = {
+        crop       = CONFIG.crop,
+        shopName   = CONFIG.shopName,
+        moveMode   = Options.MoveMode,
+        vflySpeed  = Options.VflySpeed,
+        webhookUrl = Webhook.url,
+        webhookOn  = Webhook.enabled,
+    }
+    -- 3) shut THIS instance down so no loop or GUI runs twice
+    Farm.enabled = false
+    Presets.stop()
+    Webhook.enabled = false
+    Options.NoClip = false
+    Options.SpeedEnabled = false
+    Options.InfiniteJump = false
+    Options.AntiAFK = false
+    Options.ClickTeleport = false
+    Stealth.sessionLimitOn = false
+    if Humanoid then
+        try(function() Humanoid.WalkSpeed = 16 end)
+        try(function() Humanoid.JumpPower = 50 end)
+    end
+    if hotGui then hotGui:Destroy() end
+    if screen then screen:Destroy() end
+    log("reloading latest version…")
+    -- 4) run the fresh script (it notifies when loaded)
+    local ok2, err2 = pcall(function()
+        local chunk, lerr = loadstring(src)
+        if not chunk then error(lerr or "loadstring failed") end
+        chunk()
+    end)
+    if not ok2 then warn("[spud] reload error: " .. tostring(err2)) end
+end, 24)
+
 ------------------------------------------------------------
 -- MOBILE FIT — phones/tablets (and MuMu) report TouchEnabled. The UI is
 -- designed at 540×400; on touch devices scale both windows to fit the
@@ -2726,6 +2786,7 @@ if UserInputService.TouchEnabled then
     main.AnchorPoint = Vector2.new(0.5, 0.5)
     webhookWin.AnchorPoint = Vector2.new(0.5, 0.5)
     local function mobileFit(recenter)
+        if not screen.Parent or not main.Parent then return end  -- old instance after a Reload
         local cam = Workspace.CurrentCamera
         local vp = (cam and cam.ViewportSize.X > 0) and cam.ViewportSize or Vector2.new(1280, 720)
         local s  = math.clamp(math.min(vp.X * 0.97 / 540, vp.Y * 0.93 / 400), 0.5, 1.1)
