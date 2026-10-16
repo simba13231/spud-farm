@@ -466,12 +466,29 @@ local function nameMatch(obj, substring)
     return false
 end
 
+-- shared ~0.8s cache of workspace BaseParts — nearest/findAll would
+-- otherwise re-scan ALL 100k+ instances on every call (the farm sweep
+-- calls them constantly; this is the single biggest CPU saver here)
+local ScanCache, ScanCacheAt = nil, 0
+local function scanAll()
+    local now = os.clock()
+    if not ScanCache or now - ScanCacheAt > 0.8 then
+        local out = {}
+        for _, v in ipairs(Workspace:GetDescendants()) do
+            if v:IsA("BasePart") then out[#out + 1] = v end
+        end
+        ScanCache = out
+        ScanCacheAt = now
+    end
+    return ScanCache
+end
+
 -- nearest matching BasePart by name substring (returns the part)
 local function nearest(substring, maxDist, nearPos)
     local best, bestDist = nil, math.huge
     local origin = nearPos or (RootPart and RootPart.Position)
-    for _, v in ipairs(Workspace:GetDescendants()) do
-        if v:IsA("BasePart") and nameMatch(v, substring) then
+    for _, v in ipairs(scanAll()) do
+        if v.Parent and nameMatch(v, substring) then
             if not origin then return v end
             local d = (v.Position - origin).Magnitude
             if d <= (maxDist or math.huge) and d < bestDist then
@@ -486,8 +503,8 @@ end
 local function findAll(substring, maxDist)
     local out = {}
     if not RootPart then return out end
-    for _, v in ipairs(Workspace:GetDescendants()) do
-        if v:IsA("BasePart") and nameMatch(v, substring) then
+    for _, v in ipairs(scanAll()) do
+        if v.Parent and nameMatch(v, substring) then
             local d = (v.Position - RootPart.Position).Magnitude
             if d <= (maxDist or math.huge) then
                 table.insert(out, { part = v, dist = d })
@@ -500,12 +517,12 @@ end
 
 -- glide movement: tiny steps at capped speed instead of instant teleports
 -- getCF: returns the current CFrame; setCF: applies a new CFrame
-local function glideTo(targetPos, getCF, setCF)
+local function glideTo(targetPos, getCF, setCF, speedMult)
     local cf = getCF()
     if not cf then return end
     local dist = (targetPos - cf.Position).Magnitude
     if dist < 0.5 then return end
-    local maxStep = Stealth.maxGlide * 0.1 -- studs allowed per 0.1s tick
+    local maxStep = Stealth.maxGlide * 0.1 * (speedMult or 1) -- studs per 0.1s tick
     while dist > 0.5 do
         local dt = 0.1 * (1 + (math.random() * 2 - 1) * 0.25)
         local stepLen = math.min(maxStep * (1 + (math.random() * 2 - 1) * 0.2), dist)
@@ -538,7 +555,7 @@ local function vflyTo(target)
         local speed = Options.VflySpeed
         local start = os.clock()
         local timeout = dist / speed + 3
-        while (RootPart.Position - target).Magnitude > 6 and os.clock() - start < timeout do
+        while (RootPart.Position - target).Magnitude > 2 and os.clock() - start < timeout do
             if not RootPart.Parent then break end
             local dir = target - RootPart.Position
             local m = dir.Magnitude
@@ -563,14 +580,24 @@ local function driveTo(pos, height)
     if seat then
         local model = seat:FindFirstAncestorOfClass("Model")
         if model then
-            if useTween then
-                glideTo(target,
-                    function() return model:GetPivot() end,
-                    function(cf) model:PivotTo(cf) end)
-            else
-                -- vehicles fly unpredictably; just pivot (tp) them
-                try(function() model:PivotTo(CFrame.new(target)) end)
-            end
+            -- vehicles always GLIDE, never one instant snap: long vehicle
+            -- teleports get rubber-banded by the server, which desyncs our
+            -- position from the game's — the context system then ignores
+            -- keys like Hitch(X) because, server-side, "we aren't there".
+            -- VFly = 2.2x glide speed (~120 sps, still fast), Tween = human
+            -- slow glide. Rotation is PRESERVED (the old code reset it to
+            -- identity every move, swinging the tractor's rear hitch out
+            -- of the implement's trigger zone mid-approach).
+            local mult = useTween and 1 or 2.2
+            glideTo(target,
+                function() return model:GetPivot() end,
+                function(cf) model:PivotTo(cf) end,
+                mult)
+            -- settle the last fraction, keeping our heading
+            try(function()
+                local p = model:GetPivot()
+                model:PivotTo(CFrame.new(target) * p.Rotation)
+            end)
             return
         end
     end
@@ -850,22 +877,32 @@ local function findMyPlot()
     return nil
 end
 
--- hitch an implement to the tractor. Dump-confirmed: the game's context
--- action "Hitch" is bound to X (X TOGGLES Hitch/Unhitch — press it ONCE,
--- a second press unhitches again) and the hitch point is a Hitch/HitchRoot
--- part. VERIFIED: after pressing X we nudge the tractor forward — a
--- hitched implement is pulled along with it, a missed one stays behind.
--- On a miss: rotate the tractor 90° and attack from a new angle
--- (HITCH_TRIES attempts), then return false so the caller restarts
--- the whole loop.
+-- FORCE HITCH — how a real player does it: creep toward the hitch point
+-- and press X at each micro-step (the game accepts Hitch the INSTANT the
+-- tractor's hitch enters the implement's small trigger zone). X TOGGLES
+-- Hitch/Unhitch, so after every press we tug-test (pull 5 studs forward,
+-- a hitched implement is dragged along) — a success is caught BEFORE a
+-- second press could un-toggle it. If nothing sticks: back away while
+-- pressing X (the tractor's REAR sweeps the hitch zone), then rotate the
+-- tractor 90° and attack from a new angle (HITCH_TRIES attempts), then
+-- return false so the caller restarts the whole loop.
 local HITCH_TRIES = 5
 
 local function hitchTo(implementName)
     local imp = findEquipmentModel(implementName)
     if not imp then log("implement not found: " .. tostring(implementName)) return false end
-    local tractor = findEquipmentModel(CONFIG.tractorName)
+    -- the tractor we're SITTING IN is the reliable handle; name search is
+    -- only a fallback (a parked/renamed tractor can't abort hitching now)
+    local tractor
+    if Humanoid and Humanoid.SeatPart then
+        tractor = Humanoid.SeatPart:FindFirstAncestorOfClass("Model") or Humanoid.SeatPart
+    else
+        tractor = findEquipmentModel(CONFIG.tractorName)
+        if tractor and not tractor:IsA("Model") then
+            tractor = tractor:FindFirstAncestorOfClass("Model") or tractor
+        end
+    end
     if not tractor then log("tractor not found: " .. tostring(CONFIG.tractorName)) return false end
-    if not tractor:IsA("Model") then tractor = tractor:FindFirstAncestorOfClass("Model") or tractor end
     local function pivotCF(m)
         return m:IsA("Model") and m:GetPivot() or m.CFrame
     end
@@ -876,27 +913,51 @@ local function hitchTo(implementName)
         end
         return imp.Position
     end
-    for attempt = 1, HITCH_TRIES do
-        driveTo(aimPos(), 4)
-        hwait(1.0)             -- let the context register before pressing
-        pressKey("X")          -- Hitch — ONCE (X toggles)
-        hwait(1.0)
-        -- verify: nudge forward — hitched gear is pulled along the tractor
-        local t0, i0 = pivotCF(tractor).Position, pivotCF(imp).Position
+    -- tug-test: pull a few studs — hitched gear comes along, loose gear stays
+    local function tugTest()
         local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-        local ok = false
+        if not hrp then return false end
+        local t0, i0 = pivotCF(tractor).Position, pivotCF(imp).Position
+        driveTo(hrp.Position + hrp.CFrame.LookVector * 5, 1)
+        hwait(0.7)
+        local tMoved = (pivotCF(tractor).Position - t0).Magnitude
+        local iMoved = (pivotCF(imp).Position - i0).Magnitude
+        return tMoved > 2.5 and iMoved > tMoved * 0.35
+    end
+    for attempt = 1, HITCH_TRIES do
+        log("force-hitch " .. implementName .. " (attempt " .. attempt .. "/" .. HITCH_TRIES .. ")")
+        local target = aimPos()
+        driveTo(target, 4)
+        hwait(0.9)
+        local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
         if hrp then
-            driveTo(hrp.Position + hrp.CFrame.LookVector * 10, 2)
-            hwait(0.9)
-            local tMoved = (pivotCF(tractor).Position - t0).Magnitude
-            local iMoved = (pivotCF(imp).Position - i0).Magnitude
-            ok = tMoved > 4 and iMoved > tMoved * 0.4
+            -- creep INTO the hitch point, pressing X every micro-step
+            local from = hrp.Position
+            for step = 1, 4 do
+                driveTo(from:Lerp(target, step / 4), 1.5)
+                hwait(0.4)
+                pressKey("X")
+                hwait(0.6)
+                if tugTest() then
+                    log("HITCHED " .. implementName .. " (attempt " .. attempt .. ")")
+                    return true
+                end
+            end
+            -- back away pressing X — the tractor's REAR sweeps the hitch zone
+            for _ = 1, 3 do
+                local away = hrp.Position - target
+                if away.Magnitude < 1 then away = -hrp.CFrame.LookVector end
+                driveTo(hrp.Position + away.Unit * 3, 1.5)
+                hwait(0.4)
+                pressKey("X")
+                hwait(0.6)
+                if tugTest() then
+                    log("HITCHED " .. implementName .. " (attempt " .. attempt .. ")")
+                    return true
+                end
+            end
         end
-        if ok then
-            log("hitched " .. implementName .. " (attempt " .. attempt .. ")")
-            return true
-        end
-        -- missed: rotate the tractor 90° and try again from a new angle
+        -- still nothing: rotate 90° and attack from a new angle
         log("hitch attempt " .. attempt .. "/" .. HITCH_TRIES .. " missed - rotating 90°")
         pcall(function()
             tractor:PivotTo(pivotCF(tractor) * CFrame.Angles(0, math.rad(90), 0))
@@ -1415,6 +1476,7 @@ end)
 ------------------------------------------------------------
 -- PLAYER MODS (passive loops)
 ------------------------------------------------------------
+local NcLast = 0
 RunService.Stepped:Connect(function()
     if Options.NoClip and Character then
         -- NoClip is high-risk (StrafingNoPhysics check); force it off in stealth
@@ -1423,6 +1485,9 @@ RunService.Stepped:Connect(function()
             notify("NoClip auto-off: stealth mode blocks wall-walking")
             return
         end
+        local now = os.clock()
+        if now - NcLast < 0.15 then return end   -- 6-7 Hz is plenty
+        NcLast = now
         for _, part in ipairs(Character:GetDescendants()) do
             if part:IsA("BasePart") then part.CanCollide = false end
         end
@@ -2188,11 +2253,14 @@ mk("UIPadding", {
 })
 
 local webhookStatus = makeStatus(webhookContent, 7)
-RunService.RenderStepped:Connect(function()
-    if Webhook.enabled then
-        webhookStatus.Text = Webhook.url ~= "" and ("ON · queued " .. #Webhook.queue .. "/20") or "ON · URL MISSING"
-    else
-        webhookStatus.Text = "OFF · feed only (local)"
+task.spawn(function() -- 0.5s ticker (was a per-frame RenderStepped connection)
+    while screen.Parent do
+        if Webhook.enabled then
+            webhookStatus.Text = Webhook.url ~= "" and ("ON · queued " .. #Webhook.queue .. "/20") or "ON · URL MISSING"
+        else
+            webhookStatus.Text = "OFF · feed only (local)"
+        end
+        task.wait(0.5)
     end
 end)
 
@@ -2368,13 +2436,16 @@ makeButton(farmTab, "Reset to Plow", COL.Panel2, function()
 end, 9)
 
 local farmStatus = makeStatus(farmTab, 10)
-RunService.RenderStepped:Connect(function()
-    if Farm.enabled then
-        farmStatus.Text = "stage " .. STAGES[Farm.stage] .. " · round " .. Farm.round .. " · RUNNING"
-        statusDot.BackgroundColor3 = COL.Green
-    else
-        farmStatus.Text = "stage " .. STAGES[Farm.stage] .. " · round " .. Farm.round .. " · PAUSED"
-        statusDot.BackgroundColor3 = COL.Red
+task.spawn(function() -- 0.5s ticker (was per-frame)
+    while screen.Parent do
+        if Farm.enabled then
+            farmStatus.Text = "stage " .. STAGES[Farm.stage] .. " · round " .. Farm.round .. " · RUNNING"
+            statusDot.BackgroundColor3 = COL.Green
+        else
+            farmStatus.Text = "stage " .. STAGES[Farm.stage] .. " · round " .. Farm.round .. " · PAUSED"
+            statusDot.BackgroundColor3 = COL.Red
+        end
+        task.wait(0.5)
     end
 end)
 
@@ -2438,12 +2509,15 @@ makeButton(presetsTab, "STOP", COL.Red, function()
 end, 12)
 
 local presetStatus = makeStatus(presetsTab, 13)
-RunService.RenderStepped:Connect(function()
-    presetStatus.Text = Active.running and ("running: " .. tostring(Active.name)) or "idle"
-    for name, b in pairs(presetButtons) do
-        local on = (Active.name == name)
-        b.BackgroundColor3 = on and COL.Accent2 or COL.Panel2
-        b.TextColor3       = on and COL.Accent or COL.Text
+task.spawn(function() -- 0.5s ticker (was per-frame)
+    while screen.Parent do
+        presetStatus.Text = Active.running and ("running: " .. tostring(Active.name)) or "idle"
+        for name, b in pairs(presetButtons) do
+            local on = (Active.name == name)
+            b.BackgroundColor3 = on and COL.Accent2 or COL.Panel2
+            b.TextColor3       = on and COL.Accent or COL.Text
+        end
+        task.wait(0.5)
     end
 end)
 
@@ -2549,13 +2623,16 @@ makeSlider(stealthTab, "Break length", 1, 15, 4, function(v)
     Stealth.breakLength = v
 end, 11, " min")
 local stealthStatus = makeStatus(stealthTab, 12)
-RunService.RenderStepped:Connect(function()
-    if Session.onBreak then
-        stealthStatus.Text = "ON BREAK · resumes automatically"
-    elseif Farm.enabled or Active.running then
-        stealthStatus.Text = "active " .. Session.activeMinutes .. "/" .. Stealth.sessionLimit .. " min · " .. #Players:GetPlayers() .. " players"
-    else
-        stealthStatus.Text = "idle · " .. #Players:GetPlayers() .. " players in server"
+task.spawn(function() -- 0.5s ticker (was per-frame; also polled player count each frame)
+    while screen.Parent do
+        if Session.onBreak then
+            stealthStatus.Text = "ON BREAK · resumes automatically"
+        elseif Farm.enabled or Active.running then
+            stealthStatus.Text = "active " .. Session.activeMinutes .. "/" .. Stealth.sessionLimit .. " min · " .. #Players:GetPlayers() .. " players"
+        else
+            stealthStatus.Text = "idle · " .. #Players:GetPlayers() .. " players in server"
+        end
+        task.wait(0.5)
     end
 end)
 
@@ -2573,7 +2650,7 @@ end, 4)
 makeSlider(settingsTab, "Vfly speed", 50, 500, 200, function(v)
     Options.VflySpeed = v
 end, 5, " sps")
-makeInfo(settingsTab, "VFly = BodyVelocity fly + snap teleport (fast, best for farming). Tween = slow stepped glide (safer against movement validation). Vehicles always snap.", 6)
+makeInfo(settingsTab, "VFly = BodyVelocity fly + snap teleport (fast, best for farming). Tween = slow stepped glide (safer against movement validation). Vehicles always glide smoothly (no instant snaps) so the server can't rubber-band your position and ignore hitch/keys.", 6)
 
 sectionLabel(settingsTab, "Game Names (fix if a feature misses)", 7)
 makeTextbox(settingsTab, "Cow name", CONFIG.presets.chocolateMilk.cowName, function(v)
@@ -2636,6 +2713,43 @@ makeButton(settingsTab, "⏏ Unload Script", COL.Red, function()
     if hotGui then hotGui:Destroy() end
     screen:Destroy()
 end, 23)
+
+------------------------------------------------------------
+-- MOBILE FIT — phones/tablets (and MuMu) report TouchEnabled. The UI is
+-- designed at 540×400; on touch devices scale both windows to fit the
+-- screen, center the main one, start the webhook window hidden (summon
+-- it with the 📡 button) and re-fit on rotation/resize. Desktop untouched.
+------------------------------------------------------------
+if UserInputService.TouchEnabled then
+    local mainScale = mk("UIScale", { Parent = main })
+    local hookScale = mk("UIScale", { Parent = webhookWin })
+    main.AnchorPoint = Vector2.new(0.5, 0.5)
+    webhookWin.AnchorPoint = Vector2.new(0.5, 0.5)
+    local function mobileFit(recenter)
+        local cam = Workspace.CurrentCamera
+        local vp = (cam and cam.ViewportSize.X > 0) and cam.ViewportSize or Vector2.new(1280, 720)
+        local s  = math.clamp(math.min(vp.X * 0.97 / 540, vp.Y * 0.93 / 400), 0.5, 1.1)
+        local s2 = math.clamp(math.min(vp.X * 0.97 / 310, vp.Y * 0.93 / 400), 0.5, 1.1)
+        s2 = math.min(s2, s)   -- webhook never bigger than main; keeps stacking sane
+        mainScale.Scale = s
+        hookScale.Scale = s2
+        if recenter then
+            main.Position = UDim2.new(0.5, 0, 0.5, 0)
+            if (540 * s + 310 * s2 + 28) <= vp.X then
+                webhookWin.Position = UDim2.new(0.5, (540 * s) / 2 + (310 * s2) / 2 + 14, 0.5, 0)
+            else
+                webhookWin.Position = UDim2.new(0.5, 0, 0.5, (400 * s) / 2 + (400 * s2) / 2 + 10)
+            end
+        end
+    end
+    mobileFit(true)
+    webhookWin.Visible = false
+    local cam = Workspace.CurrentCamera
+    if cam then
+        cam:GetPropertyChangedSignal("ViewportSize"):Connect(function() mobileFit(true) end)
+    end
+    task.delay(2, function() mobileFit(true) end)  -- settle once loading finishes
+end
 
 selectTab("Farm")
 
