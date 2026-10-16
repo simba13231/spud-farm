@@ -701,6 +701,41 @@ w("")
 w("══════ END OF DUMP ══════")
 if not ok then w("NOTE: scraper stopped early: " .. tostring(err) .. " (partial dump above)") end
 
+------------------------------------------------------------------
+-- 17. REMOTE EVENTS + SOCIAL/INVITE UI — research for remote-sell
+--     and auto-accept-invite features (names only, wrapped so it
+--     can never break the rest of the dump)
+------------------------------------------------------------------
+pcall(function()
+    header("REMOTE EVENTS (names only — remote-sell research)")
+    local n = 0
+    for _, d in ipairs(game:GetService("ReplicatedStorage"):GetDescendants()) do
+        if (d:IsA("RemoteEvent") or d:IsA("RemoteFunction")) and n < 150 then
+            w("  - " .. d:GetFullName() .. "  (" .. d.ClassName .. ")")
+            n += 1
+        end
+    end
+    w("  listed: " .. n .. " (capped at 150)")
+    header("SOCIAL / INVITE / TRADE UI (PlayerGui name matches)")
+    local pGui2 = game:GetService("Players").LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    local keys = { "invite", "trade", "party", "clan", "request", "friend" }
+    local found = 0
+    if pGui2 then
+        for _, o in ipairs(pGui2:GetDescendants()) do
+            if found >= 60 then break end
+            local nm = o.Name:lower()
+            for _, k in ipairs(keys) do
+                if nm:find(k, 1, true) then
+                    w("  - " .. o:GetFullName() .. "  (" .. o.ClassName .. ")")
+                    found += 1
+                    break
+                end
+            end
+        end
+    end
+    w("  matches: " .. found)
+end)
+
 local text = table.concat(out, "\n")
 
 ------------------------------------------------------------------

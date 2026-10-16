@@ -318,16 +318,28 @@ local Webhook = {
 -- forward-decls: GUI helpers/colors are defined in the GUI section below
 local COL, mk, corner
 
--- settings carried over from the previous instance (🔄 Reload button):
--- applied here so every widget below shows the carried values
-if type(_G.SpudCarry) == "table" then
-    local c = _G.SpudCarry
-    if c.crop then CONFIG.crop = c.crop end
-    if c.shopName then CONFIG.shopName = c.shopName end
-    if c.moveMode then Options.MoveMode = c.moveMode end
-    if c.vflySpeed then Options.VflySpeed = c.vflySpeed end
-    if c.webhookUrl then Webhook.url = c.webhookUrl end
-    if c.webhookOn ~= nil then Webhook.enabled = c.webhookOn end
+-- settings carried over from the previous instance (🔄 Reload button) or
+-- from the settings FILE (survives server hops + rejoins). Applied here
+-- so every widget below shows the carried values.
+do
+    local c = type(_G.SpudCarry) == "table" and _G.SpudCarry or nil
+    if not c and type(readfile) == "function" then
+        local ok, data = pcall(readfile, "spud_settings.json")
+        if ok and type(data) == "string" and #data > 2 then
+            local ok2, tbl = pcall(function()
+                return game:GetService("HttpService"):JSONDecode(data)
+            end)
+            if ok2 and type(tbl) == "table" then c = tbl end
+        end
+    end
+    if c then
+        if c.crop then CONFIG.crop = c.crop end
+        if c.shopName then CONFIG.shopName = c.shopName end
+        if c.moveMode then Options.MoveMode = c.moveMode end
+        if c.vflySpeed then Options.VflySpeed = c.vflySpeed end
+        if c.webhookUrl then Webhook.url = c.webhookUrl end
+        if c.webhookOn ~= nil then Webhook.enabled = c.webhookOn end
+    end
 end
 
 local function jsonEscape(s)
@@ -721,9 +733,21 @@ local function collectDrops(substring, maxDist, count)
         if taken >= (count or 10) then break end
         -- skip spawn markers (e.g. "EggSpawn" parts are not the eggs)
         if item.part and item.part.Parent and not item.part.Name:lower():find("spawn", 1, true) then
-            driveTo(item.part.Position, 2)
-            hwait(0.35)
-            pressKey("E")
+            if Options.Vacuum then
+                -- vacuum: pull the drop onto us (client-side) then grab —
+                -- works when the game judges pickups by client distance;
+                -- harmless no-op when it doesn't (server owns the item)
+                try(function()
+                    item.part.CFrame = CFrame.new(
+                        RootPart.Position + RootPart.CFrame.LookVector * 2 + Vector3.new(0, -1, 0))
+                end)
+                hwait(0.15)
+                pressKey("E")
+            else
+                driveTo(item.part.Position, 2)
+                hwait(0.35)
+                pressKey("E")
+            end
             taken += 1
             hwait(0.45)
         end
@@ -943,34 +967,47 @@ local function hitchTo(implementName)
     for attempt = 1, HITCH_TRIES do
         log("force-hitch " .. implementName .. " (attempt " .. attempt .. "/" .. HITCH_TRIES .. ")")
         local target = aimPos()
-        driveTo(target, 4)
-        hwait(0.9)
         local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-        if hrp then
-            -- creep INTO the hitch point, pressing X every micro-step
-            local from = hrp.Position
-            for step = 1, 4 do
-                driveTo(from:Lerp(target, step / 4), 1.5)
-                hwait(0.4)
-                pressKey("X")
-                hwait(0.6)
-                if tugTest() then
-                    log("HITCHED " .. implementName .. " (attempt " .. attempt .. ")")
-                    return true
-                end
+        if not hrp then break end
+        -- STAND OFF: driving straight onto the hitch point parks the tractor
+        -- ON TOP of the implement (seen in-game — wheels ride up, both hitch
+        -- parts blocked) — park 8 studs out on our side, then pass THROUGH.
+        local dir = hrp.Position - target
+        dir = Vector3.new(dir.X, 0, dir.Z)
+        if dir.Magnitude < 1 then
+            local lv = hrp.CFrame.LookVector
+            dir = Vector3.new(-lv.X, 0, -lv.Z)
+        end
+        if dir.Magnitude < 0.1 then dir = Vector3.new(0, 0, -1) end
+        dir = dir.Unit
+        local standOff = target + dir * 8
+        local through  = target - dir * 5   -- overshoot past the point
+        driveTo(standOff, 4)
+        hwait(0.8)
+        -- pass THROUGH pressing X every ~2 studs, tug-test after each press
+        -- (hitched gear gets dragged along, loose gear stays — so a second
+        -- press can never un-toggle a success). Sweeping across the point
+        -- covers a tractor hitch modelled at EITHER end of the vehicle.
+        local steps = 7
+        for step = 1, steps do
+            driveTo(standOff:Lerp(through, step / steps), 1.6)
+            hwait(0.35)
+            pressKey("X")
+            hwait(0.55)
+            if tugTest() then
+                log("HITCHED " .. implementName .. " (attempt " .. attempt .. ")")
+                return true
             end
-            -- back away pressing X — the tractor's REAR sweeps the hitch zone
-            for _ = 1, 3 do
-                local away = hrp.Position - target
-                if away.Magnitude < 1 then away = -hrp.CFrame.LookVector end
-                driveTo(hrp.Position + away.Unit * 3, 1.5)
-                hwait(0.4)
-                pressKey("X")
-                hwait(0.6)
-                if tugTest() then
-                    log("HITCHED " .. implementName .. " (attempt " .. attempt .. ")")
-                    return true
-                end
+        end
+        -- back sweep: reverse over the point again (the rear leads this way)
+        for step = 1, 4 do
+            driveTo(through:Lerp(standOff, step / 4), 1.6)
+            hwait(0.35)
+            pressKey("X")
+            hwait(0.55)
+            if tugTest() then
+                log("HITCHED " .. implementName .. " (attempt " .. attempt .. ")")
+                return true
             end
         end
         -- still nothing: rotate 90° and attack from a new angle
@@ -1525,6 +1562,16 @@ LocalPlayer.Idled:Connect(function()
     end
 end)
 
+-- someone joins → local log + webhook (report-risk awareness).
+-- Names are masked while Streamer Mode is on.
+Players.PlayerAdded:Connect(function(plr)
+    task.delay(1, function()
+        local who = (Options.Streamer and "a player") or plr.Name
+        log(who .. " joined the server")
+        webhookSend("👋 " .. who .. " joined · " .. #Players:GetPlayers() .. " player(s) here")
+    end)
+end)
+
 -- Ctrl + Click teleport
 UserInputService.InputBegan:Connect(function(input)
     if Options.ClickTeleport
@@ -1544,6 +1591,8 @@ end)
 -- FPS boost
 local function applyFpsBoost(enabled)
     if enabled then
+        -- 3D rendering fully OFF (UI still renders) — the overnight mode
+        try(function() RunService:Set3dRenderingEnabled(false) end)
         try(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 end)
         for _, obj in ipairs(Lighting:GetDescendants()) do
             if obj:IsA("Atmosphere") or obj:IsA("Sky") then obj.Enabled = false end
@@ -1551,12 +1600,18 @@ local function applyFpsBoost(enabled)
         for _, obj in ipairs(Workspace:GetDescendants()) do
             if obj:IsA("BasePart") and obj.Name:lower():find("grass") then obj:Destroy() end
         end
-        log("FPS boost on")
+        log("FPS boost on (3D render OFF)")
     else
+        try(function() RunService:Set3dRenderingEnabled(true) end)
         try(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level21 end)
         log("FPS boost off")
     end
 end
+
+-- DEFAULT: 3D rendering off from startup (requested default for overnight
+-- grinding — toggle back in Player > FPS Boost; unload/reload restores it)
+Options.FPSBoost = true
+applyFpsBoost(true)
 
 -- movement application (clamped by stealth caps)
 local NotifiedClamp = false
@@ -2497,6 +2552,13 @@ task.spawn(function()
     end
 end)
 
+-- vacuum: pull loose drops to the player instead of driving to each one
+makeToggle(farmTab, "Vacuum drops (pull to you)", false, function(v)
+    Options.Vacuum = v
+    notify(v and "Vacuum ON — drops are pulled to you (client-side; harmless no-op if the server owns pickup)"
+        or "Vacuum OFF — driving to drops normally")
+end, 12)
+
 -- PRESETS TAB
 sectionLabel(presetsTab, "Presets", 1)
 makeInfo(presetsTab, "Click a preset to run it once. Flip LOOP on first to repeat. Click again (or STOP) to halt — stop interrupts mid-chain. Names are wiki-based; fix in Settings if a step misses.", 2)
@@ -2537,6 +2599,80 @@ task.spawn(function() -- 0.5s ticker (was per-frame)
     end
 end)
 
+------------------------------------------------------------
+-- SERVER HOPPING — low-pop join / join-by-JobId, with settings
+-- persistence (writefile) so crop/shop/webhook/move survive teleports
+------------------------------------------------------------
+local SETTINGS_FILE = "spud_settings.json"
+
+local function saveSettingsFile()
+    if type(writefile) ~= "function" then return false end
+    return pcall(function()
+        local H = game:GetService("HttpService")
+        writefile(SETTINGS_FILE, H:JSONEncode({
+            crop       = CONFIG.crop,
+            shopName   = CONFIG.shopName,
+            moveMode   = Options.MoveMode,
+            vflySpeed  = Options.VflySpeed,
+            webhookUrl = Webhook.url,
+            webhookOn  = Webhook.enabled,
+        }))
+    end)
+end
+
+local function hopTo(placeId, jobId)
+    saveSettingsFile()
+    log("teleporting — settings saved; re-run the script (or let auto-execute) in the new server")
+    local ok, err = pcall(function()
+        game:GetService("TeleportService"):TeleportToPlaceInstance(placeId, jobId, LocalPlayer)
+    end)
+    if not ok then
+        log("join failed: " .. tostring(err))
+        notify("Join failed — see console")
+    end
+end
+
+local function hopLowPop()
+    notify("Looking for an empty server…")
+    local url = "https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100"
+    local body
+    pcall(function()
+        local r = httpRequest({ Url = url, Method = "GET" })
+        if r and type(r.Body) == "string" then
+            body = r.Body
+        elseif type(game.HttpGet) == "function" then
+            body = game:HttpGet(url)
+        end
+    end)
+    local bestId, bestPlaying
+    if body and #body > 50 then
+        local ok2, data = pcall(function() return game:GetService("HttpService"):JSONDecode(body) end)
+        if ok2 and type(data) == "table" and type(data.data) == "table" then
+            for _, s in ipairs(data.data) do
+                if type(s) == "table" and s.id and s.id ~= game.JobId
+                    and s.playing and s.maxPlayers and s.playing < s.maxPlayers then
+                    if not bestPlaying or s.playing < bestPlaying then
+                        bestId, bestPlaying = s.id, s.playing
+                    end
+                end
+            end
+        end
+    end
+    if bestId then
+        log("emptiest server found: " .. bestPlaying .. " players — joining")
+        hopTo(game.PlaceId, bestId)
+    else
+        local ok3, err = pcall(function()
+            game:GetService("TeleportService"):Teleport(game.PlaceId, LocalPlayer)
+        end)
+        if ok3 then
+            log("server list unavailable — random new server instead")
+        else
+            notify("Hop failed: " .. tostring(err):sub(1, 60))
+        end
+    end
+end
+
 -- PLAYER TAB
 sectionLabel(playerTab, "Movement", 1)
 makeToggle(playerTab, "Custom Walkspeed", false, function(v)
@@ -2569,11 +2705,64 @@ sectionLabel(playerTab, "Misc", 8)
 makeToggle(playerTab, "Anti-AFK", false, function(v)
     Options.AntiAFK = v
 end, 9)
-makeToggle(playerTab, "FPS Boost", false, function(v)
+makeToggle(playerTab, "FPS Boost (3D render OFF)", true, function(v)
     Options.FPSBoost = v
     applyFpsBoost(v)
 end, 10)
 makeInfo(playerTab, "Note: high Walkspeed/Jump values are the easiest thing for a server to flag. Stealth mode clamps them to human-ish caps automatically.", 11)
+
+sectionLabel(playerTab, "Social & Servers", 12)
+makeTextbox(playerTab, "Spy name (player)", "", function(v)
+    Options.SpyName = v
+end, 13)
+makeButton(playerTab, "🔍 Inspect player", COL.Panel2, function()
+    local want = tostring(Options.SpyName or ""):lower()
+    if want == "" then notify("Type a player name first") return end
+    local target
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and (p.Name:lower():find(want, 1, true)
+            or p.DisplayName:lower():find(want, 1, true)) then
+            target = p
+            break
+        end
+    end
+    if not target then notify("No player matches '" .. want .. "'") return end
+    -- honest CLIENT-SIDE inspection: only what their client replicates to us
+    local ch = target.Character
+    local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+    local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+    local tool = ch and ch:FindFirstChildOfClass("Tool")
+    log("── spy: " .. target.DisplayName .. " (@" .. target.Name
+        .. ", account " .. target.AccountAge .. "d) ──")
+    log("  pos: " .. (hrp and string.format("%.0f, %.0f, %.0f", hrp.Position.X, hrp.Position.Y, hrp.Position.Z) or "no character"))
+    log("  health: " .. (hum and math.floor(hum.Health) or "?")
+        .. "   walkspeed: " .. (hum and math.floor(hum.WalkSpeed) or "?"))
+    log("  equipped tool: " .. (tool and tool.Name or "none visible"))
+    local plots = Workspace:FindFirstChild("Plots")
+    if plots then
+        for _, plot in ipairs(plots:GetChildren()) do
+            local bb = plot:FindFirstChild("PlotBillboard")
+            local owner = bb and bb:FindFirstChild("Owner")
+            if owner and owner:IsA("TextLabel")
+                and (owner.Text == target.DisplayName or owner.Text == target.Name) then
+                log("  plot: " .. plot.Name .. " (\"" .. owner.Text .. "\")")
+            end
+        end
+    end
+    notify("Spy on " .. target.DisplayName .. " → see console/output")
+end, 14)
+makeButton(playerTab, "🌍 Hop to low-pop server", COL.Panel2, function()
+    hopLowPop()
+end, 15)
+makeTextbox(playerTab, "JobId (join a specific server)", "", function(v)
+    Options.JoinJobId = v:match("%S+") or ""
+end, 16)
+makeButton(playerTab, "➡ Join JobId", COL.Panel2, function()
+    local job = tostring(Options.JoinJobId or "")
+    if job == "" then notify("Paste a JobId first") return end
+    hopTo(game.PlaceId, job)
+end, 17)
+makeInfo(playerTab, "Server hop joins the emptiest public server found (Roblox API call; falls back to a random new server). Join-by-JobId needs a full JobId. Settings (crop, shop, webhook, move mode) save to a file and auto-restore after teleports/rejoins. Inspector shows only what their client replicates to us — hidden stats are not readable client-side.", 18)
 
 -- TELEPORT TAB
 sectionLabel(tpTab, "Fast Travel", 1)
@@ -2652,6 +2841,61 @@ task.spawn(function() -- 0.5s ticker (was per-frame; also polled player count ea
     end
 end)
 
+------------------------------------------------------------
+-- STREAMER MODE — covers the game's coin balance with a censor bar
+-- (the game text stays intact UNDER the bar, so getCoins keeps
+-- working) and hides our windows. Player names are masked in join
+-- alerts while it's on.
+------------------------------------------------------------
+local StreamCensor = nil
+local function streamCensorBar(on)
+    local pGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    local g = pGui and pGui:FindFirstChild("GuiViews")
+    local hud = g and g:FindFirstChild("HUD")
+    if not hud then return end
+    if on then
+        local main = hud:FindFirstChild("MainHUD") or hud
+        local tr = main:FindFirstChild("TopRightBar")
+        local cd = tr and tr:FindFirstChild("CoinsDisplay")
+        local ct = cd and cd:FindFirstChild("Contents")
+        local bal = ct and ct:FindFirstChild("Balance")
+        if not bal then return end
+        if not StreamCensor or not StreamCensor.Parent then
+            StreamCensor = mk("Frame", {
+                Name = "SpudCensor",
+                BackgroundColor3 = Color3.fromRGB(15, 16, 20),
+                BorderSizePixel = 0,
+                ZIndex = 50,
+                Parent = hud,
+            })
+            corner(StreamCensor, 4)
+            mk("TextLabel", {
+                Size = UDim2.fromScale(1, 1),
+                BackgroundTransparency = 1,
+                Text = "••••",
+                TextColor3 = COL.Sub,
+                Font = Enum.Font.GothamBold,
+                TextSize = 12,
+                ZIndex = 51,
+                Parent = StreamCensor,
+            })
+        end
+        -- follow the balance label wherever the HUD lays it out
+        local hAbs, bAbs = hud.AbsolutePosition, bal.AbsolutePosition
+        StreamCensor.Position = UDim2.fromOffset(bAbs.X - hAbs.X, bAbs.Y - hAbs.Y)
+        StreamCensor.Size = UDim2.fromOffset(bal.AbsoluteSize.X + 8, bal.AbsoluteSize.Y + 4)
+    elseif StreamCensor then
+        StreamCensor:Destroy()
+        StreamCensor = nil
+    end
+end
+task.spawn(function()
+    while screen.Parent do
+        if Options.Streamer then streamCensorBar(true) end
+        task.wait(0.5)
+    end
+end)
+
 -- SETTINGS TAB
 sectionLabel(settingsTab, "Preferences", 1)
 makeToggle(settingsTab, "Notifications", true, function(v)
@@ -2726,6 +2970,7 @@ makeButton(settingsTab, "⏏ Unload Script", COL.Red, function()
     Farm.enabled = false
     Presets.stop()
     Webhook.enabled = false
+    try(function() RunService:Set3dRenderingEnabled(true) end)  -- restore 3D
     if hotGui then hotGui:Destroy() end
     screen:Destroy()
 end, 23)
@@ -2762,6 +3007,7 @@ makeButton(settingsTab, "🔄 Reload latest update", COL.Accent2, function()
         try(function() Humanoid.WalkSpeed = 16 end)
         try(function() Humanoid.JumpPower = 50 end)
     end
+    try(function() RunService:Set3dRenderingEnabled(true) end)  -- restore 3D
     if hotGui then hotGui:Destroy() end
     if screen then screen:Destroy() end
     log("reloading latest version…")
@@ -2773,6 +3019,16 @@ makeButton(settingsTab, "🔄 Reload latest update", COL.Accent2, function()
     end)
     if not ok2 then warn("[spud] reload error: " .. tostring(err2)) end
 end, 24)
+
+sectionLabel(settingsTab, "Privacy", 25)
+makeToggle(settingsTab, "Streamer Mode (hide UI + mask balance)", false, function(v)
+    Options.Streamer = v
+    setAllVisible(not v)
+    if not v then streamCensorBar(false) end
+    notify(v and "Streamer Mode ON — UI hidden, balance masked, names masked in alerts"
+        or "Streamer Mode OFF")
+end, 26)
+makeInfo(settingsTab, "While Streamer Mode is on: our windows are hidden (RIGHT SHIFT brings them back), the coin balance is covered by a mask, and join-alert names are hidden. The game's own player list is NOT maskable from a script — turn it off in-game if you're recording.", 27)
 
 ------------------------------------------------------------
 -- MOBILE FIT — phones/tablets (and MuMu) report TouchEnabled. The UI is
@@ -2870,6 +3126,7 @@ screen.Destroying:Connect(function()
     Farm.enabled = false
     Presets.stop()
     Options.NoClip = false
+    try(function() RunService:Set3dRenderingEnabled(true) end)  -- restore 3D
     if Humanoid then
         Humanoid.WalkSpeed = 16
         Humanoid.JumpPower = 50
