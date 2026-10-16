@@ -1,0 +1,111 @@
+# 🥔 SPUD FARM — Farming and Friends scripts
+
+## Quick start (using the script)
+1. Copy the raw script link:
+   `https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua`
+2. Paste that link into your executor's script box (or open the file here, click
+   **Raw**, copy everything) and execute.
+3. In game: **RIGHT SHIFT** = menu · **📡** = webhook panel · **🥔** = hide/show all.
+
+Free VIP servers (this game has them) + short sessions = far lower report risk.
+Read the Stealth section below before farming in public servers.
+
+## Files
+
+### `SpudFarm_Full.lua` — THE MAIN SCRIPT (use this one)
+Everything merged into one paste-and-run file:
+- **Farm tab** — Farming auto-cycle (PLOW → CULTIVATE → PLANT → GROW → HARVEST → SELL),
+  **crop selector** (Wheat, Corn, Rice, Oat, Sugar Cane, Soybeans, Tomatoes, Cabbage,
+  Carrots, Potatoes, Cocoa, **Grape**, Custom) with auto set grow-time from wiki data,
+  a **live crop info line** (grow time · seed cost/box · avg $/hr · equipment
+  requirements · price-rotation tip), auto seed-loading during PLANT, Auto-Sell,
+  Grow time slider, Skip Stage / Reset buttons, live status line
+- **Presets tab** — Chocolate Milk (milk cows → deposit → cocoa → levers → collect → sell),
+  Cake & Eggs (**7 steps**: eggs → milk → wheat/milk/egg deposits → 4 levers →
+  **batter → oven bake** → collect + sell), Wool Run (shear → spindel bundles,
+  5 wool each → sell); LOOP toggle, STOP button
+- **Player tab** — walkspeed, jump power, infinite jump, noclip, anti-AFK, FPS boost
+- **Teleport tab** — Ctrl+Click teleport + FarmCo / AnimalCo / TractorCo / LumberCo /
+  WoodNStuff / One-Stop / Factory / Spawn buttons (2026 central-town map layout)
+- **Stealth tab** — detection-risk reduction (see below)
+- **Settings tab** — Movement mode (**VFly** = fast BodyVelocity fly + snap teleport,
+  **Tween** = slow safe glide) + vfly speed slider; fix in-game names (cow, milker, shop,
+  factory, field tile, sell key, tractor, **planter, harvester, batter drop, oven**)
+  without touching code; unload button
+- **Webhook window** (📡 button in the title bar) — its own UI with URL box, enable
+  toggle, test button, **live feed** (every farm round, preset cycle, stealth break and
+  crowd-guard pause appears instantly, even with logging off) and a queue status line.
+  Sends to your own Discord webhook, rate-limited (≈1 msg / 6.5s) with coin-gain notes
+- **🥔 potato button** (left edge of the screen, its own overlay) — press it to hide
+  **every** window at once (main + webhook), press again to bring them all back. It
+  stays visible while everything else is hidden, and you can drag it anywhere
+- Menu keybind: **RIGHT SHIFT** (same as the potato: toggles all windows)
+
+Wiki-accurate details baked in (researched 2026): FarmCo selling = drive onto the
+elevated platform → **Q** (opens sell menu) → **E** (confirms); **prices rotate every
+~5 min** — red/green/rainbow boards, rainbow = peak (wait for it on big potato/tomato
+hauls); real equipment names (ZM80 tractor, SRC6 combine, KGF 3000 planter, AED300
+lvl-2 seeder, Oxbo3220 cocoa harvester, TK500/chainsaw forestry); factory levers pulled
+one-by-one in the exact wiki sequences.
+
+Recipes: **Chocolate Milk** = 25 cocoa + 10 regular milk (or 5 free-range, 2:1;
+spoiled milk rejected) per jug, ~20–23k coins, max 60/run; **Cake** = 100 wheat + 1 egg
+box (12 eggs) + 1 milk → batter → oven; **Wool** = 5 raw wool per spindel bundle.
+Cow happiness decides milk quality (<60% spoiled, 60–89% regular, 90%+ free-range).
+
+Economy (per seed box = 50 crops, average prices): Wheat ≈3,000/hr … **Tomatoes
+≈7,686/hr** (best field crop), Potatoes ≈7,500/hr, Cabbage ≈6,500/hr; Cocoa raw ≈5,625/hr
+but is meant for chocolate milk (S-tier); Pine logs ≈19,500/hr; Cypress logs ≈63,000/hr.
+Animal prices: chicken 1,500 · sheep 3,000 (Sheep License ~7,200 XP) · cow 4,500;
+cows/barns are free of license, eggs feed the Cake + Scrambled Egg factories.
+Joining the Dunn Games Roblox group (Farmer's Club) adds **+5% sell value**.
+Licenses gate shops (Goals system) — the script can't buy locked stock for you.
+
+### Stealth / "undetected" — what it can and cannot do
+Roblox detection has three layers. **No Luau script can affect layer 1:**
+1. **Hyperion/Byfron (client integrity)** — detects the *executor* (injection, hooks,
+   unsigned modules). Depends entirely on your executor being currently patched.
+2. **Server movement validation** — flags instant teleports / huge speeds.
+   Mitigations built in: **two movement modes** — VFly (BodyVelocity fly +
+   snap teleport, fast; the default) or Tween (slow stepped glide, safer) —
+   Walkspeed/Jump clamps, NoClip force-blocked in stealth, all actions via
+   real ProximityPrompts + E-key virtual input (no RemoteEvent guessing =
+   no honeypot risk).
+3. **Behavioral/ML scoring** — flags robotic timing, 24/7 sessions, crowded-server
+   play. Mitigations built in: ±40% timing jitter, random micro-pauses, session
+   limiter (auto-break, default 45 min on / 4 min off), crowd guard (auto-pause
+   when the server fills up).
+
+**Honest limits:** these reduce risk, they do not make you invisible. Use a **free VIP
+server** (this game has them), keep sessions short, and consider an alt account.
+Running 24/7 in public servers is the fastest way to get reported regardless.
+
+### `FarmingAndFriends_Main.lua` — earlier generic version
+Generic crop-plot script (attribute/remote auto-detection). Kept as a fallback;
+`SpudFarm_Full.lua` supersedes it for Farming and Friends.
+
+### `spud-gui-preview.html` — GUI preview
+Interactive browser preview of the GUI look/feel — open it in any browser.
+
+## Contributing / fixing names
+Found a wrong in-game name after a game update? Open an issue (or PR) with the
+correct name and which feature it affects — Settings-box defaults live in the
+`CONFIG` block at the top of `SpudFarm_Full.lua`.
+
+## Codes (status: disabled)
+As of mid-2026 Dunn Games has **temporarily removed code redemption** (confirmed by the
+community manager; the medal-icon Social menu accepts nothing). Sites listing "working"
+codes (HARVESTDAY, COINBLAST, …) are fake lists. Expired real codes: NOSPAM, DunnGames,
+Seniac, BunnyFilms. Watch the official Discord for when redemption returns.
+
+## Name fixing
+The game updates its internals often. If a feature can't find its target
+(e.g. milking does nothing), open **Settings**, use a workspace explorer /
+remote spy to find the real in-game name, and type it into the matching box.
+You can list **several guesses separated by commas** (e.g. `Milker, Udder Tool`) —
+any candidate matching an in-game name will be used.
+The wiki-sourced defaults (Cow, Milker, FarmCo, KGF, SRC6, …) are best guesses.
+
+## Executor compatibility
+Synapse X, Xeno, Delta, Wave, Solara, Fluxus, etc. (uses getgenv/gethui/cloneref
+with fallbacks where available).

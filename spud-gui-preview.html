@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SPUD FARM — GUI Preview</title>
+<style>
+  :root {
+    --accent: #FFB842;
+    --bg: #14161C;
+    --bg2: #1E2129;
+    --border: #3C404A;
+    --txt: #EBEDF0;
+    --sub: #969BA5;
+    --green: #50DC64;
+    --red: #963C3C;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; }
+  body {
+    background: radial-gradient(1200px 600px at 20% -10%, #1b1e27 0%, #0d0f14 60%);
+    min-height: 100vh;
+    font-family: "Segoe UI", -apple-system, "Helvetica Neue", sans-serif;
+    color: var(--txt);
+    overflow: hidden;
+    position: relative;
+  }
+  body::after {
+    content: "🥔 SPUD FARM — interactive preview (drag the windows, flip the toggles)";
+    position: fixed;
+    bottom: 18px; left: 50%; transform: translateX(-50%);
+    color: var(--sub); font-size: 12px; letter-spacing: .4px;
+  }
+
+  .window {
+    position: absolute;
+    width: 300px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 10px 30px rgba(0,0,0,.5);
+    cursor: default;
+  }
+  .titlebar {
+    height: 34px;
+    background: var(--bg2);
+    border-radius: 10px 10px 0 0;
+    display: flex;
+    align-items: center;
+    padding: 0 12px;
+    cursor: grab;
+    position: relative;
+    border-bottom: 1px solid var(--border);
+  }
+  .titlebar:active { cursor: grabbing; }
+  .titlebar .title {
+    color: var(--accent);
+    font-weight: 700;
+    font-size: 15px;
+    letter-spacing: .3px;
+  }
+  .titlebar .dot {
+    position: absolute; right: 12px;
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--green);
+    transition: background .2s;
+  }
+  .content { padding: 12px 14px 16px; }
+
+  .section {
+    color: var(--sub); font-size: 10px; text-transform: uppercase;
+    letter-spacing: 1.2px; margin: 12px 0 6px;
+  }
+  .section:first-child { margin-top: 0; }
+
+  .row { display: flex; align-items: center; justify-content: space-between; margin: 8px 0; }
+  .row .label { font-size: 14px; }
+
+  .toggle {
+    width: 52px; height: 26px; background: var(--bg2);
+    border-radius: 13px; position: relative; cursor: pointer;
+    transition: background .15s;
+  }
+  .toggle .knob {
+    position: absolute; top: 2px; left: 2px;
+    width: 22px; height: 22px; border-radius: 50%;
+    background: var(--sub); transition: left .15s, background .15s;
+  }
+  .toggle.on { background: #3C2D14; }
+  .toggle.on .knob { left: 28px; background: var(--accent); }
+
+  .slider-label { display: flex; justify-content: space-between; font-size: 14px; margin-bottom: 4px; }
+  .slider-label .val { color: var(--accent); font-weight: 700; }
+  .slider-track {
+    height: 6px; background: var(--bg2); border-radius: 3px;
+    position: relative; cursor: pointer;
+  }
+  .slider-fill {
+    height: 100%; width: 20%; background: var(--accent); border-radius: 3px;
+  }
+
+  .btn {
+    width: 100%; height: 28px; background: var(--bg2); color: var(--txt);
+    border: none; border-radius: 8px; font-weight: 700; font-size: 13px;
+    cursor: pointer; margin: 4px 0; transition: background .12s;
+    font-family: inherit;
+  }
+  .btn:hover { background: #2D303A; }
+
+  .status {
+    text-align: center; color: var(--sub); font-size: 12px; margin-top: 10px;
+  }
+
+  /* preset panel */
+  .preset-btn { width: 100%; }
+  .preset-btn.active { background: #3C2D14; color: var(--accent); }
+  .stop-btn { background: var(--red); }
+  .stop-btn:hover { background: #7a2e2e; }
+  .half { display: flex; gap: 8px; }
+  .half .btn { flex: 1; }
+
+  /* log */
+  .log {
+    position: fixed; right: 18px; bottom: 46px;
+    width: 300px; height: 220px;
+    background: rgba(14,16,21,.92);
+    border: 1px solid var(--border); border-radius: 10px;
+    padding: 10px 12px; overflow-y: auto; font-size: 11.5px;
+    font-family: "Consolas", "Menlo", monospace;
+    color: var(--sub); line-height: 1.7;
+  }
+  .log .step { color: var(--accent); }
+  .log .done { color: var(--green); }
+  .log .err { color: #e06c6c; }
+</style>
+</head>
+<body>
+
+<!-- ================= MAIN WINDOW ================= -->
+<div class="window" id="main" style="top: 80px; left: 30px;">
+  <div class="titlebar" id="mainBar">
+    <span class="title">🥔 SPUD FARM</span>
+    <span class="dot" id="statusDot"></span>
+  </div>
+  <div class="content">
+    <div class="section">Farming</div>
+    <div class="row">
+      <span class="label">Farming</span>
+      <div class="toggle on" data-id="farming"><div class="knob"></div></div>
+    </div>
+    <div class="row">
+      <span class="label">Auto-Sell</span>
+      <div class="toggle on" data-id="autosell"><div class="knob"></div></div>
+    </div>
+
+    <div class="section">Settings</div>
+    <div class="row">
+      <span class="label">Anti-AFK</span>
+      <div class="toggle on" data-id="antiafk"><div class="knob"></div></div>
+    </div>
+    <div class="slider-label"><span>Grow time</span><span class="val" id="growVal">8 min</span></div>
+    <div class="slider-track" id="slider"><div class="slider-fill" id="sliderFill"></div></div>
+
+    <div class="section">Control</div>
+    <button class="btn" id="skipBtn">Skip Stage</button>
+    <button class="btn" id="resetBtn">Reset to Plow</button>
+
+    <div class="status" id="mainStatus">stage PLOW · round 0 · RUNNING</div>
+  </div>
+</div>
+
+<!-- ================= PRESETS PANEL ================= -->
+<div class="window" id="preset" style="top: 300px; left: 30px;">
+  <div class="titlebar" id="presetBar">
+    <span class="title">PRESETS</span>
+  </div>
+  <div class="content">
+    <button class="btn preset-btn" id="cmBtn">Chocolate Milk</button>
+    <div class="half">
+      <button class="btn" id="loopBtn">LOOP: OFF</button>
+      <button class="btn stop-btn" id="stopBtn">STOP</button>
+    </div>
+    <div class="status" id="presetStatus">idle</div>
+  </div>
+</div>
+
+<!-- ================= LOG ================= -->
+<div class="log" id="log">
+  <div>[spud] GUI preview loaded</div>
+  <div>[spud] drag the windows, flip the toggles</div>
+</div>
+
+<script>
+// ---------- state ----------
+const state = {
+  farming: true,
+  autosell: true,
+  antiafk: true,
+  growMin: 8,
+  stage: 1,
+  round: 0,
+  presetRunning: false,
+  presetName: null,
+  loop: false,
+  stop: false,
+};
+const STAGES = ["PLOW","CULTIVATE","PLANT","GROW","HARVEST","SELL"];
+
+const $ = id => document.getElementById(id);
+const logEl = $("log");
+
+function log(msg, cls) {
+  const d = document.createElement("div");
+  d.textContent = msg;
+  if (cls) d.className = cls;
+  logEl.appendChild(d);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// ---------- dragging ----------
+function makeDraggable(win, bar) {
+  let sx, sy, ox, oy, dragging = false;
+  bar.addEventListener("mousedown", e => {
+    dragging = true; sx = e.clientX; sy = e.clientY;
+    ox = win.offsetLeft; oy = win.offsetTop;
+  });
+  window.addEventListener("mousemove", e => {
+    if (!dragging) return;
+    win.style.left = (ox + e.clientX - sx) + "px";
+    win.style.top  = (oy + e.clientY - sy) + "px";
+  });
+  window.addEventListener("mouseup", () => dragging = false);
+}
+makeDraggable($("main"), $("mainBar"));
+makeDraggable($("preset"), $("presetBar"));
+
+// ---------- toggles ----------
+document.querySelectorAll(".toggle").forEach(t => {
+  t.addEventListener("click", () => {
+    t.classList.toggle("on");
+    state[t.dataset.id] = t.classList.contains("on");
+    log(`[spud] ${t.dataset.id}: ${state[t.dataset.id] ? "ON" : "OFF"}`);
+    updateStatus();
+  });
+});
+
+// ---------- slider ----------
+const slider = $("slider"), fill = $("sliderFill"), growVal = $("growVal");
+function setSlider(v) { // v in minutes 1..60
+  state.growMin = Math.max(1, Math.min(60, v));
+  fill.style.width = ((state.growMin - 1) / 59 * 100) + "%";
+  growVal.textContent = state.growMin + " min";
+}
+slider.addEventListener("mousedown", e => {
+  const rel = (e.clientX - slider.getBoundingClientRect().left) / slider.offsetWidth;
+  setSlider(Math.round(1 + rel * 59));
+  log(`[spud] growWait set to ${state.growMin * 60}s`);
+});
+setSlider(8);
+
+// ---------- buttons ----------
+$("skipBtn").addEventListener("click", () => {
+  state.stage = state.stage % 6 + 1;
+  log(`[spud] skipped to ${STAGES[state.stage-1]}`);
+  updateStatus();
+});
+$("resetBtn").addEventListener("click", () => {
+  state.stage = 1;
+  log("[spud] reset to PLOW");
+  updateStatus();
+});
+
+// ---------- status ----------
+function updateStatus() {
+  $("mainStatus").textContent =
+    `stage ${STAGES[state.stage-1]} · round ${state.round} · ${state.farming ? "RUNNING" : "PAUSED"}`;
+  $("statusDot").style.background = state.farming ? "var(--green)" : "var(--red)";
+}
+
+// ---------- preset: chocolate milk (simulated) ----------
+const CM_STEPS = [
+  "1/8 milking cows",
+  "2/8 depositing milk",
+  "3/8 harvesting cocoa",
+  "4/8 depositing cocoa",
+  "5/8 starting factory",
+  "6/8 processing",
+  "7/8 collecting product",
+  "8/8 selling",
+];
+
+$("loopBtn").addEventListener("click", () => {
+  state.loop = !state.loop;
+  $("loopBtn").textContent = state.loop ? "LOOP: ON" : "LOOP: OFF";
+  $("loopBtn").style.background = state.loop ? "#3C2D14" : "";
+});
+
+function runPreset() {
+  if (state.presetRunning) { state.stop = true; return; }
+  state.presetRunning = true;
+  state.presetName = "Chocolate Milk";
+  state.stop = false;
+  $("cmBtn").classList.add("active");
+  $("presetStatus").textContent = "running: Chocolate Milk";
+  log("[spud][CM] preset started", "step");
+
+  (async () => {
+    do {
+      for (let i = 0; i < CM_STEPS.length; i++) {
+        if (state.stop) break;
+        log(`[spud][CM] ${CM_STEPS[i]}`, "step");
+        await sleep(500);
+        if (state.stop) break;
+        log(`[spud][CM] ${CM_STEPS[i]} ✔`, "done");
+      }
+      if (!state.stop) {
+        state.round++;
+        log(`[spud][CM] cycle complete · round ${state.round}`, "done");
+      }
+    } while (state.loop && !state.stop);
+
+    state.presetRunning = false;
+    state.presetName = null;
+    $("cmBtn").classList.remove("active");
+    $("presetStatus").textContent = "idle";
+    log("[spud][CM] preset stopped", "step");
+  })();
+}
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+$("cmBtn").addEventListener("click", runPreset);
+$("stopBtn").addEventListener("click", () => { state.stop = true; });
+
+updateStatus();
+</script>
+</body>
+</html>
