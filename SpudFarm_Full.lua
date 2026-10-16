@@ -1588,28 +1588,39 @@ UserInputService.InputBegan:Connect(function(input)
     end
 end)
 
--- FPS boost
+-- FPS boost — MAXIMUM graphics lowering (screen stays visible; fully
+-- disabling 3D rendering blanks out MuMu/emulator screens, so that moved
+-- to its own opt-in toggle in the Player tab)
+local FxDisabled = {}
 local function applyFpsBoost(enabled)
     if enabled then
-        -- 3D rendering fully OFF (UI still renders) — the overnight mode
-        try(function() RunService:Set3dRenderingEnabled(false) end)
         try(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 end)
+        try(function() settings().Rendering.MeshPartDetailLevel = Enum.MeshPartDetailLevel.Level01 end)
+        try(function() Lighting.GlobalShadows = false end)
         for _, obj in ipairs(Lighting:GetDescendants()) do
-            if obj:IsA("Atmosphere") or obj:IsA("Sky") then obj.Enabled = false end
+            if (obj:IsA("Atmosphere") or obj:IsA("Sky")) and obj.Enabled then
+                obj.Enabled = false
+                table.insert(FxDisabled, obj)
+            end
         end
         for _, obj in ipairs(Workspace:GetDescendants()) do
             if obj:IsA("BasePart") and obj.Name:lower():find("grass") then obj:Destroy() end
         end
-        log("FPS boost on (3D render OFF)")
+        log("FPS boost on (graphics at minimum)")
     else
-        try(function() RunService:Set3dRenderingEnabled(true) end)
         try(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level21 end)
+        try(function() settings().Rendering.MeshPartDetailLevel = Enum.MeshPartDetailLevel.Level02 end)
+        try(function() Lighting.GlobalShadows = true end)
+        for _, obj in ipairs(FxDisabled) do
+            if obj.Parent then obj.Enabled = true end
+        end
+        FxDisabled = {}
         log("FPS boost off")
     end
 end
 
--- DEFAULT: 3D rendering off from startup (requested default for overnight
--- grinding — toggle back in Player > FPS Boost; unload/reload restores it)
+-- DEFAULT: graphics start at minimum for overnight grinding (the screen
+-- stays visible — "Disable 3D render" below is the separate extreme mode)
 Options.FPSBoost = true
 applyFpsBoost(true)
 
@@ -2705,11 +2716,21 @@ sectionLabel(playerTab, "Misc", 8)
 makeToggle(playerTab, "Anti-AFK", false, function(v)
     Options.AntiAFK = v
 end, 9)
-makeToggle(playerTab, "FPS Boost (3D render OFF)", true, function(v)
+makeToggle(playerTab, "FPS Boost (min graphics)", true, function(v)
     Options.FPSBoost = v
     applyFpsBoost(v)
 end, 10)
-makeInfo(playerTab, "Note: high Walkspeed/Jump values are the easiest thing for a server to flag. Stealth mode clamps them to human-ish caps automatically.", 11)
+makeToggle(playerTab, "Disable 3D render (extreme — may blank emulator screens)", false, function(v)
+    local ok = pcall(function() RunService:Set3dRenderingEnabled(not v) end)
+    if not ok then
+        notify("This executor doesn't support disabling 3D rendering")
+        return
+    end
+    Options.Render3DOff = v
+    notify(v and "3D rendering OFF — on some emulators the screen goes blank; tap this toggle back OFF (or Reload/Unload restores it)"
+        or "3D rendering back ON")
+end, 11)
+makeInfo(playerTab, "Note: high Walkspeed/Jump values are the easiest thing for a server to flag. Stealth mode clamps them to human-ish caps automatically.", 12)
 
 sectionLabel(playerTab, "Social & Servers", 12)
 makeTextbox(playerTab, "Spy name (player)", "", function(v)
