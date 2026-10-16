@@ -568,7 +568,9 @@ local ok, err = pcall(function()
             local act = 0
             for _, b in ipairs(bills:GetChildren()) do
                 if b:IsA("GuiBase2d") then
-                    local e = (b:IsA("GuiObject") and b.Enabled) or false
+                    -- BillboardGui is NOT a GuiObject — read Enabled directly
+                    local okE, e = pcall(function() return b.Enabled end)
+                    e = okE and e == true
                     if e then act += 1 end
                     w("    - " .. b.Name .. "  Enabled=" .. tostring(e)
                         .. (e and "  <== ACTIVE HERE" or ""))
