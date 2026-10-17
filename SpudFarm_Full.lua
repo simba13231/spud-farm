@@ -137,7 +137,7 @@ local okBuild, errBuild = pcall(function()
     end
 
     Tabs.Farm:CreateButton({
-        Title = "🚜 Mount tractor",
+        Title = "farming loop",
         Callback = function()
             local char = LocalPlayer.Character
             local hum = char and char:FindFirstChildOfClass("Humanoid")
