@@ -227,18 +227,35 @@ local okBuild, errBuild = pcall(function()
         end
     end
 
+    -- VFly-style vehicle glide: ease-out CFrame steps facing the direction
+    -- of travel — same feel as VFly player movement. NO physics objects
+    -- (BodyVelocity made the solver fight the seat → lag + rubber-banding).
     local function glideTractor(tr, targetPos)
-        local startPivot = tr:GetPivot()
-        local rot = startPivot - startPivot.Position -- rotation-only CFrame
-        local endCF = CFrame.new(targetPos.X, startPivot.Position.Y, targetPos.Z) * rot
-        local dist = (Vector3.new(startPivot.Position.X, 0, startPivot.Position.Z)
-            - Vector3.new(targetPos.X, 0, targetPos.Z)).Magnitude
-        if dist < 0.5 then return end
-        local steps = math.clamp(math.floor(dist / 1.5), 3, 40)
+        local pos = tr:GetPivot().Position
+        local flat = Vector3.new(targetPos.X - pos.X, 0, targetPos.Z - pos.Z)
+        if flat.Magnitude < 0.5 then return end
+        local y = pos.Y -- stay on the ground plane
+        local steps = math.clamp(math.floor(flat.Magnitude / 1.5), 3, 40)
         for i = 1, steps do
-            tr:PivotTo(startPivot:Lerp(endCF, i / steps))
+            local t = i / steps
+            local ease = 1 - (1 - t) * (1 - t) -- ease-out: quick start, soft landing
+            local p = Vector3.new(pos.X, y, pos.Z) + flat * ease
+            tr:PivotTo(CFrame.lookAt(p, p + flat)) -- face travel direction
             task.wait(0.05)
         end
+    end
+
+    -- back the tractor up so its REAR faces the plow: the hitch is at the
+    -- back, and the tug-test then pulls forward (clean pull — never drives
+    -- over the implement, an old-script bug we're not repeating)
+    local function standOffPlow(tr, plow, standOffPos)
+        glideTractor(tr, standOffPos)
+        local pp = plow:GetPivot().Position
+        local tp = tr:GetPivot().Position
+        local away = Vector3.new(tp.X - pp.X, 0, tp.Z - pp.Z)
+        if away.Magnitude < 0.5 then away = Vector3.new(0, 0, -1) end
+        tr:PivotTo(CFrame.lookAt(tp, tp + away.Unit)) -- rear toward the plow
+        task.wait(0.2)
     end
 
     -- one hitch attempt: press X once → tug forward 5 studs → did the plow follow?
@@ -324,8 +341,8 @@ local okBuild, errBuild = pcall(function()
                 dir = Vector3.new(dir.X, 0, dir.Z)
                 if dir.Magnitude < 0.5 then dir = Vector3.new(0, 0, -1) end
                 local standOff = plowPos + dir.Unit * 6
-                log(string.format("gliding tractor to plow (%.0f studs)…", pdist))
-                glideTractor(tr, standOff)
+                log(string.format("vfly-ing tractor to plow (%.0f studs)…", pdist))
+                standOffPlow(tr, plow, standOff)
                 task.wait(0.4)
             end
 
@@ -335,7 +352,7 @@ local okBuild, errBuild = pcall(function()
                     local dir = tr:GetPivot().Position - plowPos
                     dir = Vector3.new(dir.X, 0, dir.Z)
                     if dir.Magnitude < 0.5 then dir = Vector3.new(0, 0, -1) end
-                    glideTractor(tr, plowPos + dir.Unit * 6) -- failed tug moved us away
+                    standOffPlow(tr, plow, plowPos + dir.Unit * 6) -- failed tug moved us away
                     task.wait(0.4)
                 end
                 local hooked, moved = attemptHitch(tr, plow)
