@@ -171,14 +171,20 @@ local okBuild, errBuild = pcall(function()
     --   seated vehicles GLIDE (PivotTo steps), never instant-snap — snaps
     --   get rubber-banded by the server and desync everything;
     --   rotation is preserved; every attempt ends with a TUG-TEST)
-    local function findPlow(nearPos)
+    -- dump-confirmed structure: Workspace.Objects.Equipment.<Model> —
+    -- implements are CODED models (KADL, KQF3000, S4204…), never named "plow"
+    local function equipmentFolder()
+        local objects = workspace:FindFirstChild("Objects")
+        return objects and objects:FindFirstChild("Equipment")
+    end
+
+    local function findPlow(nearPos, tractorModel)
+        local folder = equipmentFolder()
         local best, bestDist
-        for _, d in ipairs(workspace:GetDescendants()) do
-            local n = d.Name:lower()
-            if (d:IsA("Model") or d:IsA("BasePart"))
-                and (n:find("plow", 1, true) or n:find("plough", 1, true)) then
-                local p = d:IsA("BasePart") and d.Position or d:GetPivot().Position
-                local dist = (p - nearPos).Magnitude
+        for _, d in ipairs(folder and folder:GetChildren() or {}) do
+            if d:IsA("Model") and d ~= tractorModel
+                and not d.Name:lower():find("trailer", 1, true) then
+                local dist = (d:GetPivot().Position - nearPos).Magnitude
                 if not bestDist or dist < bestDist then
                     best, bestDist = d, dist
                 end
@@ -187,25 +193,30 @@ local okBuild, errBuild = pcall(function()
         return best, bestDist
     end
 
-    -- when findPlow fails: list the nearest model names so we can read the
-    -- real implement name straight from the Console tab
-    local function logNearbyModels(pos, excludeModel)
-        local seen, list = {}, {}
-        for _, d in ipairs(workspace:GetDescendants()) do
-            if d:IsA("Model") and not seen[d.Name] and d ~= excludeModel then
-                local dd = (d:GetPivot().Position - pos).Magnitude
-                if dd < 50 then
-                    seen[d.Name] = true
-                    list[#list + 1] = { n = d.Name, d = dd }
-                end
-            end
+    -- the VehicleHUD shows the HITCHED implement as Secondary EquipmentName
+    local function hitchedImplementName()
+        local ok, v = pcall(function()
+            return LocalPlayer.PlayerGui
+                .GuiViews.HUD.VehicleHUD.HUD.Content
+                .EquipmentInfo.Secondary.EquipmentName
+        end)
+        if ok and v and v:IsA("TextLabel") then
+            local t = tostring(v.Text):gsub("^%s+", ""):gsub("%s+$", "")
+            if t ~= "" then return t end
         end
-        table.sort(list, function(a, b) return a.d < b.d end)
-        log("plow not found — nearest models to the tractor:")
-        for i = 1, math.min(#list, 8) do
-            log(string.format("  · %s (%.0f studs)", list[i].n, list[i].d))
+        return nil
+    end
+
+    local function logEquipment()
+        local folder = equipmentFolder()
+        if not folder then
+            log("Objects.Equipment folder not found")
+            return
         end
-        if #list == 0 then log("  (nothing within 50 studs?)") end
+        log("equipment on your farm:")
+        for _, d in ipairs(folder:GetChildren()) do
+            if d:IsA("Model") then log("  · " .. d.Name) end
+        end
     end
 
     local function glideTractor(tr, targetPos)
@@ -278,11 +289,22 @@ local okBuild, errBuild = pcall(function()
 
             -- ▸ step 3: hitch the plow
             local tractorPos = tr:GetPivot().Position
-            local plow, pdist = findPlow(tractorPos)
-            if not plow then
-                logNearbyModels(tractorPos, tr)
+            local plow, pdist = findPlow(tractorPos, tr)
+
+            -- if the HUD already lists a hitched implement, X would UNHITCH it
+            local attached = hitchedImplementName()
+            if attached then
+                log("implement already hitched (HUD: " .. attached .. ") — nothing to do")
+                log("press X in-game to unhitch first, then run again")
                 return
             end
+
+            if not plow then
+                log("plow not found in Objects.Equipment")
+                logEquipment()
+                return
+            end
+            log("hitch target: " .. plow.Name .. string.format(" (%.0f studs)", pdist or 0))
             if pdist > 6 then
                 local plowPos = plow:GetPivot().Position
                 local dir = tractorPos - plowPos
