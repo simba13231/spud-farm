@@ -466,6 +466,79 @@ local okBuild, errBuild = pcall(function()
         return false, "still " .. math.floor(d) .. " studs short"
     end
 
+    -- honest per-cell read via the game's OWN FieldHelper module (dump §26:
+    -- require() works even though Source is blocked) — returns how many
+    -- cells currently have Stage == "Plowed", out of the field's total.
+    local function countPlowedCells(field)
+        local ok, plowed, total = pcall(function()
+            local mods = game:GetService("ReplicatedStorage"):FindFirstChild("Modules")
+            local F = mods and mods:FindFirstChild("FieldHelper")
+            assert(F, "FieldHelper missing")
+            F = require(F)
+            assert(type(F.GetCells) == "function", "GetCells missing")
+            local cells = F.GetCells(field)
+            assert(type(cells) == "table", "GetCells returned no table")
+            local pl, tot = 0, 0
+            for _, cell in pairs(cells) do
+                tot += 1
+                if type(cell) == "table" and cell.Stage == "Plowed" then
+                    pl += 1
+                end
+            end
+            return pl, tot
+        end)
+        if ok then return plowed, total end
+        return nil
+    end
+
+    -- ▸ PLOW THE FIELD (dump §26: the field is ONE 50×100 plate of 50
+    --   VIRTUAL cells, 10×10 studs each — the game's OWN client detects the
+    --   implement passing over a cell and fires the plow action, so driving
+    --   over every cell IS plowing: 3 cells came back Stage="Plowed" in a
+    --   neat line after drive passes). Serpentine sweep: drive along the
+    --   SHORT axis, step 10 studs along the LONG one, alternating ends each
+    --   row. Overshoot both ends slightly so the TRAILING plow still
+    --   covers the edge cells.
+    local function plowTheField(tr, field)
+        local okB, cf, sz = pcall(function() return field:GetBoundingBox() end)
+        if not (okB and cf) then return false, "no bounds" end
+        local c = cf.Position
+        local alongX = sz.X <= sz.Z
+        local driveHalf = (alongX and sz.X or sz.Z) / 2 + 6 -- +6: plow trails
+        local rowSpan   = (alongX and sz.Z or sz.X)
+        local rows = math.max(math.floor(rowSpan / 10 + 0.5), 1)
+        local function pt(along, step)
+            if alongX then return Vector3.new(c.X + along, 0, c.Z + step) end
+            return Vector3.new(c.X + step, 0, c.Z + along)
+        end
+        local before, total = countPlowedCells(field)
+        log(string.format("plowing: %d rows × %d studs  (%s)", rows, driveHalf * 2,
+            before and string.format("%d/%d cells already Plowed", before, total)
+                or "cell read unavailable"))
+        for r = 1, rows do
+            if stopping() then return nil end
+            local step = -rowSpan / 2 + 5 + (r - 1) * 10 -- row centers (10-stud cells)
+            local dir = (r % 2 == 1) and -1 or 1         -- serpentine
+            glideTractor(tr, pt(dir * driveHalf, step))
+            task.wait(0.1)
+        end
+        if stopping() then return nil end
+        local after, tot2 = countPlowedCells(field)
+        if after then
+            log(string.format("sweep done: %d/%d cells Plowed", after, tot2))
+            if tot2 > 0 and after >= tot2 then
+                log("✅ the whole field is plowed")
+            elseif before and after <= before then
+                log("cell count did NOT change — drive-over isn't plowing (next: the plow remote)")
+            else
+                log("some cells left — run the loop again (plow may be narrower than one cell)")
+            end
+        else
+            log("sweep done — cell read unavailable, check the field visually")
+        end
+        return true
+    end
+
     -- the actual farming loop, run on its own thread by the toggle below.
     -- stopping() is checked at every wait/step so switching the toggle off
     -- kills the loop at its next step instead of letting it run on.
@@ -621,6 +694,14 @@ local okBuild, errBuild = pcall(function()
         local tH, pH = findHitchPart(tr), findHitchPart(plow)
         if tH and pH then
             log(string.format("hitch gap at arrival: %.1f studs", (tH.Position - pH.Position).Magnitude))
+        end
+
+        -- ▸ step 5: plow the field — serpentine sweep of every cell
+        --   (the game's client plows cells the implement passes over)
+        local plowed, why = plowTheField(tr, field)
+        if stopping() then return end
+        if not plowed then
+            log("plow pass aborted (" .. tostring(why) .. ")")
         end
     end
 
