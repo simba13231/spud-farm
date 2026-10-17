@@ -417,6 +417,77 @@ local okBuild, errBuild = pcall(function()
         return moved > 2.5, moved
     end
 
+    -- ▸ step 6 (user request): after the sweep, PARK the plow at the FRONT
+    --   of my plot — tween there (glideTractor) and press X once, the same
+    --   proven toggle used to hitch. Verified by a tug: the plow must NOT
+    --   follow. (Option 2, despawning via the equipment manager, would need
+    --   a remote we've never confirmed — avoided.)
+    local function dropPlowAtPlotFront(tr, plow, field)
+        -- my plot = owner match, else the nearest plot to my field
+        local plots = workspace:FindFirstChild("Plots")
+        local best, bestDist
+        for _, d in ipairs(plots and plots:GetChildren() or {}) do
+            if d:IsA("Model") then
+                local cfg = d:FindFirstChild("Configurations")
+                local owner = cfg and cfg:FindFirstChild("Owner")
+                local dist = (d:GetPivot().Position - field:GetPivot().Position).Magnitude
+                if owner and owner.Value == LocalPlayer then
+                    best = d
+                    break
+                end
+                if not bestDist or dist < bestDist then best, bestDist = d, dist end
+            end
+        end
+        if not best then
+            log("parking the plow: no plot found — leaving it hitched")
+            return false
+        end
+        local front = best:FindFirstChild("FrontPlot")
+        local target
+        if front and (front:IsA("BasePart") or front:IsA("Model")) then
+            target = front:GetPivot().Position
+        end
+        if not target then
+            target = best:GetPivot().Position
+            log("parking the plow: no FrontPlot marker — using the plot center")
+        end
+        log(string.format("parking the plow: tweening to the plot front (%.0f studs)",
+            (tr:GetPivot().Position - target).Magnitude))
+        for pass = 1, 20 do -- glideTractor covers ~60 studs per call
+            if stopping() then return false end
+            local p = tr:GetPivot().Position
+            if (Vector3.new(p.X, 0, p.Z) - Vector3.new(target.X, 0, target.Z)).Magnitude <= 6 then
+                break
+            end
+            glideTractor(tr, Vector3.new(target.X, p.Y, target.Z))
+            task.wait(0.2)
+        end
+        if stopping() then return false end
+        -- press X (proven toggle), then PROVE it: tug — attached = plow
+        -- follows, parked = plow stays put
+        for attempt = 1, 2 do
+            pressKey(Enum.KeyCode.X)
+            task.wait(0.6)
+            if stopping() then return false end
+            local before = plow:GetPivot().Position
+            local pivot = tr:GetPivot()
+            local fwd = Vector3.new(pivot.LookVector.X, 0, pivot.LookVector.Z)
+            if fwd.Magnitude < 0.1 then fwd = Vector3.new(0, 0, -1) end
+            glideTractor(tr, pivot.Position + fwd.Unit * 5)
+            task.wait(0.5)
+            if stopping() then return false end
+            local followed = (plow:GetPivot().Position - before).Magnitude
+            if followed <= 2 then
+                log(string.format("✅ plow parked at the plot front (X, attempt %d — plow stayed put)", attempt))
+                return true
+            end
+            log(string.format("unhitch attempt %d: plow still follows (%.1f studs) — pressing X again",
+                attempt, followed))
+        end
+        log("⚠ plow still attached after 2 presses — unhitch manually with X")
+        return false
+    end
+
     -- dump §24: fields live in Objects.Fields — Configurations.Owner marks
     -- whose each is; Configurations.FieldType says WHAT kind ("Field" =
     -- crop field; other types exist). Pick ONLY a crop field of MY OWN
@@ -949,6 +1020,12 @@ local okBuild, errBuild = pcall(function()
         if stopping() then return end
         if not plowed then
             log("plow pass aborted (" .. tostring(why) .. ")")
+        end
+
+        -- ▸ step 6: park the plow at the plot front (only after a COMPLETED
+        --   sweep with the plow still attached — aborted runs leave it be)
+        if plowed and plow and plow:IsDescendantOf(workspace) then
+            dropPlowAtPlotFront(tr, plow, field)
         end
     end
 
