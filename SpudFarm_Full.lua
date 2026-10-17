@@ -197,18 +197,29 @@ local okBuild, errBuild = pcall(function()
         return best, bestDist
     end
 
-    -- the VehicleHUD shows the HITCHED implement as Secondary EquipmentName
+    -- the VehicleHUD Secondary slot = hitched implement, BUT the label goes
+    -- stale after unhitching (seen in dump: "Trailer" while stored). Trust it
+    -- only when the slot is visible AND the named model is spawned.
     local function hitchedImplementName()
-        local ok, v = pcall(function()
+        local ok, sec = pcall(function()
             return LocalPlayer.PlayerGui
                 .GuiViews.HUD.VehicleHUD.HUD.Content
-                .EquipmentInfo.Secondary.EquipmentName
+                .EquipmentInfo.Secondary
         end)
-        if ok and v and v:IsA("TextLabel") then
-            local t = tostring(v.Text):gsub("^%s+", ""):gsub("%s+$", "")
-            if t ~= "" then return t end
+        if not ok or not sec or not sec:IsA("GuiObject") or not sec.Visible then
+            return nil -- slot hidden = game says nothing attached
         end
-        return nil
+        local lbl = sec:FindFirstChild("EquipmentName")
+        if not (lbl and lbl:IsA("TextLabel")) then return nil end
+        local t = tostring(lbl.Text):gsub("^%s+", ""):gsub("%s+$", "")
+        if t == "" then return nil end
+        -- a stored implement can't be physically attached (stale label)
+        local folder = equipmentFolder()
+        local model = folder and folder:FindFirstChild(t)
+        if model and model:GetAttribute("InStorage") then
+            return nil
+        end
+        return t
     end
 
     local function logEquipment()
