@@ -82,10 +82,47 @@ local okBuild, errBuild = pcall(function()
         VIM:SendKeyEvent(false, key, false, game)
     end
 
+    -- ▸ AUTO-FARM STEP 2: movement (VFly = BodyVelocity fly + snap,
+    --   Tween = stepped glide). Nothing else uses this yet.
+    local Move = { Mode = "VFly", Speed = 200 }
+
+    local function moveTo(target)
+        local char = LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        if not root then return false end
+        if Move.Mode == "Tween" then
+            local dur = math.clamp((root.Position - target).Magnitude / Move.Speed, 0.05, 8)
+            local tween = game:GetService("TweenService"):Create(
+                root,
+                TweenInfo.new(dur, Enum.EasingStyle.Linear),
+                { CFrame = CFrame.new(target) })
+            tween:Play()
+            tween.Completed:Wait()
+            return true
+        end
+        -- VFly
+        local bv = Instance.new("BodyVelocity")
+        bv.MaxForce = Vector3.new(1e5, 1e5, 1e5)
+        bv.Velocity = Vector3.zero
+        bv.Parent = root
+        local arrived = false
+        for _ = 1, 200 do -- ~10s max
+            local off = target - root.Position
+            if off.Magnitude < 2.5 then arrived = true break end
+            bv.Velocity = off.Unit * math.min(Move.Speed, off.Magnitude * 8)
+            root.CFrame = CFrame.lookAt(
+                root.Position,
+                Vector3.new(target.X, root.Position.Y, target.Z))
+            task.wait(0.05)
+        end
+        bv:Destroy()
+        return arrived
+    end
+
     local function findTractor()
         local hrp = LocalPlayer.Character
             and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-        local best, bestDist
+        local best, bestDist, bestSeat
         for _, d in ipairs(workspace:GetDescendants()) do
             if d:IsA("Model") and d.Name:lower():find("zm80", 1, true) then
                 local seat = d:FindFirstChildWhichIsA("VehicleSeat", true)
@@ -93,12 +130,12 @@ local okBuild, errBuild = pcall(function()
                 if seat and hrp then
                     local dist = (seat.Position - hrp.Position).Magnitude
                     if not bestDist or dist < bestDist then
-                        best, bestDist = d, dist
+                        best, bestDist, bestSeat = d, dist, seat
                     end
                 end
             end
         end
-        return best, bestDist
+        return best, bestDist, bestSeat
     end
 
     Tabs.Farm:CreateButton({
@@ -108,12 +145,17 @@ local okBuild, errBuild = pcall(function()
             local hum = char and char:FindFirstChildOfClass("Humanoid")
             if not hum then log("no character") return end
             if hum.SeatPart then log("already seated") return end
-            local tr, dist = findTractor()
+            local tr, dist, seat = findTractor()
             if not tr then log("tractor (ZM80) not found") return end
             if dist > 10 then
-                log(string.format("tractor is %.0f studs away — stand next to it", dist))
-                return
+                log(string.format("moving to tractor (%.0f studs)…", dist))
+                if not moveTo(seat.Position + Vector3.new(0, 3, 0)) then
+                    log("couldn't reach the tractor")
+                    return
+                end
+                _, dist = findTractor()
             end
+            if dist > 10 then log("still too far after moving") return end
             log("pressing F to mount…")
             pressKey(Enum.KeyCode.F)
             task.wait(0.7)
@@ -141,6 +183,17 @@ local okBuild, errBuild = pcall(function()
             end
         end)
     end
+
+    Tabs.Settings:CreateDropdown("MoveMode", {
+        Title = "Movement",
+        Values = { "VFly", "Tween" },
+        Multi = false,
+        Default = "VFly",
+        Callback = function(v)
+            Move.Mode = v
+            log("movement mode: " .. tostring(v))
+        end,
+    })
 
     Tabs.Settings:CreateButton({
         Title = "🔄 Reload latest update",
