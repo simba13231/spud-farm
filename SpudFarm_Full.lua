@@ -551,13 +551,16 @@ local okBuild, errBuild = pcall(function()
     -- ignored: the seat's control script overwrites those properties from
     -- player input every frame.)
     -- MAP-FOLLOWING driver (user's plan): the path is a precomputed snake
-    -- of straight legs — the script just follows it. Each leg:
-    --   1. ALIGN — steer toward the leg's line at creep until the heading
-    --      matches it within ~8° (the "straighten to the field" move)
-    --   2. DRIVE — steer OFF; hold throttle and run the line dead straight;
-    --      drift off the line is corrected only with small feather steering
-    -- No reactive steering mid-row → the tractor runs the row line exactly
-    -- and the plow trails centered on it.
+    -- of straight legs — the script just follows it. Per leg: PURE
+    -- PURSUIT — aim at a point on the leg's LINE ~12 studs ahead of the
+    -- tractor; steer proportional to the heading error vs that aim (full
+    -- turn past ~17°, feather past ~6°), creep while correcting, cruise
+    -- when straight. Any lateral offset tilts the aim back toward the
+    -- line, so the tractor always CONVERGES onto it and then runs it dead
+    -- straight. (v7 nudge-only correction settled into a PARALLEL OFFSET
+    -- beside the line — user: "it just follows the line instead of going
+    -- back on the line"; the old heading-align mode steered back to the
+    -- parallel heading and undid every nudge.)
     -- (v3 orbited goals; v4 reverse-assist jackknifed the plow — both gone.)
     -- Returns true=leg done, false=keys didn't drive (caller falls back to
     -- the glide), nil=killed.
@@ -584,7 +587,7 @@ local okBuild, errBuild = pcall(function()
         dir = dir / legLen
         local perp = Vector3.new(-dir.Z, 0, dir.X) -- right of the leg line
         local startPos = tr:GetPivot().Position
-        local prevPos, fwd, alignTicks = startPos, nil, 0
+        local prevPos, fwd = startPos, nil
         for tick = 1, 350 do -- ~42 s cap per leg (0.12 s ticks)
             if stopping() then releaseDriveKeys() return nil end
             local pos = tr:GetPivot().Position
@@ -603,25 +606,30 @@ local okBuild, errBuild = pcall(function()
                 fwd = Vector3.new(look.X, 0, look.Z)
                 fwd = fwd.Magnitude > 0.1 and fwd.Unit or dir
             end
-            -- sinE > 0 = nose points RIGHT of the leg line → steer LEFT (A)
-            local sinE = fwd:Dot(perp)
+            -- PURE PURSUIT: aim at a point ON the line ~12 studs ahead.
+            -- Offset sideways → the aim tilts back toward the line and the
+            -- tractor converges onto it; straight on the line → the aim
+            -- straightens out (no weaving).
+            local aim = A + dir * math.min(along + 12, legLen)
+            local want = Vector3.new(aim.X - pos.X, 0, aim.Z - pos.Z)
+            if want.Magnitude < 0.5 then break end
+            want = want.Unit
+            local wperp = Vector3.new(-want.Z, 0, want.X)
+            local err = fwd:Dot(wperp) -- >0 = nose right of the aim → steer LEFT
             local slot = tick % 3
-            alignTicks = math.abs(sinE) > 0.14 and alignTicks + 1 or 0
-            if math.abs(sinE) > 0.14 and alignTicks < 50 then
-                -- ALIGN: creep + held steer toward the line's direction
-                setKey(sinE > 0 and KEY_A or KEY_D, true)
-                setKey(sinE > 0 and KEY_D or KEY_A, false)
-                setKey(KEY_W, slot < 1)
+            if err > 0.3 then
+                setKey(KEY_A, true) setKey(KEY_D, false)     -- hard left
+            elseif err < -0.3 then
+                setKey(KEY_D, true) setKey(KEY_A, false)     -- hard right
+            elseif err > 0.1 then
+                setKey(KEY_A, slot < 2) setKey(KEY_D, false) -- feather left
+            elseif err < -0.1 then
+                setKey(KEY_D, slot < 2) setKey(KEY_A, false) -- feather right
             else
-                -- DRIVE: dead straight; feather back to the line if drifted
-                setKey(KEY_A, false) setKey(KEY_D, false)
-                if cross > 6 then       -- right of the line → nudge left
-                    setKey(KEY_A, true)
-                elseif cross < -6 then  -- left of the line → nudge right
-                    setKey(KEY_D, true)
-                end
-                setKey(KEY_W, slot < 2)
+                setKey(KEY_A, false) setKey(KEY_D, false)    -- dead straight
             end
+            local tDuty = math.abs(err) > 0.3 and 1 or 2 -- creep while correcting
+            setKey(KEY_W, slot < tDuty)
             task.wait(0.12)
             if tick == 15 then -- ~1.8 s probe: keys must produce motion
                 local moved = (Vector3.new(pos.X, 0, pos.Z)
