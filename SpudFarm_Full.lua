@@ -256,17 +256,54 @@ local okBuild, errBuild = pcall(function()
         end
     end
 
-    -- back the tractor up so its REAR faces the plow: the hitch is at the
-    -- back, and the tug-test then pulls forward (clean pull — never drives
-    -- over the implement, an old-script bug we're not repeating)
-    local function standOffPlow(tr, plow, standOffPos)
-        glideTractor(tr, standOffPos)
-        local pp = plow:GetPivot().Position
-        local tp = tr:GetPivot().Position
-        local away = Vector3.new(tp.X - pp.X, 0, tp.Z - pp.Z)
-        if away.Magnitude < 0.5 then away = Vector3.new(0, 0, -1) end
-        tr:PivotTo(CFrame.lookAt(tp, tp + away.Unit)) -- rear toward the plow
-        task.wait(0.2)
+    -- the game's own context system: this billboard is Enabled only while
+    -- the Hitch action is genuinely in range (dump-proven). If we can't read
+    -- it, stay permissive — press X and let the tug-test judge.
+    local function hitchPromptUp()
+        local ok, b = pcall(function()
+            return LocalPlayer.PlayerGui.GuiViews.HUD.PCGP_ContextActions
+                .Billboards.VehicleHUD.Hitch
+        end)
+        if ok and b then
+            if b:IsA("LayerCollector") then return b.Enabled == true end
+            if b:IsA("GuiObject") then return b.Visible == true end
+        end
+        return true
+    end
+
+    -- park the tractor ON the plow, oriented by the PLOW's own facing —
+    -- no guessed stand-off direction (user's plan: teleport to the tool,
+    -- align with the tool, then creep forward)
+    local function alignToPlow(tr, plow, backOff)
+        local pp = plow:GetPivot()
+        local tp = tr:GetPivot()
+        local f = Vector3.new(pp.LookVector.X, 0, pp.LookVector.Z)
+        f = f.Magnitude > 0.1 and f.Unit or Vector3.new(0, 0, -1)
+        local target = Vector3.new(
+            pp.Position.X - f.X * (backOff or 0),
+            tp.Position.Y,
+            pp.Position.Z - f.Z * (backOff or 0))
+        -- glide in (a far plow may take more than one pass; never snap whole-map)
+        for _ = 1, 6 do
+            local cur = tr:GetPivot().Position
+            if (Vector3.new(cur.X, 0, cur.Z) - Vector3.new(target.X, 0, target.Z)).Magnitude < 1 then
+                break
+            end
+            glideTractor(tr, target)
+        end
+        tr:PivotTo(CFrame.new(target) * (pp - pp.Position)) -- final facing = plow's
+        task.wait(0.25)
+    end
+
+    -- creep straight forward until the game raises the Hitch prompt —
+    -- the GAME decides when we're in range, not our math
+    local function creepUntilPrompt(tr, maxSteps, stepLen)
+        for i = 1, maxSteps do
+            if hitchPromptUp() then return i - 1 end
+            tr:PivotTo(tr:GetPivot() * CFrame.new(0, 0, -stepLen)) -- -Z = forward
+            task.wait(0.06)
+        end
+        return hitchPromptUp() and maxSteps or nil
     end
 
     -- one hitch attempt: press X once → tug forward 5 studs → did the plow follow?
@@ -346,18 +383,10 @@ local okBuild, errBuild = pcall(function()
                 return
             end
             log("hitch target: " .. plow.Name .. string.format(" (%.0f studs)", pdist or 0))
-            if pdist > 6 then
-                local plowPos = plow:GetPivot().Position
-                local dir = tractorPos - plowPos
-                dir = Vector3.new(dir.X, 0, dir.Z)
-                if dir.Magnitude < 0.5 then dir = Vector3.new(0, 0, -1) end
-                local standOff = plowPos + dir.Unit * 6
-                log(string.format("vfly-ing tractor to plow (%.0f studs)…", pdist))
-                standOffPlow(tr, plow, standOff)
-                task.wait(0.4)
-            end
 
-            -- retry until it hooks — tug-test stays the judge every time
+            -- user's plan: park on the plow oriented with the PLow's own
+            -- rotation, creep forward until the game's Hitch prompt appears,
+            -- THEN press X. Retry until the tug-test passes.
             local attempt = 0
             while true do
                 attempt += 1
@@ -365,21 +394,24 @@ local okBuild, errBuild = pcall(function()
                     log("plow disappeared (despawned?) — stopping retries")
                     return
                 end
-                if attempt > 1 then
-                    local plowPos = plow:GetPivot().Position
-                    local dir = tr:GetPivot().Position - plowPos
-                    dir = Vector3.new(dir.X, 0, dir.Z)
-                    if dir.Magnitude < 0.5 then dir = Vector3.new(0, 0, -1) end
-                    standOffPlow(tr, plow, plowPos + dir.Unit * 6) -- failed tug moved us away
+                local backOff = math.min((attempt - 1) * 1.5, 6) -- widen stance on retries
+                if backOff > 0 or attempt == 1 then
+                    alignToPlow(tr, plow, backOff)
+                end
+                local crept = creepUntilPrompt(tr, 20, 1) -- up to 20 studs forward
+                if not crept then
+                    log(string.format("attempt %d: hitch prompt never showed within 20 studs — re-aligning", attempt))
                     task.wait(0.4)
+                else
+                    log(string.format("attempt %d: hitch prompt shows — pressing X", attempt))
+                    local hooked, moved = attemptHitch(tr, plow)
+                    if hooked then
+                        log(string.format("✅ hitched the plow (attempt %d)", attempt))
+                        return
+                    end
+                    log(string.format("attempt %d: X pressed but plow didn't follow (%.1f studs) — retrying",
+                        attempt, moved))
                 end
-                local hooked, moved = attemptHitch(tr, plow)
-                if hooked then
-                    log(string.format("✅ hitched the plow (attempt %d)", attempt))
-                    return
-                end
-                log(string.format("attempt %d: plow didn't follow (%.1f studs) — retrying",
-                    attempt, moved))
             end
         end,
     })
