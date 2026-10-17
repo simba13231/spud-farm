@@ -592,9 +592,10 @@ local okBuild, errBuild = pcall(function()
 
     -- honest per-cell read via the game's OWN FieldHelper module (dump §26:
     -- require() works even though Source is blocked) — returns how many
-    -- cells currently have Stage == "Plowed", out of the field's total.
+    -- cells currently have Stage == "Plowed", out of the field's total,
+    -- and how many are NON-Empty (plowed/seeded/growing = "done").
     local function countPlowedCells(field)
-        local ok, plowed, total = pcall(function()
+        local ok, plowed, total, touched = pcall(function()
             local mods = game:GetService("ReplicatedStorage"):FindFirstChild("Modules")
             local F = mods and mods:FindFirstChild("FieldHelper")
             assert(F, "FieldHelper missing")
@@ -602,16 +603,17 @@ local okBuild, errBuild = pcall(function()
             assert(type(F.GetCells) == "function", "GetCells missing")
             local cells = F.GetCells(field)
             assert(type(cells) == "table", "GetCells returned no table")
-            local pl, tot = 0, 0
+            local pl, tot, done = 0, 0, 0
             for _, cell in pairs(cells) do
                 tot += 1
-                if type(cell) == "table" and cell.Stage == "Plowed" then
-                    pl += 1
+                if type(cell) == "table" then
+                    if cell.Stage == "Plowed" then pl += 1 end
+                    if cell.Stage ~= "Empty" then done += 1 end
                 end
             end
-            return pl, tot
+            return pl, tot, done
         end)
-        if ok then return plowed, total end
+        if ok then return plowed, total, touched end
         return nil
     end
 
@@ -867,6 +869,24 @@ local okBuild, errBuild = pcall(function()
         local tr, dist, seat = findTractor()
         if not tr then log("tractor (ZM80) not found") return end
 
+        -- ▸ step 0 (user request): if the plowing is ALREADY DONE, skip
+        --   the whole run — check the cells before mounting/hitching. A
+        --   cell counts as done if it's anything but "Empty" (plowed,
+        --   seeded, growing … all mean plowing finished there). An unknown
+        --   count (nil) = proceed normally; never skip on a failed read.
+        local field, ftype = findMyField(tr:GetPivot().Position)
+        if not field then
+            log("no field of yours in Objects.Fields — nothing to do")
+            return
+        end
+        local plowedN, totalN, doneN = countPlowedCells(field)
+        if plowedN and totalN and totalN > 0 and doneN >= totalN then
+            log(string.format("✅ plowing already done (%d/%d cells non-Empty) — skipping the plow run",
+                doneN, totalN))
+            return
+        end
+        if stopping() then return end
+
         -- ▸ step 1: mount (skipped when already in the tractor)
         if hum.SeatPart and not hum.SeatPart:IsDescendantOf(tr) then
             log("seated in another vehicle — stand up first")
@@ -991,13 +1011,7 @@ local okBuild, errBuild = pcall(function()
             if not didHitch then return end -- killed (toggle off) or dead-ended
         end
 
-        -- ▸ step 4: drive to the field (dump §24: Objects.Fields.Field,
-        --   Configurations.Owner = oksimba_1, bounds 50×100 near my plot)
-        local field, ftype = findMyField(tr:GetPivot().Position)
-        if not field then
-            log("no field of yours in Objects.Fields — nothing to drive to")
-            return
-        end
+        -- ▸ step 4: drive to the field (field picked back in step 0)
         log("driving to field: " .. field.Name .. " (type " .. tostring(ftype) .. ")")
         local arrived, how = driveToField(tr, field, hum.SeatPart)
         if stopping() then return end
