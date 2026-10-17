@@ -357,7 +357,14 @@ local okBuild, errBuild = pcall(function()
                 task.wait(0.4)
             end
 
-            for attempt = 1, 2 do
+            -- retry until it hooks — tug-test stays the judge every time
+            local attempt = 0
+            while true do
+                attempt += 1
+                if not (plow and plow:IsDescendantOf(workspace)) then
+                    log("plow disappeared (despawned?) — stopping retries")
+                    return
+                end
                 if attempt > 1 then
                     local plowPos = plow:GetPivot().Position
                     local dir = tr:GetPivot().Position - plowPos
@@ -368,12 +375,12 @@ local okBuild, errBuild = pcall(function()
                 end
                 local hooked, moved = attemptHitch(tr, plow)
                 if hooked then
-                    log("✅ hitched the plow")
+                    log(string.format("✅ hitched the plow (attempt %d)", attempt))
                     return
                 end
-                log(string.format("hitch attempt %d/2: plow didn't follow (%.1f studs)", attempt, moved))
+                log(string.format("attempt %d: plow didn't follow (%.1f studs) — retrying",
+                    attempt, moved))
             end
-            log("couldn't hitch — send me this line")
         end,
     })
 
