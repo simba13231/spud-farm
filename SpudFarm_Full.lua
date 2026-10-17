@@ -417,6 +417,51 @@ local okBuild, errBuild = pcall(function()
         return moved > 2.5, moved
     end
 
+    -- dump §24: the field lives in Objects.Fields — Configurations.Owner
+    -- marks whose it is (oksimba_1), bounds 50×100 next to my plot.
+    local function findMyField(nearPos)
+        local objects = workspace:FindFirstChild("Objects")
+        local fields = objects and objects:FindFirstChild("Fields")
+        local best, bestDist
+        for _, d in ipairs(fields and fields:GetChildren() or {}) do
+            if d:IsA("Model") then
+                local cfg = d:FindFirstChild("Configurations")
+                local owner = cfg and cfg:FindFirstChild("Owner")
+                if owner and owner.Value == LocalPlayer then
+                    return d -- mine wins outright
+                end
+                local dist = (d:GetPivot().Position - nearPos).Magnitude
+                if not bestDist or dist < bestDist then
+                    best, bestDist = d, dist
+                end
+            end
+        end
+        return best -- nearest fallback
+    end
+
+    -- glide toward the field center until inside its bounds; short
+    -- rubber-banded moves just retry on the next pass (honest failures)
+    local function driveToField(tr, field)
+        local okB, cf, sz = pcall(function() return field:GetBoundingBox() end)
+        if not (okB and cf) then return false, "no bounds" end
+        local goal = Vector3.new(cf.Position.X, 0, cf.Position.Z)
+        local halfX, halfZ = sz.X / 2 + 4, sz.Z / 2 + 4 -- 4-stud margin
+        local function inside(p)
+            return math.abs(p.X - goal.X) <= halfX and math.abs(p.Z - goal.Z) <= halfZ
+        end
+        for pass = 1, 8 do
+            if stopping() then return nil end
+            local p = tr:GetPivot().Position
+            if inside(p) then return true, pass end
+            glideTractor(tr, Vector3.new(goal.X, p.Y, goal.Z))
+            task.wait(0.2)
+        end
+        local p = tr:GetPivot().Position
+        if inside(p) then return true, 8 end
+        return false, "still "
+            .. math.floor((Vector3.new(p.X, 0, p.Z) - goal).Magnitude) .. " studs short"
+    end
+
     -- the actual farming loop, run on its own thread by the toggle below.
     -- stopping() is checked at every wait/step so switching the toggle off
     -- kills the loop at its next step instead of letting it run on.
@@ -463,18 +508,10 @@ local okBuild, errBuild = pcall(function()
             end
         end
 
-        -- ▸ step 3: hitch the plow
+        -- ▸ step 3: hitch the plow (or PROVE it's already hitched)
         logEquipment() -- always show the names so we can confirm the pick
         local tractorPos = tr:GetPivot().Position
         local plow, pdist = findPlow(tractorPos, tr)
-
-        -- if the HUD already lists a hitched implement, X would UNHITCH it
-        local attached = hitchedImplementName()
-        if attached then
-            log("implement already hitched (HUD: " .. attached .. ") — nothing to do")
-            log("press X in-game to unhitch first, then run again")
-            return
-        end
 
         if not plow then
             log("no equipment with EquipmentType=Plow found — see list above")
@@ -487,48 +524,99 @@ local okBuild, errBuild = pcall(function()
         end
         log("hitch target: " .. plow.Name .. string.format(" (%.0f studs)", pdist or 0))
 
-        -- user's plan: physical line-up of the hitch PARTS (fallback:
-        -- align+creep), then the game's Hitch prompt gates the X press.
-        -- Retry until the tug-test passes.
-        local attempt, forceCreep = 0, false
-        while not stopping() do
-            attempt += 1
-            if not (plow and plow:IsDescendantOf(workspace)) then
-                log("plow disappeared (despawned?) — stopping retries")
-                return
-            end
-            local backOff = math.min((attempt - 1) * 1.5, 6) -- widen stance on retries
-            local lined = false
-            if not forceCreep then
-                lined = lineUpHitch(tr, plow)
-            end
+        -- the HUD label alone can be stale (dump-proven: it said "S4204"
+        -- while the hitch points sat 9.5 studs apart) — if it claims a
+        -- hitch, PROVE it with a tug: plow must follow. Pass → skip
+        -- straight to drive. Fail → treat as unhitched, hitch normally.
+        local didHitch = false
+        local attached = hitchedImplementName()
+        if attached then
+            log("HUD says hitched (" .. attached .. ") — tug-verifying…")
+            local before = plow:GetPivot().Position
+            local pivot = tr:GetPivot()
+            local fwd = Vector3.new(pivot.LookVector.X, 0, pivot.LookVector.Z)
+            if fwd.Magnitude < 0.1 then fwd = Vector3.new(0, 0, -1) end
+            glideTractor(tr, pivot.Position + fwd.Unit * 4)
+            task.wait(0.4)
             if stopping() then return end
-            if not lined then
-                alignToPlow(tr, plow, backOff)
-            end
-            if stopping() then return end
-            local crept = creepUntilPrompt(tr, 20, 1) -- up to 20 studs forward
-            if stopping() then return end
-            if not crept then
-                log(string.format("attempt %d: hitch prompt never showed within 20 studs — re-aligning", attempt))
-                if lined then
-                    -- parts found but prompt still dead: line-up pose is
-                    -- wrong for the game → stop trusting it, creep from now
-                    forceCreep = true
-                    log("line-up pose didn't satisfy the game — falling back to creep alignment")
-                end
-                task.wait(0.4)
+            local followed = (plow:GetPivot().Position - before).Magnitude
+            if followed > 2 then
+                log(string.format("✅ tug passed (%.1f studs) — plow is attached, skipping hitch", followed))
+                didHitch = true
             else
-                log(string.format("attempt %d: hitch prompt shows — pressing X", attempt))
-                local hooked, moved = attemptHitch(tr, plow)
-                if stopping() then return end
-                if hooked then
-                    log(string.format("✅ hitched the plow (attempt %d)", attempt))
+                log(string.format("label stale — plow didn't follow (%.1f studs) — hitching first", followed))
+            end
+        end
+
+        if not didHitch then
+            -- user's plan: physical line-up of the hitch PARTS (fallback:
+            -- align+creep), then the game's Hitch prompt gates the X press.
+            -- Retry until the tug-test passes.
+            local attempt, forceCreep = 0, false
+            while not stopping() do
+                attempt += 1
+                if not (plow and plow:IsDescendantOf(workspace)) then
+                    log("plow disappeared (despawned?) — stopping retries")
                     return
                 end
-                log(string.format("attempt %d: X pressed but plow didn't follow (%.1f studs) — retrying",
-                    attempt, moved))
+                local backOff = math.min((attempt - 1) * 1.5, 6) -- widen stance on retries
+                local lined = false
+                if not forceCreep then
+                    lined = lineUpHitch(tr, plow)
+                end
+                if stopping() then return end
+                if not lined then
+                    alignToPlow(tr, plow, backOff)
+                end
+                if stopping() then return end
+                local crept = creepUntilPrompt(tr, 20, 1) -- up to 20 studs forward
+                if stopping() then return end
+                if not crept then
+                    log(string.format("attempt %d: hitch prompt never showed within 20 studs — re-aligning", attempt))
+                    if lined then
+                        -- parts found but prompt still dead: line-up pose is
+                        -- wrong for the game → stop trusting it, creep from now
+                        forceCreep = true
+                        log("line-up pose didn't satisfy the game — falling back to creep alignment")
+                    end
+                    task.wait(0.4)
+                else
+                    log(string.format("attempt %d: hitch prompt shows — pressing X", attempt))
+                    local hooked, moved = attemptHitch(tr, plow)
+                    if stopping() then return end
+                    if hooked then
+                        log(string.format("✅ hitched the plow (attempt %d)", attempt))
+                        didHitch = true
+                        break
+                    end
+                    log(string.format("attempt %d: X pressed but plow didn't follow (%.1f studs) — retrying",
+                        attempt, moved))
+                end
             end
+            if not didHitch then return end -- killed (toggle off) or dead-ended
+        end
+
+        -- ▸ step 4: drive to the field (dump §24: Objects.Fields.Field,
+        --   Configurations.Owner = oksimba_1, bounds 50×100 near my plot)
+        local field = findMyField(tr:GetPivot().Position)
+        if not field then
+            log("no field model in Objects.Fields — nothing to drive to")
+            return
+        end
+        log("driving to field: " .. field.Name)
+        local arrived, how = driveToField(tr, field)
+        if stopping() then return end
+        if arrived then
+            log("✅ reached the field" .. (type(how) == "number"
+                and string.format(" (pass %d)", how) or ""))
+        else
+            log("couldn't reach the field (" .. tostring(how) .. ")")
+            return
+        end
+        -- honest end-state: did the plow come along?
+        local tH, pH = findHitchPart(tr), findHitchPart(plow)
+        if tH and pH then
+            log(string.format("hitch gap at arrival: %.1f studs", (tH.Position - pH.Position).Magnitude))
         end
     end
 
