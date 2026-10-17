@@ -178,12 +178,16 @@ local okBuild, errBuild = pcall(function()
         return objects and objects:FindFirstChild("Equipment")
     end
 
+    -- dump-confirmed: every equipment model carries an EquipmentType
+    -- attribute (Tractor/Plow/Planter/Cultivator/Harvester/Truck/Transport).
+    -- The plow = the one with EquipmentType "Plow" (S4204 for this user, but
+    -- match by TYPE so it survives selling/buying different models).
     local function findPlow(nearPos, tractorModel)
         local folder = equipmentFolder()
         local best, bestDist
         for _, d in ipairs(folder and folder:GetChildren() or {}) do
             if d:IsA("Model") and d ~= tractorModel
-                and not d.Name:lower():find("trailer", 1, true) then
+                and d:GetAttribute("EquipmentType") == "Plow" then
                 local dist = (d:GetPivot().Position - nearPos).Magnitude
                 if not bestDist or dist < bestDist then
                     best, bestDist = d, dist
@@ -215,7 +219,11 @@ local okBuild, errBuild = pcall(function()
         end
         log("equipment on your farm:")
         for _, d in ipairs(folder:GetChildren()) do
-            if d:IsA("Model") then log("  · " .. d.Name) end
+            if d:IsA("Model") then
+                local t = tostring(d:GetAttribute("EquipmentType") or "?")
+                local stored = d:GetAttribute("InStorage") and " [in storage]" or " [spawned]"
+                log(string.format("  · %s = %s%s", d.Name, t, stored))
+            end
         end
     end
 
@@ -301,7 +309,12 @@ local okBuild, errBuild = pcall(function()
             end
 
             if not plow then
-                log("no hitchable implement in Objects.Equipment — see list above")
+                log("no equipment with EquipmentType=Plow found — see list above")
+                return
+            end
+            if plow:GetAttribute("InStorage") then
+                log(plow.Name .. " (the plow) is IN STORAGE — can't hitch it")
+                log("pull it out of the Equipment Manager in-game first, then run again")
                 return
             end
             log("hitch target: " .. plow.Name .. string.format(" (%.0f studs)", pdist or 0))
