@@ -463,28 +463,35 @@ local okBuild, errBuild = pcall(function()
             task.wait(0.2)
         end
         if stopping() then return false end
-        -- press X (proven toggle), then PROVE it: tug — attached = plow
-        -- follows, parked = plow stays put
-        for attempt = 1, 2 do
+        -- X-unhitch is PROXIMITY-gated like hitching (first attempt failed
+        -- with the plow still trailing/whipping ~10 studs behind after the
+        -- tween): line up ON the plow's hitch — the exact pose the game
+        -- accepts — let it settle, THEN press X. Prove with a tug:
+        -- attached = plow follows, parked = plow stays put.
+        for attempt = 1, 3 do
+            local lined = lineUpHitch(tr, plow)
+            if not lined then log("park: hitch line-up parts missing — pressing X anyway") end
+            task.wait(1) -- let the plow stop swinging after the move
+            if stopping() then return false end
             pressKey(Enum.KeyCode.X)
-            task.wait(0.6)
+            task.wait(0.7)
             if stopping() then return false end
             local before = plow:GetPivot().Position
             local pivot = tr:GetPivot()
             local fwd = Vector3.new(pivot.LookVector.X, 0, pivot.LookVector.Z)
             if fwd.Magnitude < 0.1 then fwd = Vector3.new(0, 0, -1) end
-            glideTractor(tr, pivot.Position + fwd.Unit * 5)
-            task.wait(0.5)
+            glideTractor(tr, pivot.Position + fwd.Unit * 6)
+            task.wait(0.6)
             if stopping() then return false end
             local followed = (plow:GetPivot().Position - before).Magnitude
             if followed <= 2 then
                 log(string.format("✅ plow parked at the plot front (X, attempt %d — plow stayed put)", attempt))
                 return true
             end
-            log(string.format("unhitch attempt %d: plow still follows (%.1f studs) — pressing X again",
+            log(string.format("unhitch attempt %d: plow still follows (%.1f studs) — re-lining up, X again",
                 attempt, followed))
         end
-        log("⚠ plow still attached after 2 presses — unhitch manually with X")
+        log("⚠ plow still attached after 3 presses — unhitch manually with X")
         return false
     end
 
