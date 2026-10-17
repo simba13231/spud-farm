@@ -891,21 +891,26 @@ local okBuild, errBuild = pcall(function()
         local rx = Vector3.new(baseCF.RightVector.X, 0, baseCF.RightVector.Z).Unit
         local rz = Vector3.new(baseCF.LookVector.X, 0, baseCF.LookVector.Z).Unit
         local alongX = baseSize.X >= baseSize.Z
-        -- rows run along the LONG axis (user: fewer turns = more stable —
-        -- 5 loops instead of 10 square hooks on a 5×10 field)
+        -- passes run along the LONG axis (user: fewer turns = more stable)
         local driveDir = alongX and rx or rz   -- unit world dir of the pass axis
-        local stepDir  = alongX and rz or rx   -- unit world dir of the row step
-        -- +12 run-out past the field ends (user: turn too tight at the row
-        -- ends → doubled the old +6): the U-turn happens off the field in
-        -- open grass, and the trailing plow still covers the edge cells
+        local stepDir  = alongX and rz or rx   -- unit world dir of the step
+        -- +12 run-out past the field ends (user: turn too tight → doubled
+        -- the old +6): the turns happen off the field in open grass, and
+        -- the trailing plow still covers the edge cells
         local driveHalf = (alongX and baseSize.X or baseSize.Z) / 2 + 12
         local rowSpan   = (alongX and baseSize.Z or baseSize.X)
-        local rows = math.max(math.floor(rowSpan / 10 + 0.5), 1)
+        -- THE SPIRAL (user's drawing): concentric rectangular laps from
+        -- the OUTSIDE IN — each lap's long sides cover their step band
+        -- over the whole length, each lap steps 10 studs inward, and the
+        -- last ring (step inset to the center line) is one full pass down
+        -- the middle. On a 5-wide field: laps at ±20, ±10, 0 = 3 rings.
+        local rowHalf = rowSpan / 2 - 5 -- step half-extent of the outer lap (cell centers)
+        local rings   = math.max(math.floor(rowHalf / 10) + 1, 1)
         local function pt(along, step) -- field-local (along, step) → world
             return c + driveDir * along + stepDir * step
         end
         local before, total = countPlowedCells(field)
-        log(string.format("plowing: %d rows × %d studs  (%s)", rows, driveHalf * 2,
+        log(string.format("plowing: %d-ring spiral, outside-in  (%s)", rings,
             before and string.format("%d/%d cells already Plowed", before, total)
                 or "cell read unavailable"))
         local realDrive -- nil = not probed yet; true = seat driving; false = glide
@@ -927,30 +932,37 @@ local okBuild, errBuild = pcall(function()
             task.wait(0.1)
             return true
         end
-        -- precompute the whole path ONCE, then just FOLLOW the list
+        -- precompute the whole spiral ONCE, then just FOLLOW the list
         local at = tr:GetPivot().Position
         local rel0 = at - c -- sides picked along the PLATE's axes, not world
-        local endSide = rel0:Dot(driveDir) >= 0 and 1 or -1
-        local rowSide = rel0:Dot(stepDir) >= 0 and 1 or -1
-        -- THE MAP: rows along the LONG axis, mow-the-lawn LOOPS at the
-        -- ends (user's plan) — each row ends with a loop entry point
-        -- 8 studs PAST the row end on the next row's line; pure pursuit
-        -- swings wide around it and curls onto the row (no square hooks,
-        -- no diagonals; the old short-axis snake made 10 turns, this
-        -- makes 5).
+        local E = rel0:Dot(driveDir) >= 0 and 1 or -1 -- which end I arrived at
+        local S = rel0:Dot(stepDir) >= 0 and 1 or -1  -- which step side
+        -- each full lap = side, far end, side, entry end (closed), then a
+        -- short diagonal step inward onto the next lap; the final ring
+        -- slides down the entry-end line and drives ONE center pass that
+        -- reaches back to that end line (so the half-cell strip between
+        -- the pass end and the end band is covered too — no gaps).
         local map = {}
-        for r = 1, rows do
-            local row = rowSide * (rowSpan / 2 - 5) - rowSide * (r - 1) * 10
-            map[#map + 1] = { pt(endSide * (driveHalf + 8), row), 7, nil } -- loop entry
-            map[#map + 1] = { pt(-endSide * driveHalf, row), 7, r }        -- the row drive
-            endSide = -endSide
+        for k = 0, rings - 1 do
+            local ax = driveHalf - 10 * k -- along half-extent of this lap
+            local sx = rowHalf - 10 * k   -- step half-extent (20, 10, ...)
+            if sx > 0 then -- full closed lap
+                map[#map + 1] = { pt( E * ax,  S * sx), 7, nil }   -- side +
+                map[#map + 1] = { pt(-E * ax,  S * sx), 7, nil }   -- far end
+                map[#map + 1] = { pt(-E * ax, -S * sx), 7, nil }   -- side -
+                map[#map + 1] = { pt( E * ax, -S * sx), 7, nil }   -- near end
+                map[#map + 1] = { pt( E * ax,  S * sx), 7, k + 1 } -- lap closed
+            else -- final ring: one center-line pass from the entry end
+                map[#map + 1] = { pt( E * (ax + 10), 0), 7, nil }
+                map[#map + 1] = { pt(-E * ax, 0), 7, rings }
+            end
         end
         dbgShow(tr, map, at) -- glowing bars on the field; bright = active leg
         for i, leg in ipairs(map) do
             dbgLeg(i)
             if not doLeg(at, leg[1], leg[2]) then dbgClear() return nil end
             at = leg[1]
-            if leg[3] then log(string.format("row %d/%d done", leg[3], rows)) end
+            if leg[3] then log(string.format("ring %d/%d done", leg[3], rings)) end
         end
         dbgClear()
         if stopping() then return nil end
