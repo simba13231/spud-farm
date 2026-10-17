@@ -100,23 +100,21 @@ local okBuild, errBuild = pcall(function()
             tween.Completed:Wait()
             return true
         end
-        -- VFly
-        local bv = Instance.new("BodyVelocity")
-        bv.MaxForce = Vector3.new(1e5, 1e5, 1e5)
-        bv.Velocity = Vector3.zero
-        bv.Parent = root
-        local arrived = false
+        -- VFly: pure CFrame steps, NO physics objects. (BodyVelocity made the
+        -- physics solver fight the humanoid → lag spikes + server rubber-band)
         for _ = 1, 200 do -- ~10s max
             local off = target - root.Position
-            if off.Magnitude < 2.5 then arrived = true break end
-            bv.Velocity = off.Unit * math.min(Move.Speed, off.Magnitude * 8)
-            root.CFrame = CFrame.lookAt(
-                root.Position,
-                Vector3.new(target.X, root.Position.Y, target.Z))
+            local d = off.Magnitude
+            if d < 2.5 then return true end
+            local step = math.min(d * 0.35, Move.Speed * 0.05) -- capped, eases out
+            local newPos = root.Position + off.Unit * step
+            local flat = Vector3.new(target.X - newPos.X, 0, target.Z - newPos.Z)
+            root.CFrame = flat.Magnitude > 1
+                and CFrame.lookAt(newPos, newPos + flat)
+                or  CFrame.new(newPos)
             task.wait(0.05)
         end
-        bv:Destroy()
-        return arrived
+        return (target - root.Position).Magnitude < 2.5
     end
 
     local function findTractor()
@@ -153,7 +151,8 @@ local okBuild, errBuild = pcall(function()
                     log("couldn't reach the tractor")
                     return
                 end
-                _, dist = findTractor()
+                local root = char:FindFirstChild("HumanoidRootPart")
+                dist = root and (seat.Position - root.Position).Magnitude or 0
             end
             if dist > 10 then log("still too far after moving") return end
             log("pressing F to mount…")
