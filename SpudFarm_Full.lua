@@ -417,26 +417,50 @@ local okBuild, errBuild = pcall(function()
         return moved > 2.5, moved
     end
 
-    -- dump §24: the field lives in Objects.Fields — Configurations.Owner
-    -- marks whose it is (oksimba_1), bounds 50×100 next to my plot.
+    -- dump §24: fields live in Objects.Fields — Configurations.Owner marks
+    -- whose each is; Configurations.FieldType says WHAT kind ("Field" =
+    -- crop field; other types exist). Pick ONLY a crop field of MY OWN
+    -- (nearest), warn if my only field is another type, NEVER a stranger's.
+    -- Every candidate is logged so a wrong pick is visible, not silent.
     local function findMyField(nearPos)
         local objects = workspace:FindFirstChild("Objects")
         local fields = objects and objects:FindFirstChild("Fields")
-        local best, bestDist
+        local seen, mine = {}, {}
         for _, d in ipairs(fields and fields:GetChildren() or {}) do
             if d:IsA("Model") then
                 local cfg = d:FindFirstChild("Configurations")
                 local owner = cfg and cfg:FindFirstChild("Owner")
-                if owner and owner.Value == LocalPlayer then
-                    return d -- mine wins outright
-                end
+                local ftype = cfg and cfg:FindFirstChild("FieldType")
+                local ownerName = owner and owner.Value and owner.Value.Name or "?"
+                local typeName = ftype and tostring(ftype.Value) or "?"
                 local dist = (d:GetPivot().Position - nearPos).Magnitude
-                if not bestDist or dist < bestDist then
-                    best, bestDist = d, dist
+                seen[#seen + 1] = string.format("%s (type=%s owner=%s, %.0f studs)",
+                    d.Name, typeName, ownerName, dist)
+                if owner and owner.Value == LocalPlayer then
+                    mine[#mine + 1] = { d = d, typeName = typeName, dist = dist }
                 end
             end
         end
-        return best -- nearest fallback
+        if #seen > 0 then
+            log("fields here: " .. table.concat(seen, "; "))
+        end
+        local best, bestDist, bestType
+        for _, m in ipairs(mine) do -- my CROP fields first (nearest wins)
+            if m.typeName == "Field" and (not bestDist or m.dist < bestDist) then
+                best, bestDist, bestType = m.d, m.dist, m.typeName
+            end
+        end
+        if not best then -- none of mine is type Field: fall back to my nearest
+            for _, m in ipairs(mine) do
+                if not bestDist or m.dist < bestDist then
+                    best, bestDist, bestType = m.d, m.dist, m.typeName
+                end
+            end
+            if best then
+                log("⚠ none of your fields is type Field — using your nearest, type " .. bestType)
+            end
+        end
+        return best, bestType
     end
 
     -- glide to the NEAREST CORNER of the field (user: start at a corner,
@@ -491,6 +515,50 @@ local okBuild, errBuild = pcall(function()
         return nil
     end
 
+    -- "actual driving": steer the game's OWN VehicleSeat (Throttle/Steer)
+    -- so the tractor accelerates and turns with real physics — the plow
+    -- trails behind and swings through the turns instead of the CFrame
+    -- snapping of the glide. Probe: if ~1.2 s of throttle moves nothing
+    -- (custom controller ignoring seat input) → false → caller falls back
+    -- to the glide. Returns true=arrived, false=seat unusable, nil=killed.
+    local function driveSeatTo(tr, seat, goal, tol)
+        if not (seat and seat:IsA("VehicleSeat")) then return false end
+        tol = tol or 5
+        local startPos = tr:GetPivot().Position
+        for tick = 1, 500 do -- ~40 s hard cap per leg
+            if stopping() then
+                pcall(function() seat.Throttle, seat.Steer = 0, 0 end)
+                return nil
+            end
+            local pos = tr:GetPivot().Position
+            local to = Vector3.new(goal.X - pos.X, 0, goal.Z - pos.Z)
+            if to.Magnitude <= tol then break end
+            local look = seat.CFrame.LookVector
+            local fwd = Vector3.new(look.X, 0, look.Z)
+            fwd = fwd.Magnitude > 0.1 and fwd.Unit or Vector3.new(0, 0, -1)
+            local right = Vector3.new(-fwd.Z, 0, fwd.X)
+            local d = to.Unit
+            local side = d:Dot(right) -- >0 = goal is off to the right
+            local ahead = d:Dot(fwd)
+            seat.Steer = side > 0.12 and 1 or (side < -0.12 and -1 or 0)
+            -- slow for tight turns and near the goal: no fly-bys
+            seat.Throttle = to.Magnitude < 10 and 0.45
+                or (ahead < -0.3 and 0.35 or 0.9)
+            task.wait(0.08)
+            if tick == 15 then -- ~1.2 s probe: throttle must produce motion
+                local now = tr:GetPivot().Position
+                if (Vector3.new(now.X, 0, now.Z) - Vector3.new(startPos.X, 0, startPos.Z)).Magnitude < 1
+                    and (Vector3.new(goal.X, 0, goal.Z) - Vector3.new(startPos.X, 0, startPos.Z)).Magnitude > tol + 4 then
+                    pcall(function() seat.Throttle, seat.Steer = 0, 0 end)
+                    return false
+                end
+            end
+        end
+        pcall(function() seat.Throttle, seat.Steer = 0, 0 end)
+        local pos = tr:GetPivot().Position
+        return (Vector3.new(pos.X, 0, pos.Z) - Vector3.new(goal.X, 0, goal.Z)).Magnitude <= tol + 4
+    end
+
     -- ▸ PLOW THE FIELD (dump §26: the field is ONE 50×100 plate of 50
     --   VIRTUAL cells, 10×10 studs each — the game's OWN client detects the
     --   implement passing over a cell and fires the plow action, so driving
@@ -499,7 +567,7 @@ local okBuild, errBuild = pcall(function()
     --   SHORT axis, step 10 studs along the LONG one, alternating ends each
     --   row. Overshoot both ends slightly so the TRAILING plow still
     --   covers the edge cells.
-    local function plowTheField(tr, field)
+    local function plowTheField(tr, field, seat)
         local okB, cf, sz = pcall(function() return field:GetBoundingBox() end)
         if not (okB and cf) then return false, "no bounds" end
         local c = cf.Position
@@ -515,11 +583,25 @@ local okBuild, errBuild = pcall(function()
         log(string.format("plowing: %d rows × %d studs  (%s)", rows, driveHalf * 2,
             before and string.format("%d/%d cells already Plowed", before, total)
                 or "cell read unavailable"))
+        local realDrive -- nil = not probed yet; true = seat driving; false = glide
         for r = 1, rows do
             if stopping() then return nil end
             local step = -rowSpan / 2 + 5 + (r - 1) * 10 -- row centers (10-stud cells)
             local dir = (r % 2 == 1) and -1 or 1         -- serpentine
-            glideTractor(tr, pt(dir * driveHalf, step))
+            local goal = pt(dir * driveHalf, step)
+            if realDrive ~= false then
+                local res = driveSeatTo(tr, seat, goal, 5)
+                if res == nil then return nil end
+                if realDrive == nil then
+                    realDrive = res == true
+                    if realDrive then
+                        log("real driving ON (seat throttle — smooth physics)")
+                    else
+                        log("seat throttle ignored — falling back to glide")
+                    end
+                end
+            end
+            if realDrive == false then glideTractor(tr, goal) end
             task.wait(0.1)
         end
         if stopping() then return nil end
@@ -675,12 +757,12 @@ local okBuild, errBuild = pcall(function()
 
         -- ▸ step 4: drive to the field (dump §24: Objects.Fields.Field,
         --   Configurations.Owner = oksimba_1, bounds 50×100 near my plot)
-        local field = findMyField(tr:GetPivot().Position)
+        local field, ftype = findMyField(tr:GetPivot().Position)
         if not field then
-            log("no field model in Objects.Fields — nothing to drive to")
+            log("no field of yours in Objects.Fields — nothing to drive to")
             return
         end
-        log("driving to field: " .. field.Name)
+        log("driving to field: " .. field.Name .. " (type " .. tostring(ftype) .. ")")
         local arrived, how = driveToField(tr, field)
         if stopping() then return end
         if arrived then
@@ -698,7 +780,7 @@ local okBuild, errBuild = pcall(function()
 
         -- ▸ step 5: plow the field — serpentine sweep of every cell
         --   (the game's client plows cells the implement passes over)
-        local plowed, why = plowTheField(tr, field)
+        local plowed, why = plowTheField(tr, field, hum.SeatPart)
         if stopping() then return end
         if not plowed then
             log("plow pass aborted (" .. tostring(why) .. ")")
