@@ -200,11 +200,14 @@ local okBuild, errBuild = pcall(function()
           past = "cultivated", prog = "cultivating", remote = "EVTCultivateFieldCell" },
     }
 
-    -- dump-named MODEL per type — live bug (33bb188): the EquipmentType
-    -- match hitched the KQF3000 SEEDER for the cultivator job, so the
-    -- dump-named model (KADL = the cultivator) wins whenever it exists;
-    -- the type attribute is only the fallback. Returns impl, dist, basis.
-    local TYPE_MODEL = { Cultivator = "KADL" }
+    -- dump-named MODEL per type — user-corrected live: the KQF3000 (the
+    -- yellow disc bar in the user's screenshot) IS THE CULTIVATOR; the
+    -- dump's labels were swapped (KADL carries the "Fill Seeder" GUI =
+    -- it's the SEEDER — both the raw EquipmentType match and a KADL name
+    -- preference kept hitching it). The name match wins outright; the
+    -- type attribute is only a fallback, and the wrong-tool guards in
+    -- runPass still catch a neighbor grab. Returns impl, dist, basis.
+    local TYPE_MODEL = { Cultivator = "KQF3000" }
     local function findImplement(typeName, nearPos, tractorModel)
         local folder = equipmentFolder()
         local wantName = TYPE_MODEL[typeName]
@@ -518,12 +521,13 @@ local okBuild, errBuild = pcall(function()
     end
 
     -- dump §24: fields live in Objects.Fields — Configurations.Owner marks
-    -- whose each is; Configurations.FieldType says WHAT kind ("Field" =
-    -- crop field; other types exist). v2 (user: "does not detect new
-    -- fields"): ALSO scan every model under MY PLOTS — newly placed
-    -- fields can sit on the plot instead of Objects.Fields. Returns ALL
-    -- my crop fields sorted nearest-first (falls back to any of mine with
-    -- a warning); every candidate is logged so a wrong pick is visible.
+    -- whose each is; Configurations.FieldType says WHAT kind (the game
+    -- has 2 kinds of farm land — crop "Field" is one). v2 (user: "does
+    -- not detect new fields"): ALSO scan every model under MY PLOTS —
+    -- newly placed fields can sit on the plot instead of Objects.Fields.
+    -- Returns ALL my fields, EVERY type, sorted nearest-first (the tour
+    -- below groups them by type); every candidate is logged so a wrong
+    -- pick is visible.
     local function findMyFields(nearPos)
         local seen, mine = {}, {}
         local function consider(d)
@@ -553,18 +557,28 @@ local okBuild, errBuild = pcall(function()
         if #seen > 0 then
             log("fields here: " .. table.concat(seen, "; "))
         end
-        local crops = {}
-        for _, m in ipairs(mine) do
-            if m.typeName == "Field" then crops[#crops + 1] = m end
-        end
-        if #crops == 0 then
-            crops = mine
-            if #crops > 0 then
-                log("⚠ none of your fields is type Field — using your fields anyway")
+        table.sort(mine, function(a, b) return a.dist < b.dist end)
+        return mine
+    end
+
+    -- ▸ THE TOUR (user request): every field of mine grouped by land TYPE
+    --   (the game has 2 kinds of farm land — crop "Field" is one),
+    --   nearest-first inside each group. Each pass walks the whole tour:
+    --   a field that still needs the job gets WORKED, one that doesn't is
+    --   LOGGED AND SKIPPED ("1 > skip 2 > 3") — one hitch for the entire
+    --   tour, then the tool goes home.
+    local function fieldTour(nearPos)
+        local byType, order = {}, {}
+        for _, m in ipairs(findMyFields(nearPos)) do
+            local g = byType[m.typeName]
+            if not g then
+                g = { typeName = m.typeName, fields = {} }
+                byType[m.typeName] = g
+                order[#order + 1] = g
             end
+            g.fields[#g.fields + 1] = m
         end
-        table.sort(crops, function(a, b) return a.dist < b.dist end)
-        return crops
+        return order
     end
 
     -- forward-declared so driveToField below can use it (defined later)
@@ -866,19 +880,6 @@ local okBuild, errBuild = pcall(function()
             end
         end
         return needPlow, needCult
-    end
-
-    -- which field a pass works on: the nearest of mine with cells still at
-    -- the job's stage (bare for the plow, Plowed for the cultivator).
-    local function pickFieldNeeding(nearPos, stage)
-        local crops = findMyFields(nearPos)
-        for _, m in ipairs(crops) do
-            local st = countStages(m.d)
-            if not st or st.total == 0 or (st[stage] or 0) > 0 then
-                return m.d, m.typeName -- unknown counts stay eligible
-            end
-        end
-        return nil, "all done"
     end
 
     -- "actual driving": HOLD REAL KEYS (WASD via VirtualInputManager) while
@@ -1207,13 +1208,26 @@ local okBuild, errBuild = pcall(function()
         -- FROM. Used twice below: the plow (bare -> Plowed), then the
         -- cultivator (Plowed -> Cultivated) — same proven machinery.
         local function runPass(job)
-            local field, ftype = pickFieldNeeding(tr:GetPivot().Position, job.stage)
-            if not field then
-                log("no field left needing " .. job.verb .. " — pass skipped")
+            -- ▸ the TOUR (user request): walk EVERY field of mine, grouped
+            --   by land type, nearest-first per group — work the fields
+            --   that still need this job, log-and-skip the rest. One
+            --   hitch for the whole tour; only mount-hitch when at least
+            --   ONE field still needs the job.
+            local groups = fieldTour(tr:GetPivot().Position)
+            local anyNeed = false
+            for _, grp in ipairs(groups) do
+                for _, m in ipairs(grp.fields) do
+                    local st = countStages(m.d)
+                    -- unknown counts stay eligible (never skip on unknown)
+                    if not st or st.total == 0 or (st[job.stage] or 0) > 0 then
+                        anyNeed = true
+                    end
+                end
+            end
+            if not anyNeed then
+                log("no field needs " .. job.verb .. " — pass skipped")
                 return false
             end
-            log(string.format("%s pass: %s (nearest with %s cells)",
-                job.verb, field.Name, job.stage))
             local impl, idist, basis = findImplement(job.typeName, tr:GetPivot().Position, tr)
             if not impl then
                 log("no equipment with EquipmentType=" .. job.typeName .. " found — see list above")
@@ -1331,34 +1345,49 @@ local okBuild, errBuild = pcall(function()
                 if not didHitch then return false end -- killed (toggle off)
             end
 
-            -- drive to the field (picked just above)
-            log("driving to field: " .. field.Name .. " (type " .. tostring(ftype) .. ")")
-            local arrived, how = driveToField(tr, field, hum.SeatPart, impl)
-            if stopping() then return false end
-            if arrived then
-                log("✅ reached the field" .. (type(how) == "number"
-                    and string.format(" (pass %d)", how) or ""))
-            else
-                log("couldn't reach the field (" .. tostring(how) .. ")")
-                return false
-            end
-            -- honest end-state: did the tool come along?
-            local tH, pH = findHitchPart(tr), findHitchPart(impl)
-            if tH and pH then
-                log(string.format("hitch gap at arrival: %.1f studs", (tH.Position - pH.Position).Magnitude))
+            -- ▸ the tour: every field, in order — skip the finished ones,
+            --   sweep the rest; the tool stays hitched across the whole
+            --   tour and goes home at the end
+            for _, grp in ipairs(groups) do
+                log("— " .. grp.typeName .. " land —")
+                for _, m in ipairs(grp.fields) do
+                    if stopping() then return false end
+                    local st = countStages(m.d)
+                    local need = st and (st[job.stage] or 0) or nil
+                    if st and st.total > 0 and need == 0 then
+                        log(string.format("SKIP %s — nothing needs %s (%d cells)",
+                            m.d.Name, job.verb, st.total))
+                    else
+                        log(string.format("%s %s (%s land, %s)",
+                            job.verb, m.d.Name, m.typeName,
+                            need and (need .. " cells need it") or "state unknown"))
+                        local arrived, how = driveToField(tr, m.d, hum.SeatPart, impl)
+                        if stopping() then return false end
+                        if not arrived then
+                            log("couldn't reach " .. m.d.Name .. " (" .. tostring(how) .. ")")
+                            return false
+                        end
+                        log("✅ reached " .. m.d.Name)
+                        -- honest end-state: did the tool come along?
+                        local tH, pH = findHitchPart(tr), findHitchPart(impl)
+                        if tH and pH then
+                            log(string.format("hitch gap at arrival: %.1f studs",
+                                (tH.Position - pH.Position).Magnitude))
+                        end
+                        -- the spiral sweep — the game stages cells over as
+                        -- the tool passes over them (same for every job)
+                        local swept, why = sweepField(tr, m.d, hum.SeatPart, job)
+                        if stopping() then return false end
+                        if not swept then
+                            log(job.verb .. " pass aborted (" .. tostring(why) .. ")")
+                            return false
+                        end
+                    end
+                end
             end
 
-            -- the spiral sweep — the game stages cells over as the tool
-            -- passes over them (user-confirmed: same for plow and cultivator)
-            local swept, why = sweepField(tr, field, hum.SeatPart, job)
-            if stopping() then return false end
-            if not swept then
-                log(job.verb .. " pass aborted (" .. tostring(why) .. ")")
-                return false
-            end
-
-            -- unhitch the tool WHERE IT CAME FROM (only after a COMPLETED
-            -- sweep with it still attached — aborted passes leave it be)
+            -- unhitch the tool WHERE IT CAME FROM (the tour is done and
+            -- it is still attached — an aborted pass leaves it hitched)
             if impl:IsDescendantOf(workspace) then
                 dropImplementAtOrigin(tr, impl, origin)
             end
