@@ -827,6 +827,23 @@ local ok, err = pcall(function()
             w("    alt " .. a[1] .. "  NOT FOUND")
         end
     end
+
+    ------------------------------------------------------------------
+    -- 23. HITCH PARTS (who owns Hitch/HitchRoot/HitchKnob/HitchTip?)
+    --     powers the script's physical line-up: tractor hitch part
+    --     placed EXACTLY on the plow's hitch part
+    ------------------------------------------------------------------
+    header("HITCH PARTS (full paths — tractor vs plow ownership)")
+    local found = 0
+    for _, d in ipairs(desc) do
+        if d:IsA("BasePart") and d.Name:lower():find("hitch", 1, true) then
+            found += 1
+            w("  - " .. pathOf(d, 7)
+                .. string.format("  pos=(%.1f, %.1f, %.1f)", d.Position.X, d.Position.Y, d.Position.Z))
+        end
+    end
+    if found == 0 then w("  (no parts with 'hitch' in the name!)") end
+    w("  total hitch parts: " .. found)
 end)
 
 w("")

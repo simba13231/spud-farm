@@ -306,6 +306,57 @@ local okBuild, errBuild = pcall(function()
         return hitchPromptUp() and maxSteps or nil
     end
 
+    -- physical hitch spots: parts named Hitch / HitchRoot / HitchKnob / HitchTip
+    -- (dump keyword scan found all four exist somewhere in workspace)
+    local function hitchRank(n)
+        local l = n:lower()
+        if l == "hitch" then return 1 end
+        if l:find("root", 1, true) then return 2 end
+        if l:find("knob", 1, true) then return 3 end
+        if l:find("tip", 1, true) then return 4 end
+        return 5
+    end
+
+    local function findHitchPart(model)
+        local best, bestRank
+        for _, d in ipairs(model:GetDescendants()) do
+            if d:IsA("BasePart") and d.Name:lower():find("hitch", 1, true) then
+                local r = hitchRank(d.Name)
+                if not bestRank or r < bestRank then best, bestRank = d, r end
+            end
+        end
+        return best
+    end
+
+    -- park the tractor so its hitch part sits EXACTLY on the plow's hitch
+    -- part, rotating with the plow — physical line-up, no stand-off guessing
+    local function lineUpHitch(tr, plow)
+        local tH = findHitchPart(tr)
+        local pH = findHitchPart(plow)
+        if not (tH and pH) then
+            log("hitch parts: tractor=" .. (tH and tH.Name or "none")
+                .. " plow=" .. (pH and pH.Name or "none") .. " — using creep alignment")
+            return false
+        end
+        local pp = plow:GetPivot()
+        local rel = tr:GetPivot():ToObjectSpace(tH.CFrame)
+        local desired = CFrame.new(pH.Position) * (pp - pp.Position)
+        local newPivot = desired * rel:Inverse()
+        for _ = 1, 6 do -- multi-pass glide if far (never snap whole-map)
+            local cur = tr:GetPivot().Position
+            local tgt = newPivot.Position
+            if (Vector3.new(cur.X, 0, cur.Z) - Vector3.new(tgt.X, 0, tgt.Z)).Magnitude < 1 then
+                break
+            end
+            glideTractor(tr, tgt)
+        end
+        tr:PivotTo(newPivot)
+        task.wait(0.2)
+        log(string.format("lined up %s ↔ %s (gap %.2f studs)",
+            tH.Name, pH.Name, (tH.Position - pH.Position).Magnitude))
+        return true
+    end
+
     -- one hitch attempt: press X once → tug forward 5 studs → did the plow follow?
     local function attemptHitch(tr, plow)
         pressKey(Enum.KeyCode.X)
@@ -384,10 +435,10 @@ local okBuild, errBuild = pcall(function()
             end
             log("hitch target: " .. plow.Name .. string.format(" (%.0f studs)", pdist or 0))
 
-            -- user's plan: park on the plow oriented with the PLow's own
-            -- rotation, creep forward until the game's Hitch prompt appears,
-            -- THEN press X. Retry until the tug-test passes.
-            local attempt = 0
+            -- user's plan: physical line-up of the hitch PARTS (fallback:
+            -- align+creep), then the game's Hitch prompt gates the X press.
+            -- Retry until the tug-test passes.
+            local attempt, forceCreep = 0, false
             while true do
                 attempt += 1
                 if not (plow and plow:IsDescendantOf(workspace)) then
@@ -395,12 +446,22 @@ local okBuild, errBuild = pcall(function()
                     return
                 end
                 local backOff = math.min((attempt - 1) * 1.5, 6) -- widen stance on retries
-                if backOff > 0 or attempt == 1 then
+                local lined = false
+                if not forceCreep then
+                    lined = lineUpHitch(tr, plow)
+                end
+                if not lined then
                     alignToPlow(tr, plow, backOff)
                 end
                 local crept = creepUntilPrompt(tr, 20, 1) -- up to 20 studs forward
                 if not crept then
                     log(string.format("attempt %d: hitch prompt never showed within 20 studs — re-aligning", attempt))
+                    if lined then
+                        -- parts found but prompt still dead: line-up pose is
+                        -- wrong for the game → stop trusting it, creep from now
+                        forceCreep = true
+                        log("line-up pose didn't satisfy the game — falling back to creep alignment")
+                    end
                     task.wait(0.4)
                 else
                     log(string.format("attempt %d: hitch prompt shows — pressing X", attempt))
