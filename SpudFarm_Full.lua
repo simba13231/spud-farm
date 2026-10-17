@@ -257,12 +257,27 @@ local okBuild, errBuild = pcall(function()
     end
 
     -- the game's own context system: this billboard is Enabled only while
-    -- the Hitch action is genuinely in range (dump-proven). If we can't read
-    -- it, stay permissive — press X and let the tug-test judge.
+    -- the Hitch action is genuinely in range (dump §16b proved it live).
+    -- dump §22 showed my old path was wrong TWO ways: the PCGP folder may
+    -- sit under HUD.MainHUD, and the billboards are FLAT-named —
+    -- "VehicleHUD.Hitch" is ONE instance, not a folder. Check both
+    -- parents + both namings. If unreadable, stay permissive — press X
+    -- and let the tug-test judge.
     local function hitchPromptUp()
         local ok, b = pcall(function()
-            return LocalPlayer.PlayerGui.GuiViews.HUD.PCGP_ContextActions
-                .Billboards.VehicleHUD.Hitch
+            local gv = LocalPlayer.PlayerGui:FindFirstChild("GuiViews")
+            local hud = gv and gv:FindFirstChild("HUD")
+            local cpa
+            if hud then
+                local main = hud:FindFirstChild("MainHUD")
+                cpa = main and main:FindFirstChild("PCGP_ContextActions")
+                cpa = cpa or hud:FindFirstChild("PCGP_ContextActions")
+            end
+            local bills = cpa and cpa:FindFirstChild("Billboards")
+            if not bills then return nil end
+            return bills:FindFirstChild("VehicleHUD.Hitch")
+                or (bills:FindFirstChild("VehicleHUD")
+                    and bills.VehicleHUD:FindFirstChild("Hitch"))
         end)
         if ok and b then
             if b:IsA("LayerCollector") then return b.Enabled == true end
@@ -339,8 +354,14 @@ local okBuild, errBuild = pcall(function()
             return false
         end
         local pp = plow:GetPivot()
-        local rel = tr:GetPivot():ToObjectSpace(tH.CFrame)
-        local desired = CFrame.new(pH.Position) * (pp - pp.Position)
+        local cur = tr:GetPivot()
+        local rel = cur:ToObjectSpace(tH.CFrame)
+        -- match XZ + rotation to the plow but KEEP the tractor's height:
+        -- dump §23 showed the hitchable pose has the tractor hitch ~1.6
+        -- studs ABOVE the plow's — forcing exact Y would sink the tractor
+        -- into the plow and get rubber-banded
+        local desired = CFrame.new(pH.Position.X, cur.Position.Y, pH.Position.Z)
+            * (pp - pp.Position)
         local newPivot = desired * rel:Inverse()
         for _ = 1, 6 do -- multi-pass glide if far (never snap whole-map)
             local cur = tr:GetPivot().Position

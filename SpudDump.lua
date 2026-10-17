@@ -792,16 +792,28 @@ local ok, err = pcall(function()
     --     can confirm the path/class/flag before trusting the creep loop
     ------------------------------------------------------------------
     header("HITCH PROMPT LIVE (X visible on screen right now?)")
-    local promptPath = pGui and pGui:FindFirstChild("GuiViews")
+    -- mirror SpudFarm_Full.hitchPromptUp() EXACTLY (both parents, both namings)
+    local hud = pGui and pGui:FindFirstChild("GuiViews")
         and pGui.GuiViews:FindFirstChild("HUD")
-        and pGui.GuiViews.HUD:FindFirstChild("PCGP_ContextActions")
-        and pGui.GuiViews.HUD.PCGP_ContextActions:FindFirstChild("Billboards")
-        and pGui.GuiViews.HUD.PCGP_ContextActions.Billboards:FindFirstChild("VehicleHUD")
-    local hitchBill = promptPath and promptPath:FindFirstChild("Hitch")
-    w("  script reads: PlayerGui.GuiViews.HUD.PCGP_ContextActions.Billboards.VehicleHUD.Hitch")
+    local cpa
+    if hud then
+        local main = hud:FindFirstChild("MainHUD")
+        cpa = main and main:FindFirstChild("PCGP_ContextActions")
+        cpa = cpa or hud:FindFirstChild("PCGP_ContextActions")
+    end
+    w("  script reads: GuiViews.HUD[.MainHUD].PCGP_ContextActions"
+        .. ".Billboards[\"VehicleHUD.Hitch\"]")
+    w("  (PCGP parent: " .. (cpa and (cpa.Parent.Name == "MainHUD"
+        and "under MainHUD" or "direct under HUD") or "NOT FOUND") .. ")")
+    local bills = cpa and cpa:FindFirstChild("Billboards")
+    local hitchBill = bills
+        and (bills:FindFirstChild("VehicleHUD.Hitch")
+            or (bills:FindFirstChild("VehicleHUD")
+                and bills.VehicleHUD:FindFirstChild("Hitch")))
     if hitchBill then
         w("    FOUND  class=" .. hitchBill.ClassName
-            .. "  Enabled=" .. tostring(hitchBill.Enabled))
+            .. "  Enabled=" .. tostring(hitchBill.Enabled)
+            .. "  name=" .. hitchBill.Name)
         w("    (script treats Enabled==true as 'prompt up → press X')")
     else
         w("    NOT FOUND — script would fall back to pressing X blind")
@@ -812,10 +824,9 @@ local ok, err = pcall(function()
             and pGui.GuiViews.HUD:FindFirstChild("VehicleHUD")
             and pGui.GuiViews.HUD.VehicleHUD:FindFirstChild("ViewportUI")
             and pGui.GuiViews.HUD.VehicleHUD.ViewportUI:FindFirstChild("HitchBillboard") },
-        { "Buttons.VehicleHUD.Hitch", promptPath and promptPath.Parent
-            and promptPath.Parent:FindFirstChild("Buttons")
-            and promptPath.Parent.Buttons:FindFirstChild("VehicleHUD")
-            and promptPath.Parent.Buttons.VehicleHUD:FindFirstChild("Hitch") },
+        { "Buttons flat [VehicleHUD.Hitch]", bills and cpa
+            and cpa:FindFirstChild("Buttons")
+            and cpa.Buttons:FindFirstChild("VehicleHUD.Hitch") },
     }
     for _, a in ipairs(alts) do
         local inst = a[2]
