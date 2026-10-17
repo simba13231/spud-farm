@@ -712,7 +712,10 @@ local okBuild, errBuild = pcall(function()
         local alongX = baseSize.X <= baseSize.Z
         local driveDir = alongX and rx or rz   -- unit world dir of the pass axis
         local stepDir  = alongX and rz or rx   -- unit world dir of the row step
-        local driveHalf = (alongX and baseSize.X or baseSize.Z) / 2 + 6 -- +6: plow trails
+        -- +12 run-out past the field ends (user: turn too tight at the row
+        -- ends → doubled the old +6): the U-turn happens off the field in
+        -- open grass, and the trailing plow still covers the edge cells
+        local driveHalf = (alongX and baseSize.X or baseSize.Z) / 2 + 12
         local rowSpan   = (alongX and baseSize.Z or baseSize.X)
         local rows = math.max(math.floor(rowSpan / 10 + 0.5), 1)
         local function pt(along, step) -- field-local (along, step) → world
