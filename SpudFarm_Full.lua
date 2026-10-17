@@ -198,6 +198,13 @@ local okBuild, errBuild = pcall(function()
           past = "plowed",    prog = "plowing",    remote = "EVTPlowFieldCell" },
         { typeName = "Cultivator", stage = "Plowed", verb = "cultivate",
           past = "cultivated", prog = "cultivating", remote = "EVTCultivateFieldCell" },
+        -- ▸ the seeding pass (user: "seed in the same fields that plow and
+        --   cultivate did in the same pattern") — SAME tour + SAME spiral:
+        --   Cultivated → Seeded, auto on drive-over like the other two
+        --   (the KADL carries a welded SeedDetectionPart, dump §27); the
+        --   game fires FNCSeedFieldCell itself — never spoofed
+        { typeName = "Planter",    stage = "Cultivated", verb = "seed",
+          past = "seeded",    prog = "seeding",    remote = "FNCSeedFieldCell" },
     }
 
     -- dump-named MODEL per type — user-corrected live: the KQF3000 (the
@@ -1133,22 +1140,24 @@ local okBuild, errBuild = pcall(function()
     -- count read never disqualifies a field (unknown = work to try).
     local function probeWork(nearPos)
         local crops = findMyFields(nearPos)
-        if #crops == 0 then return false, false end
-        local needPlow, needCult = false, false
+        if #crops == 0 then return false, false, false end
+        local needPlow, needCult, needSeed = false, false, false
         for _, m in ipairs(crops) do
             local st = countStages(m.d)
             if st and st.total > 0 then
-                local bare, plowedN = st.Empty or 0, st.Plowed or 0
-                log(string.format("%s: %d bare, %d plowed, %d total cells",
-                    m.d.Name, bare, plowedN, st.total))
+                local bare, plowedN, cultN = st.Empty or 0, st.Plowed or 0,
+                    st.Cultivated or 0
+                log(string.format("%s: %d bare, %d plowed, %d cultivated, %d total cells",
+                    m.d.Name, bare, plowedN, cultN, st.total))
                 if bare > 0 then needPlow = true end
                 if plowedN > 0 then needCult = true end
+                if cultN > 0 then needSeed = true end
             else
                 log(m.d.Name .. ": cell count unavailable — treating as needing work")
-                needPlow, needCult = true, true
+                needPlow, needCult, needSeed = true, true, true
             end
         end
-        return needPlow, needCult
+        return needPlow, needCult, needSeed
     end
 
     -- ▸ SEEDER STEP 1 (dump §27 settled WHERE the seed state lives): the
@@ -1578,14 +1587,15 @@ local okBuild, errBuild = pcall(function()
         --   state is logged). Checked BEFORE mount so an idle run never
         --   even walks to the tractor. Failed counts never skip (unknown
         --   = work to try).
-        local needPlow, needCult = probeWork(tr:GetPivot().Position)
-        if not needPlow and not needCult then
-            -- idle for plow/cult — but a FULL seeder is still work
-            -- (user: full → the tractor hitches it): mount and do that,
-            -- nothing else
+        local needPlow, needCult, needSeed =
+            probeWork(tr:GetPivot().Position)
+        if not needPlow and not needCult and not needSeed then
+            -- truly idle: nothing bare, nothing plowed, everything seeded
+            -- — but a FULL seeder is still the step-2 rule (hitch it), so
+            -- the seed check still decides
             if not seedCheck(tr, hum) then
                 if stopping() then return end
-                log("✅ every field is plowed and cultivated — nothing to do")
+                log("✅ every field is plowed, cultivated and seeded — nothing to do")
                 return
             end
             if stopping() then return end
@@ -1709,11 +1719,16 @@ local okBuild, errBuild = pcall(function()
         if stopping() then return end
         -- ▸ SEED CHECK (user: "check everytime after the cultivating") +
         --   SEEDER STEP 2 (user: "if the seeder is full make the tractor
-        --   go hitch to the seeder") — full → hitch it AND STAY hitched
-        --   (the seeding pass is a later step, one at a time); empty/
-        --   unreadable → F out (step 1)
+        --   go hitch to the seeder") + SEEDER STEP 3 (user: "make it seed
+        --   in the same fields that plow and cultivate did in the same
+        --   pattern") — full → hitch, then the seeding pass: the SAME
+        --   field tour + SAME outside-in spiral + touch-up, Cultivated →
+        --   Seeded on drive-over (the game fires it, never spoofed).
+        --   Empty/unreadable → F out (step 1), no pass.
         if seedCheck(tr, hum) then
             seedHitchStep(tr)
+            if stopping() then return end
+            runPass(JOBS[3])
         end
     end
 
