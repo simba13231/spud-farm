@@ -264,11 +264,11 @@ local okBuild, errBuild = pcall(function()
         end
     end
 
-    -- fly-over ARC (user's plan): tween UP → across at that altitude →
-    -- DOWN onto the target. ONLY for hops with NOTHING trailing behind
-    -- (player on foot, empty tractor) — a towed implement at altitude
-    -- would smash through everything it passes over. Short hops (<4
-    -- studs) just glide.
+    -- fly-over ARC (user's plan, smoothed): ONE smooth curve — rise,
+    -- travel, settle (smoothstep lerp + sinusoidal lift), NOT three hard
+    -- legs. ONLY for hops with NOTHING trailing behind (player on foot,
+    -- empty tractor) — a towed implement at altitude would smash through
+    -- whatever it passes over. Short hops (<4 studs) just glide.
     arcTween = function(pv, targetPos, clearY)
         clearY = clearY or 30
         local pos = pv:GetPivot().Position
@@ -278,23 +278,19 @@ local okBuild, errBuild = pcall(function()
             return true
         end
         local rot = CFrame.lookAt(Vector3.zero, flat.Unit) -- rotation only
-        local high = math.max(pos.Y, targetPos.Y) + clearY
-        local legs = {
-            Vector3.new(pos.X, high, pos.Z),                   -- straight up
-            Vector3.new(targetPos.X, high, targetPos.Z),       -- across at altitude
-            Vector3.new(targetPos.X, targetPos.Y, targetPos.Z), -- down
-        }
-        local from = pos
-        for _, to in ipairs(legs) do
-            local delta = to - from
-            local steps = math.clamp(math.floor(delta.Magnitude / 2), 2, 30)
-            for i = 1, steps do
-                if stopping() then return false end
-                pv:PivotTo(CFrame.new(from + delta * (i / steps)) * rot)
-                task.wait(0.04)
-            end
-            from = to
+        local baseY = math.max(pos.Y, targetPos.Y)
+        local steps = math.clamp(math.floor(flat.Magnitude / 1.2), 12, 90)
+        for i = 1, steps do
+            if stopping() then return false end
+            local t = i / steps
+            local ease = t * t * (3 - 2 * t) -- smoothstep: soft start + landing
+            local lift = math.sin(math.pi * t) * clearY -- 0 → clearY → 0
+            local p = pos + Vector3.new(flat.X * ease,
+                (baseY - pos.Y) * ease + lift, flat.Z * ease)
+            pv:PivotTo(CFrame.new(p) * rot)
+            task.wait(0.03)
         end
+        pv:PivotTo(CFrame.new(targetPos) * rot) -- land exactly on target
         return true
     end
 
@@ -411,16 +407,18 @@ local okBuild, errBuild = pcall(function()
         local desired = CFrame.new(pH.Position.X, cur.Position.Y, pH.Position.Z)
             * (pp - pp.Position)
         local newPivot = desired * rel:Inverse()
-        for _ = 1, 6 do -- multi-pass approach if far (never snap whole-map)
-            local cur = tr:GetPivot().Position
-            local tgt = newPivot.Position
-            if (Vector3.new(cur.X, 0, cur.Z) - Vector3.new(tgt.X, 0, tgt.Z)).Magnitude < 1 then
-                break
-            end
-            if airborne then
-                arcTween(tr, tgt, 30) -- empty tractor: fly over everything
-                if stopping() then return false end
-            else
+        if airborne then
+            -- ONE arc straight down onto the pose — the old multi-pass
+            -- loop re-ARCED every pass (up/down/up/down jank)
+            arcTween(tr, newPivot.Position, 30)
+            if stopping() then return false end
+        else
+            for _ = 1, 6 do -- ground: multi-pass glide if far
+                local cur = tr:GetPivot().Position
+                local tgt = newPivot.Position
+                if (Vector3.new(cur.X, 0, cur.Z) - Vector3.new(tgt.X, 0, tgt.Z)).Magnitude < 1 then
+                    break
+                end
                 glideTractor(tr, tgt)
             end
         end
@@ -527,18 +525,18 @@ local okBuild, errBuild = pcall(function()
 
     -- dump §24: fields live in Objects.Fields — Configurations.Owner marks
     -- whose each is; Configurations.FieldType says WHAT kind ("Field" =
-    -- crop field; other types exist). Pick ONLY a crop field of MY OWN
-    -- (nearest), warn if my only field is another type, NEVER a stranger's.
-    -- Every candidate is logged so a wrong pick is visible, not silent.
-    local function findMyField(nearPos)
-        local objects = workspace:FindFirstChild("Objects")
-        local fields = objects and objects:FindFirstChild("Fields")
+    -- crop field; other types exist). v2 (user: "does not detect new
+    -- fields"): ALSO scan every model under MY PLOTS — newly placed
+    -- fields can sit on the plot instead of Objects.Fields. Returns ALL
+    -- my crop fields sorted nearest-first (falls back to any of mine with
+    -- a warning); every candidate is logged so a wrong pick is visible.
+    local function findMyFields(nearPos)
         local seen, mine = {}, {}
-        for _, d in ipairs(fields and fields:GetChildren() or {}) do
-            if d:IsA("Model") then
+        local function consider(d)
+            if d:IsA("Model") and d:FindFirstChild("Configurations") then
                 local cfg = d:FindFirstChild("Configurations")
-                local owner = cfg and cfg:FindFirstChild("Owner")
-                local ftype = cfg and cfg:FindFirstChild("FieldType")
+                local owner = cfg:FindFirstChild("Owner")
+                local ftype = cfg:FindFirstChild("FieldType")
                 local ownerName = owner and owner.Value and owner.Value.Name or "?"
                 local typeName = ftype and tostring(ftype.Value) or "?"
                 local dist = (d:GetPivot().Position - nearPos).Magnitude
@@ -549,26 +547,30 @@ local okBuild, errBuild = pcall(function()
                 end
             end
         end
+        local objects = workspace:FindFirstChild("Objects")
+        local fields = objects and objects:FindFirstChild("Fields")
+        for _, d in ipairs(fields and fields:GetChildren() or {}) do consider(d) end
+        local plots = workspace:FindFirstChild("Plots")
+        for _, plot in ipairs(plots and plots:GetChildren() or {}) do
+            if plot:IsA("Model") then
+                for _, d in ipairs(plot:GetChildren()) do consider(d) end
+            end
+        end
         if #seen > 0 then
             log("fields here: " .. table.concat(seen, "; "))
         end
-        local best, bestDist, bestType
-        for _, m in ipairs(mine) do -- my CROP fields first (nearest wins)
-            if m.typeName == "Field" and (not bestDist or m.dist < bestDist) then
-                best, bestDist, bestType = m.d, m.dist, m.typeName
+        local crops = {}
+        for _, m in ipairs(mine) do
+            if m.typeName == "Field" then crops[#crops + 1] = m end
+        end
+        if #crops == 0 then
+            crops = mine
+            if #crops > 0 then
+                log("⚠ none of your fields is type Field — using your fields anyway")
             end
         end
-        if not best then -- none of mine is type Field: fall back to my nearest
-            for _, m in ipairs(mine) do
-                if not bestDist or m.dist < bestDist then
-                    best, bestDist, bestType = m.d, m.dist, m.typeName
-                end
-            end
-            if best then
-                log("⚠ none of your fields is type Field — using your nearest, type " .. bestType)
-            end
-        end
-        return best, bestType
+        table.sort(crops, function(a, b) return a.dist < b.dist end)
+        return crops
     end
 
     -- forward-declared so driveToField below can use it (defined later)
@@ -726,6 +728,30 @@ local okBuild, errBuild = pcall(function()
         end)
         if ok then return plowed, total, touched end
         return nil
+    end
+
+    -- WHICH field to plow: the nearest of mine with bare ("Empty") cells
+    -- left; every field's state is logged. Nothing left anywhere → nil,
+    -- "all done". A failed count read never disqualifies a field (it stays
+    -- eligible — never skip on unknown).
+    local function pickFieldToPlow(nearPos)
+        local crops = findMyFields(nearPos)
+        if #crops == 0 then return nil, "none" end
+        local pick
+        for _, m in ipairs(crops) do
+            local plowedN, totalN, doneN = countPlowedCells(m.d)
+            if plowedN and totalN and totalN > 0 then
+                log(string.format("%s: %d/%d cells non-Empty", m.d.Name, doneN, totalN))
+                if doneN < totalN and not pick then
+                    pick = m -- nearest unfinished field
+                end
+            else
+                log(m.d.Name .. ": cell count unavailable — treating as needing plow")
+                if not pick then pick = m end
+            end
+        end
+        if pick then return pick.d, pick.typeName end
+        return nil, "all done"
     end
 
     -- "actual driving": HOLD REAL KEYS (WASD via VirtualInputManager) while
@@ -980,20 +1006,18 @@ local okBuild, errBuild = pcall(function()
         local tr, dist, seat = findTractor()
         if not tr then log("tractor (ZM80) not found") return end
 
-        -- ▸ step 0 (user request): if the plowing is ALREADY DONE, skip
-        --   the whole run — check the cells before mounting/hitching. A
-        --   cell counts as done if it's anything but "Empty" (plowed,
-        --   seeded, growing … all mean plowing finished there). An unknown
-        --   count (nil) = proceed normally; never skip on a failed read.
-        local field, ftype = findMyField(tr:GetPivot().Position)
+        -- ▸ step 0: pick WHICH field needs plowing (ALL of mine are scanned,
+        --   including fields placed on my plots) — the nearest with bare
+        --   cells left. Every field's state is logged; when none is left,
+        --   the whole run is skipped before mount/hitch. Failed counts
+        --   never skip (unknown = proceed).
+        local field, ftype = pickFieldToPlow(tr:GetPivot().Position)
         if not field then
-            log("no field of yours in Objects.Fields — nothing to do")
-            return
-        end
-        local plowedN, totalN, doneN = countPlowedCells(field)
-        if plowedN and totalN and totalN > 0 and doneN >= totalN then
-            log(string.format("✅ plowing already done (%d/%d cells non-Empty) — skipping the plow run",
-                doneN, totalN))
+            if ftype == "all done" then
+                log("✅ plowing already done on every field — skipping the plow run")
+            else
+                log("no field of yours anywhere (Objects.Fields or your plots) — nothing to do")
+            end
             return
         end
         if stopping() then return end
