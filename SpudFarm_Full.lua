@@ -123,30 +123,18 @@ local okBuild, errBuild = pcall(function()
         return coroutine.running() ~= loopThread
     end
 
-    -- ▸ AUTO-FARM STEP 2: movement (VFly = BodyVelocity fly + snap,
-    --   Tween = stepped glide). Nothing else uses this yet.
+    -- ▸ AUTO-FARM STEP 2: movement (Tween = fly-over ARC — up, across at
+    --   altitude, down onto the target; the player carries nothing so
+    --   nothing smashes. VFly = legacy BodyVelocity steps.)
     local Move = { Mode = "Tween", Speed = 200 }
+    local arcTween -- assigned after glideTractor (below)
 
     local function moveTo(target)
         local char = LocalPlayer.Character
         local root = char and char:FindFirstChild("HumanoidRootPart")
         if not root then return false end
         if Move.Mode == "Tween" then
-            local dur = math.clamp((root.Position - target).Magnitude / Move.Speed, 0.05, 8)
-            local tween = game:GetService("TweenService"):Create(
-                root,
-                TweenInfo.new(dur, Enum.EasingStyle.Linear),
-                { CFrame = CFrame.new(target) })
-            tween:Play()
-            local deadline = os.clock() + dur + 1
-            while tween.Playing and os.clock() < deadline do
-                if stopping() then
-                    tween:Cancel()
-                    return false
-                end
-                task.wait(0.05)
-            end
-            return true
+            return arcTween(root, target, 30) == true
         end
         -- VFly: pure CFrame steps, NO physics objects. (BodyVelocity made the
         -- physics solver fight the humanoid → lag spikes + server rubber-band)
@@ -276,6 +264,40 @@ local okBuild, errBuild = pcall(function()
         end
     end
 
+    -- fly-over ARC (user's plan): tween UP → across at that altitude →
+    -- DOWN onto the target. ONLY for hops with NOTHING trailing behind
+    -- (player on foot, empty tractor) — a towed implement at altitude
+    -- would smash through everything it passes over. Short hops (<4
+    -- studs) just glide.
+    arcTween = function(pv, targetPos, clearY)
+        clearY = clearY or 30
+        local pos = pv:GetPivot().Position
+        local flat = Vector3.new(targetPos.X - pos.X, 0, targetPos.Z - pos.Z)
+        if flat.Magnitude < 4 then
+            glideTractor(pv, targetPos)
+            return true
+        end
+        local rot = CFrame.lookAt(Vector3.zero, flat.Unit) -- rotation only
+        local high = math.max(pos.Y, targetPos.Y) + clearY
+        local legs = {
+            Vector3.new(pos.X, high, pos.Z),                   -- straight up
+            Vector3.new(targetPos.X, high, targetPos.Z),       -- across at altitude
+            Vector3.new(targetPos.X, targetPos.Y, targetPos.Z), -- down
+        }
+        local from = pos
+        for _, to in ipairs(legs) do
+            local delta = to - from
+            local steps = math.clamp(math.floor(delta.Magnitude / 2), 2, 30)
+            for i = 1, steps do
+                if stopping() then return false end
+                pv:PivotTo(CFrame.new(from + delta * (i / steps)) * rot)
+                task.wait(0.04)
+            end
+            from = to
+        end
+        return true
+    end
+
     -- the game's own context system: this billboard is Enabled only while
     -- the Hitch action is genuinely in range (dump §16b proved it live).
     -- dump §22 showed my old path was wrong TWO ways: the PCGP folder may
@@ -366,8 +388,11 @@ local okBuild, errBuild = pcall(function()
     end
 
     -- park the tractor so its hitch part sits EXACTLY on the plow's hitch
-    -- part, rotating with the plow — physical line-up, no stand-off guessing
-    local function lineUpHitch(tr, plow)
+    -- part, rotating with the plow — physical line-up, no stand-off guessing.
+    -- airborne = the tractor tows NOTHING (pre-hitch): arc over everything
+    -- down onto the pose. Towed runs (the park step) must stay on the
+    -- ground — an implement at altitude smashes through whatever it passes.
+    local function lineUpHitch(tr, plow, airborne)
         if stopping() then return false end
         local tH = findHitchPart(tr)
         local pH = findHitchPart(plow)
@@ -386,13 +411,18 @@ local okBuild, errBuild = pcall(function()
         local desired = CFrame.new(pH.Position.X, cur.Position.Y, pH.Position.Z)
             * (pp - pp.Position)
         local newPivot = desired * rel:Inverse()
-        for _ = 1, 6 do -- multi-pass glide if far (never snap whole-map)
+        for _ = 1, 6 do -- multi-pass approach if far (never snap whole-map)
             local cur = tr:GetPivot().Position
             local tgt = newPivot.Position
             if (Vector3.new(cur.X, 0, cur.Z) - Vector3.new(tgt.X, 0, tgt.Z)).Magnitude < 1 then
                 break
             end
-            glideTractor(tr, tgt)
+            if airborne then
+                arcTween(tr, tgt, 30) -- empty tractor: fly over everything
+                if stopping() then return false end
+            else
+                glideTractor(tr, tgt)
+            end
         end
         if stopping() then return false end
         tr:PivotTo(newPivot)
@@ -558,12 +588,57 @@ local okBuild, errBuild = pcall(function()
         return nil
     end
 
+    -- parked things a GROUND drive could run into: every vehicle and
+    -- implement lives in Objects.Equipment (dump: ZM80 tractors, trucks,
+    -- trailers, S4204 plows …); trees are Foliage models on the plots.
+    -- Nearest obstacle whose fat bounding ball pokes into the flat-XZ
+    -- corridor from startPos to goalPos (our tractor + our towed plow
+    -- excluded). Returns { name, dist, radius, center } or nil.
+    local function corridorObstacle(startPos, goalPos, ignore1, ignore2)
+        local function flat(v) return Vector3.new(v.X, 0, v.Z) end
+        local A, B = flat(startPos), flat(goalPos)
+        local AB = B - A
+        local len = AB.Magnitude
+        if len < 2 then return nil end
+        local dirV = AB / len
+        local best
+        local function scan(folder)
+            for _, m in ipairs(folder and folder:GetChildren() or {}) do
+                if m:IsA("Model") and m ~= ignore1 and m ~= ignore2 then
+                    local ok, cf, sz = pcall(function() return m:GetBoundingBox() end)
+                    if ok and cf then
+                        local C = flat(cf.Position)
+                        local along = (C - A):Dot(dirV)
+                        local radius = math.max(sz.X, sz.Z) / 2 + 3
+                        if along > 2 and along < len - 2 then
+                            local perpOff = (C - A) - dirV * along
+                            local d = perpOff.Magnitude
+                            if d < radius + 4 and (not best or d - radius < best.clear) then
+                                best = { name = m.Name, dist = d, radius = radius,
+                                    center = C, clear = d - radius }
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        local objects = workspace:FindFirstChild("Objects")
+        scan(objects and objects:FindFirstChild("Equipment"))
+        local plots = workspace:FindFirstChild("Plots")
+        for _, plot in ipairs(plots and plots:GetChildren() or {}) do
+            if plot:IsA("Model") then
+                scan(plot:FindFirstChild("Foliage"))
+            end
+        end
+        return best
+    end
+
     -- to the NEAREST CORNER of the field (user: start at a corner, not the
     -- center) — 4 studs inside the edge; arrive within 6 studs of it. Drives
     -- with REAL keys now: the old glide (PivotTo steps at ~30 studs/s) WHIPPED
     -- the hitched plow — video showed it bouncing/tumbling the whole transit.
     -- Glide stays only as the fallback if keys can't move the tractor.
-    local function driveToField(tr, field, seat)
+    local function driveToField(tr, field, seat, plow)
         local baseCF, baseSize = fieldFrame(field)
         if not baseCF then return false, "no bounds" end
         local c = baseCF.Position
@@ -575,25 +650,54 @@ local okBuild, errBuild = pcall(function()
             + rx * math.max(baseSize.X / 2 - 4, 2) * (p0:Dot(rx) >= 0 and 1 or -1)
             + rz * math.max(baseSize.Z / 2 - 4, 2) * (p0:Dot(rz) >= 0 and 1 or -1)
         log(string.format("field corner target: (%.0f, %.0f)", goal.X, goal.Z))
+        -- the plow is TOWED (ground only, can't fly): if parked equipment,
+        -- vehicles or trees sit in the direct corridor, swing around them
+        -- via a midpoint waypoint on the FAR side of the obstacle
+        local startPos = tr:GetPivot().Position
+        local goals = { goal }
+        local ob = corridorObstacle(startPos, goal, tr, plow)
+        if ob then
+            local A = Vector3.new(startPos.X, 0, startPos.Z)
+            local B = Vector3.new(goal.X, 0, goal.Z)
+            local dirV = (B - A).Unit
+            local perp = Vector3.new(-dirV.Z, 0, dirV.X)
+            local side = (ob.center - A):Dot(perp) >= 0 and -1 or 1
+            local way = (A + B) / 2 + perp * side * (ob.radius + 10)
+            goals = { way, goal }
+            log(string.format("obstacle ahead: %s (%.0f studs off the line) — routing around",
+                ob.name, ob.dist))
+        end
         local useKeys = driveLegKeys ~= nil
-        for pass = 1, 8 do
+        local gi = 1
+        for pass = 1, 16 do
             if stopping() then return nil end
             local p = tr:GetPivot().Position
-            local d = (Vector3.new(p.X, 0, p.Z) - goal).Magnitude
-            if d <= 6 then return true, pass end
-            if useKeys then
-                local res = driveLegKeys(tr, seat, p, goal, 6)
-                if res == nil then return nil end
-                if res == true then return true, pass end
-                useKeys = false
-                log("keys didn't drive to the field — falling back to glide")
+            local g = goals[gi]
+            local d = (Vector3.new(p.X, 0, p.Z) - Vector3.new(g.X, 0, g.Z)).Magnitude
+            if d <= 6 then
+                if gi < #goals then
+                    gi += 1
+                    g = goals[gi]
+                else
+                    return true, pass
+                end
             end
-            glideTractor(tr, Vector3.new(goal.X, p.Y, goal.Z))
+            if useKeys then
+                local res = driveLegKeys(tr, seat, p, g, 6)
+                if res == nil then return nil end
+                if res == false then
+                    useKeys = false
+                    log("keys didn't drive to the field — falling back to glide")
+                end
+            end
+            if not useKeys then
+                glideTractor(tr, Vector3.new(g.X, p.Y, g.Z))
+            end
             task.wait(0.2)
         end
         local p = tr:GetPivot().Position
-        local d = (Vector3.new(p.X, 0, p.Z) - goal).Magnitude
-        if d <= 6 then return true, 8 end
+        local d = (Vector3.new(p.X, 0, p.Z) - Vector3.new(goals[#goals].X, 0, goals[#goals].Z)).Magnitude
+        if d <= 6 then return true, 16 end
         return false, "still " .. math.floor(d) .. " studs short"
     end
 
@@ -984,7 +1088,7 @@ local okBuild, errBuild = pcall(function()
                 local backOff = math.min((attempt - 1) * 1.5, 6) -- widen stance on retries
                 local lined = false
                 if not forceCreep then
-                    lined = lineUpHitch(tr, plow)
+                    lined = lineUpHitch(tr, plow, true) -- empty tractor: arc down onto the tool
                 end
                 if stopping() then return end
                 if not lined then
@@ -1020,7 +1124,7 @@ local okBuild, errBuild = pcall(function()
 
         -- ▸ step 4: drive to the field (field picked back in step 0)
         log("driving to field: " .. field.Name .. " (type " .. tostring(ftype) .. ")")
-        local arrived, how = driveToField(tr, field, hum.SeatPart)
+        local arrived, how = driveToField(tr, field, hum.SeatPart, plow)
         if stopping() then return end
         if arrived then
             log("✅ reached the field" .. (type(how) == "number"
