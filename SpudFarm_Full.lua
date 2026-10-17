@@ -288,6 +288,7 @@ local okBuild, errBuild = pcall(function()
             end
 
             -- ▸ step 3: hitch the plow
+            logEquipment() -- always show the names so we can confirm the pick
             local tractorPos = tr:GetPivot().Position
             local plow, pdist = findPlow(tractorPos, tr)
 
@@ -300,8 +301,7 @@ local okBuild, errBuild = pcall(function()
             end
 
             if not plow then
-                log("plow not found in Objects.Equipment")
-                logEquipment()
+                log("no hitchable implement in Objects.Equipment — see list above")
                 return
             end
             log("hitch target: " .. plow.Name .. string.format(" (%.0f studs)", pdist or 0))
