@@ -136,37 +136,125 @@ local okBuild, errBuild = pcall(function()
         return best, bestDist, bestSeat
     end
 
+    -- ▸ AUTO-FARM STEP 3: hitch the plow (rules from the old script:
+    --   X is a TOGGLE → one press per attempt, never double-press blind;
+    --   seated vehicles GLIDE (PivotTo steps), never instant-snap — snaps
+    --   get rubber-banded by the server and desync everything;
+    --   rotation is preserved; every attempt ends with a TUG-TEST)
+    local function findPlow(nearPos)
+        local best, bestDist
+        for _, d in ipairs(workspace:GetDescendants()) do
+            if d:IsA("Model") and d.Name:lower():find("plow", 1, true) then
+                local p = d:GetPivot().Position
+                local dist = (p - nearPos).Magnitude
+                if not bestDist or dist < bestDist then
+                    best, bestDist = d, dist
+                end
+            end
+        end
+        return best, bestDist
+    end
+
+    local function glideTractor(tr, targetPos)
+        local startPivot = tr:GetPivot()
+        local rot = startPivot - startPivot.Position -- rotation-only CFrame
+        local endCF = CFrame.new(targetPos.X, startPivot.Position.Y, targetPos.Z) * rot
+        local dist = (Vector3.new(startPivot.Position.X, 0, startPivot.Position.Z)
+            - Vector3.new(targetPos.X, 0, targetPos.Z)).Magnitude
+        if dist < 0.5 then return end
+        local steps = math.clamp(math.floor(dist / 1.5), 3, 40)
+        for i = 1, steps do
+            tr:PivotTo(startPivot:Lerp(endCF, i / steps))
+            task.wait(0.05)
+        end
+    end
+
+    -- one hitch attempt: press X once → tug forward 5 studs → did the plow follow?
+    local function attemptHitch(tr, plow)
+        pressKey(Enum.KeyCode.X)
+        task.wait(0.6)
+        local before = plow:GetPivot().Position
+        local pivot = tr:GetPivot()
+        local fwd = Vector3.new(pivot.LookVector.X, 0, pivot.LookVector.Z)
+        if fwd.Magnitude < 0.1 then fwd = Vector3.new(0, 0, -1) end
+        glideTractor(tr, pivot.Position + fwd.Unit * 5)
+        task.wait(0.5)
+        local moved = (plow:GetPivot().Position - before).Magnitude
+        return moved > 2.5, moved
+    end
+
     Tabs.Farm:CreateButton({
         Title = "farming loop",
         Callback = function()
             local char = LocalPlayer.Character
             local hum = char and char:FindFirstChildOfClass("Humanoid")
             if not hum then log("no character") return end
-            if hum.SeatPart then log("already seated") return end
             local tr, dist, seat = findTractor()
             if not tr then log("tractor (ZM80) not found") return end
-            if dist > 10 then
-                log(string.format("moving to tractor (%.0f studs)…", dist))
-                if not moveTo(seat.Position + Vector3.new(0, 3, 0)) then
-                    log("couldn't reach the tractor")
+
+            -- ▸ step 1: mount (skipped when already in the tractor)
+            if hum.SeatPart and not hum.SeatPart:IsDescendantOf(tr) then
+                log("seated in another vehicle — stand up first")
+                return
+            end
+            if not hum.SeatPart then
+                if dist > 10 then
+                    log(string.format("moving to tractor (%.0f studs)…", dist))
+                    if not moveTo(seat.Position + Vector3.new(0, 3, 0)) then
+                        log("couldn't reach the tractor")
+                        return
+                    end
+                    local root = char:FindFirstChild("HumanoidRootPart")
+                    dist = root and (seat.Position - root.Position).Magnitude or 0
+                end
+                if dist > 10 then log("still too far after moving") return end
+                log("pressing F to mount…")
+                pressKey(Enum.KeyCode.F)
+                task.wait(0.7)
+                if not (hum.SeatPart and hum.SeatPart:IsDescendantOf(tr)) then
+                    pressKey(Enum.KeyCode.F) -- context can take a moment to register
+                    task.wait(0.7)
+                end
+                if hum.SeatPart and hum.SeatPart:IsDescendantOf(tr) then
+                    log("✅ mounted " .. tr.Name)
+                else
+                    log("F pressed but not seated — game didn't accept the enter")
                     return
                 end
-                local root = char:FindFirstChild("HumanoidRootPart")
-                dist = root and (seat.Position - root.Position).Magnitude or 0
             end
-            if dist > 10 then log("still too far after moving") return end
-            log("pressing F to mount…")
-            pressKey(Enum.KeyCode.F)
-            task.wait(0.7)
-            if not (hum.SeatPart and hum.SeatPart:IsDescendantOf(tr)) then
-                pressKey(Enum.KeyCode.F) -- context can take a moment to register
-                task.wait(0.7)
+
+            -- ▸ step 3: hitch the plow
+            local tractorPos = tr:GetPivot().Position
+            local plow, pdist = findPlow(tractorPos)
+            if not plow then log("plow not found near the tractor") return end
+            if pdist > 6 then
+                local plowPos = plow:GetPivot().Position
+                local dir = tractorPos - plowPos
+                dir = Vector3.new(dir.X, 0, dir.Z)
+                if dir.Magnitude < 0.5 then dir = Vector3.new(0, 0, -1) end
+                local standOff = plowPos + dir.Unit * 6
+                log(string.format("gliding tractor to plow (%.0f studs)…", pdist))
+                glideTractor(tr, standOff)
+                task.wait(0.4)
             end
-            if hum.SeatPart and hum.SeatPart:IsDescendantOf(tr) then
-                log("✅ mounted " .. tr.Name)
-            else
-                log("F pressed but not seated — game didn't accept the enter")
+
+            for attempt = 1, 2 do
+                if attempt > 1 then
+                    local plowPos = plow:GetPivot().Position
+                    local dir = tr:GetPivot().Position - plowPos
+                    dir = Vector3.new(dir.X, 0, dir.Z)
+                    if dir.Magnitude < 0.5 then dir = Vector3.new(0, 0, -1) end
+                    glideTractor(tr, plowPos + dir.Unit * 6) -- failed tug moved us away
+                    task.wait(0.4)
+                end
+                local hooked, moved = attemptHitch(tr, plow)
+                if hooked then
+                    log("✅ hitched the plow")
+                    return
+                end
+                log(string.format("hitch attempt %d/2: plow didn't follow (%.1f studs)", attempt, moved))
             end
+            log("couldn't hitch — send me this line")
         end,
     })
 
