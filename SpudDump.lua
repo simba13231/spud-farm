@@ -986,6 +986,205 @@ local ok, err = pcall(function()
     else
         w("  my plot 1 NOT FOUND")
     end
+
+    ------------------------------------------------------------------
+    -- 25. FIELD CELL MACHINERY (enumerate EVERY cultivatable cell)
+    --      No process-memory reading (executors don't expose it) — the
+    --      game hands the data to the client: packet remotes, per-cell
+    --      GUIs, visuals, and module config.
+    ------------------------------------------------------------------
+    header("FIELD CELL MACHINERY (cultivable-land enumeration)")
+    local RS = game:GetService("ReplicatedStorage")
+
+    -- A. the field model's guts: Plate (the checkered surface?) + guis
+    local fObjects = Workspace:FindFirstChild("Objects")
+    local fFields = fObjects and fObjects:FindFirstChild("Fields")
+    local fModel = fFields and fFields:FindFirstChildWhichIsA("Model")
+    if not fModel then
+        w("  field model NOT FOUND")
+    else
+        w("  field model: " .. fModel.Name)
+        local plate = fModel:FindFirstChild("Plate")
+        if plate then
+            w("  Plate [" .. plate.ClassName .. "]"
+                .. (plate:IsA("BasePart") and string.format(
+                    "  size=(%.0f, %.0f, %.0f)  pos=(%.0f, %.0f, %.0f)",
+                    plate.Size.X, plate.Size.Y, plate.Size.Z,
+                    plate.Position.X, plate.Position.Y, plate.Position.Z) or ""))
+            local kinds = {}
+            for _, d in ipairs(plate:GetDescendants()) do
+                local key = d.ClassName .. " · " .. d.Name
+                kinds[key] = (kinds[key] or 0) + 1
+            end
+            local kk = {}
+            for k, c in pairs(kinds) do kk[#kk + 1] = k .. (c > 1 and (" ×" .. c) or "") end
+            table.sort(kk)
+            w("  Plate descendants (" .. #kk .. " kinds):")
+            for i, k in ipairs(kk) do
+                if i > 25 then w("      … +" .. (#kk - 25) .. " more"); break end
+                w("      · " .. k)
+            end
+            if plate:IsA("BasePart") then
+                for _, d in ipairs(plate:GetDescendants()) do
+                    if d:IsA("Texture") or d:IsA("Decal") then
+                        w("      " .. d.ClassName .. " " .. d.Name
+                            .. " Face=" .. tostring(d.Face)
+                            .. "  tex=" .. string.sub(tostring(d.Texture), 1, 90))
+                    end
+                end
+            end
+        else
+            w("  Plate NOT FOUND")
+        end
+        local fg = fModel:FindFirstChild("FieldProgressGui")
+        if fg then
+            w("  FieldProgressGui [" .. fg.ClassName .. "] children: " .. #fg:GetChildren())
+            for i, d in ipairs(fg:GetChildren()) do
+                if i > 15 then w("      … +" .. (#fg:GetChildren() - 15) .. " more"); break end
+                w("      · " .. d.Name .. " [" .. d.ClassName .. "]")
+            end
+        else
+            w("  FieldProgressGui NOT FOUND")
+        end
+    end
+
+    -- B. per-cell progress guis on the PlayerGui side (adornee = the cell?)
+    local pgUi = LocalPlayer:FindFirstChild("PlayerGui")
+    local adornee = pgUi and pgUi:FindFirstChild("AdorneeGuis")
+    local prog = adornee and adornee:FindFirstChild("FieldProgressGuis")
+    if prog then
+        local kids = prog:GetChildren()
+        w("  AdorneeGuis.FieldProgressGuis children: " .. #kids)
+        for i, d in ipairs(kids) do
+            if i > 12 then w("      … +" .. (#kids - 12) .. " more"); break end
+            local ad
+            if d:IsA("LayerCollector") then ad = d.Adornee end
+            w(string.format("      · %s [%s]%s", d.Name, d.ClassName,
+                ad and ad:IsA("BasePart") and string.format("  @ (%.0f, %.0f, %.0f)",
+                    ad.Position.X, ad.Position.Y, ad.Position.Z) or ""))
+        end
+    else
+        w("  AdorneeGuis.FieldProgressGuis NOT FOUND")
+    end
+
+    -- C. CropAesthetics (visual layer that might BE the cell grid)
+    local gameplay = Workspace:FindFirstChild("GameplayVisuals")
+    local crop = gameplay and gameplay:FindFirstChild("CropAesthetics")
+    if crop then
+        local kinds = {}
+        for _, d in ipairs(crop:GetDescendants()) do
+            local key = d.ClassName .. " · " .. d.Name
+            kinds[key] = (kinds[key] or 0) + 1
+        end
+        local ck = {}
+        for k, c in pairs(kinds) do ck[#ck + 1] = k .. (c > 1 and (" ×" .. c) or "") end
+        table.sort(ck)
+        w("  CropAesthetics kinds (" .. #ck .. "):")
+        for i, k in ipairs(ck) do
+            if i > 20 then w("      … +" .. (#ck - 20) .. " more"); break end
+            w("      · " .. k)
+        end
+    else
+        w("  CropAesthetics NOT FOUND")
+    end
+
+    -- D. cell-ish instance names anywhere (cell/grid/quad/checker/tile)
+    local patts = { "cell", "grid", "quad", "checker", "furrow", "tile" }
+    local hits = {}
+    for _, d in ipairs(desc) do
+        local n = d.Name:lower()
+        for _, p in ipairs(patts) do
+            if n:find(p, 1, true) then
+                hits[#hits + 1] = d.ClassName .. " @ " .. pathOf(d, 6)
+                break
+            end
+        end
+    end
+    w("  cell-ish name hits: " .. #hits)
+    for i, h in ipairs(hits) do
+        if i > 25 then w("      … +" .. (#hits - 25) .. " more"); break end
+        w("      · " .. h)
+    end
+
+    -- E. field/grid ModuleScripts + source peek (first 1400 chars × up to 3
+    --    — the origin + cell-size formula would let us COMPUTE every cell)
+    local mods = {}
+    for _, d in ipairs(RS:GetDescendants()) do
+        if d:IsA("ModuleScript") then
+            local n = d.Name:lower()
+            if n:find("field", 1, true) or n:find("grid", 1, true)
+                or n:find("cell", 1, true) or n:find("soil", 1, true)
+                or n:find("crop", 1, true) then
+                mods[#mods + 1] = d
+            end
+        end
+    end
+    table.sort(mods, function(a, b) return a:GetFullName() < b:GetFullName() end)
+    w("  field-ish ModuleScripts in ReplicatedStorage: " .. #mods)
+    local peeked = 0
+    for _, m in ipairs(mods) do
+        w("      · " .. pathOf(m, 7))
+        if peeked < 3 and m.Name:lower():find("field", 1, true) then
+            peeked += 1
+            local okS, src = pcall(function() return m.Source end)
+            if okS and type(src) == "string" then
+                w("        source (" .. #src .. " chars), first 1400:")
+                local chunk = string.sub(src, 1, 1400)
+                for line in (chunk .. "\n"):gmatch("(.-)\n") do
+                    w("        | " .. line)
+                end
+            else
+                w("        source: protected/unreadable")
+            end
+        end
+    end
+    if peeked == 0 then w("        (no *field* module to peek)") end
+
+    -- F. LIVE server→client watchers (stay connected after this dump
+    --    prints!). The server PUSHES field state to us — connect and echo
+    --    to the executor console. Trigger: rejoin or drive onto the field,
+    --    then paste the [FIELDDATA …] lines the console prints.
+    local nLogged = 0
+    local function summarize(prefix, ...)
+        local parts = {}
+        for i, v in ipairs({...}) do
+            local t = typeof(v)
+            local s
+            if t == "table" then
+                local n = 0
+                for _ in pairs(v) do n += 1 end
+                s = "table{" .. n .. "}: "
+                local shown = 0
+                for k, val in pairs(v) do
+                    shown += 1
+                    if shown > 8 then s = s .. "…"; break end
+                    s = s .. tostring(k) .. "=" .. tostring(val) .. " "
+                end
+            elseif t == "string" then
+                s = string.format("string(%d) %q", #v, string.sub(v, 1, 140))
+            else
+                s = t .. "=" .. tostring(v)
+            end
+            parts[#parts + 1] = "[" .. i .. "] " .. s
+        end
+        warn(prefix .. " " .. table.concat(parts, "  "))
+    end
+    local function watch(remoteName)
+        local r = RS:FindFirstChild(remoteName)
+        if not r then w("  live-watch: " .. remoteName .. " NOT FOUND") return end
+        local okC = pcall(function()
+            r.OnClientEvent:Connect(function(...)
+                nLogged += 1
+                summarize("[FIELDDATA " .. remoteName .. " #" .. nLogged .. "]", ...)
+            end)
+        end)
+        w(okC and ("  live-watch ON: " .. remoteName
+                .. " — watch executor console; rejoin/drive to trigger a send")
+            or ("  live-watch FAILED: " .. remoteName))
+    end
+    watch("EVTFieldPacket")
+    watch("EventEventDataUpdated")
+    watch("EventConfigChanged")
 end)
 
 w("")
