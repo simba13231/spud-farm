@@ -439,27 +439,31 @@ local okBuild, errBuild = pcall(function()
         return best -- nearest fallback
     end
 
-    -- glide toward the field center until inside its bounds; short
-    -- rubber-banded moves just retry on the next pass (honest failures)
+    -- glide to the NEAREST CORNER of the field (user: start at a corner,
+    -- not the center) — 4 studs inside the edge; arrive within 6 studs of
+    -- it; short rubber-banded moves retry on the next pass
     local function driveToField(tr, field)
         local okB, cf, sz = pcall(function() return field:GetBoundingBox() end)
         if not (okB and cf) then return false, "no bounds" end
-        local goal = Vector3.new(cf.Position.X, 0, cf.Position.Z)
-        local halfX, halfZ = sz.X / 2 + 4, sz.Z / 2 + 4 -- 4-stud margin
-        local function inside(p)
-            return math.abs(p.X - goal.X) <= halfX and math.abs(p.Z - goal.Z) <= halfZ
-        end
+        local cx, cz = cf.Position.X, cf.Position.Z
+        local hx, hz = math.max(sz.X / 2 - 4, 2), math.max(sz.Z / 2 - 4, 2)
+        local p0 = tr:GetPivot().Position
+        local goal = Vector3.new(
+            cx + (p0.X >= cx and hx or -hx), 0,  -- nearest corner,
+            cz + (p0.Z >= cz and hz or -hz))      -- 4 studs inside
+        log(string.format("field corner target: (%.0f, %.0f)", goal.X, goal.Z))
         for pass = 1, 8 do
             if stopping() then return nil end
             local p = tr:GetPivot().Position
-            if inside(p) then return true, pass end
+            local d = (Vector3.new(p.X, 0, p.Z) - goal).Magnitude
+            if d <= 6 then return true, pass end
             glideTractor(tr, Vector3.new(goal.X, p.Y, goal.Z))
             task.wait(0.2)
         end
         local p = tr:GetPivot().Position
-        if inside(p) then return true, 8 end
-        return false, "still "
-            .. math.floor((Vector3.new(p.X, 0, p.Z) - goal).Magnitude) .. " studs short"
+        local d = (Vector3.new(p.X, 0, p.Z) - goal).Magnitude
+        if d <= 6 then return true, 8 end
+        return false, "still " .. math.floor(d) .. " studs short"
     end
 
     -- the actual farming loop, run on its own thread by the toggle below.
