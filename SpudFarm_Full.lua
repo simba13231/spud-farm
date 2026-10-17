@@ -174,8 +174,10 @@ local okBuild, errBuild = pcall(function()
     local function findPlow(nearPos)
         local best, bestDist
         for _, d in ipairs(workspace:GetDescendants()) do
-            if d:IsA("Model") and d.Name:lower():find("plow", 1, true) then
-                local p = d:GetPivot().Position
+            local n = d.Name:lower()
+            if (d:IsA("Model") or d:IsA("BasePart"))
+                and (n:find("plow", 1, true) or n:find("plough", 1, true)) then
+                local p = d:IsA("BasePart") and d.Position or d:GetPivot().Position
                 local dist = (p - nearPos).Magnitude
                 if not bestDist or dist < bestDist then
                     best, bestDist = d, dist
@@ -183,6 +185,27 @@ local okBuild, errBuild = pcall(function()
             end
         end
         return best, bestDist
+    end
+
+    -- when findPlow fails: list the nearest model names so we can read the
+    -- real implement name straight from the Console tab
+    local function logNearbyModels(pos, excludeModel)
+        local seen, list = {}, {}
+        for _, d in ipairs(workspace:GetDescendants()) do
+            if d:IsA("Model") and not seen[d.Name] and d ~= excludeModel then
+                local dd = (d:GetPivot().Position - pos).Magnitude
+                if dd < 50 then
+                    seen[d.Name] = true
+                    list[#list + 1] = { n = d.Name, d = dd }
+                end
+            end
+        end
+        table.sort(list, function(a, b) return a.d < b.d end)
+        log("plow not found — nearest models to the tractor:")
+        for i = 1, math.min(#list, 8) do
+            log(string.format("  · %s (%.0f studs)", list[i].n, list[i].d))
+        end
+        if #list == 0 then log("  (nothing within 50 studs?)") end
     end
 
     local function glideTractor(tr, targetPos)
@@ -256,7 +279,10 @@ local okBuild, errBuild = pcall(function()
             -- ▸ step 3: hitch the plow
             local tractorPos = tr:GetPivot().Position
             local plow, pdist = findPlow(tractorPos)
-            if not plow then log("plow not found near the tractor") return end
+            if not plow then
+                logNearbyModels(tractorPos, tr)
+                return
+            end
             if pdist > 6 then
                 local plowPos = plow:GetPivot().Position
                 local dir = tractorPos - plowPos
