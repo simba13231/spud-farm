@@ -488,7 +488,7 @@ local okBuild, errBuild = pcall(function()
             local d = (Vector3.new(p.X, 0, p.Z) - goal).Magnitude
             if d <= 6 then return true, pass end
             if useKeys then
-                local res = driveLegKeys(tr, seat, goal, 6)
+                local res = driveLegKeys(tr, seat, p, goal, 6)
                 if res == nil then return nil end
                 if res == true then return true, pass end
                 useKeys = false
@@ -534,22 +534,17 @@ local okBuild, errBuild = pcall(function()
     -- turns with true physics. (Setting seat.Throttle directly was PROVEN
     -- ignored: the seat's control script overwrites those properties from
     -- player input every frame.)
-    -- v4 anti-orbit steering (v3 circled forever at row ends: full-speed
-    -- turn radius > arrival tolerance → orbit around the goal):
-    --   · turn strength scales with how far off-heading we are (full turn
-    --     past 0.5, 2/3 duty past 0.28, feather otherwise) — no overshoot
-    --     oscillation, no wheel chatter
-    --   · throttle duty cut to a creep while turning and near the goal
-    --   · close-enough acceptance: within 16 studs after ~15 s = done
-    --     (plow overlap covers the shortfall; the cell counter is truth)
-    -- Forward = low-pass-smoothed travel direction (seat facing only as
-    -- the startup fallback) so jitter can't flip the steering.
-    -- v5: NO REVERSE EVER — backing with a trailed implement JACKKNIFES it
-    -- into the tractor (video: plow wedged sideways against the tractor,
-    -- then the tractor could only wander). Turnarounds are wide forward
-    -- arcs at creep speed. Cruise duty cut to 1/2 overall.
-    -- Returns true=arrived/accepted, false=keys didn't drive (caller falls
-    -- back to the glide), nil=killed.
+    -- MAP-FOLLOWING driver (user's plan): the path is a precomputed snake
+    -- of straight legs — the script just follows it. Each leg:
+    --   1. ALIGN — steer toward the leg's line at creep until the heading
+    --      matches it within ~8° (the "straighten to the field" move)
+    --   2. DRIVE — steer OFF; hold throttle and run the line dead straight;
+    --      drift off the line is corrected only with small feather steering
+    -- No reactive steering mid-row → the tractor runs the row line exactly
+    -- and the plow trails centered on it.
+    -- (v3 orbited goals; v4 reverse-assist jackknifed the plow — both gone.)
+    -- Returns true=leg done, false=keys didn't drive (caller falls back to
+    -- the glide), nil=killed.
     local KEY_W, KEY_A, KEY_D =
         Enum.KeyCode.W, Enum.KeyCode.A, Enum.KeyCode.D
     local keyHeld = {}
@@ -562,18 +557,25 @@ local okBuild, errBuild = pcall(function()
         setKey(KEY_W, false) setKey(KEY_A, false) setKey(KEY_D, false)
     end
 
-    driveLegKeys = function(tr, seat, goal, tol)
+    driveLegKeys = function(tr, seat, fromPt, toPt, tol)
         if not seat then return false end -- not seated: keys would do nothing
-        tol = tol or 7
+        tol = tol or 5
+        local A = Vector3.new(fromPt.X, 0, fromPt.Z)
+        local B = Vector3.new(toPt.X, 0, toPt.Z)
+        local dir = B - A
+        local legLen = dir.Magnitude
+        if legLen < 0.5 then return true end
+        dir = dir / legLen
+        local perp = Vector3.new(-dir.Z, 0, dir.X) -- right of the leg line
         local startPos = tr:GetPivot().Position
-        local prevPos, fwd = startPos, nil
+        local prevPos, fwd, alignTicks = startPos, nil, 0
         for tick = 1, 350 do -- ~42 s cap per leg (0.12 s ticks)
             if stopping() then releaseDriveKeys() return nil end
             local pos = tr:GetPivot().Position
-            local to = Vector3.new(goal.X - pos.X, 0, goal.Z - pos.Z)
-            local dist = to.Magnitude
-            if dist <= tol then break end
-            -- smoothed travel direction (low-pass: jitter can't flip steering)
+            local rel = Vector3.new(pos.X, 0, pos.Z) - A
+            local along, cross = rel:Dot(dir), rel:Dot(perp)
+            if along >= legLen - tol and math.abs(cross) <= 14 then break end
+            -- low-pass travel direction (jitter can't flip the alignment)
             local move = Vector3.new(pos.X - prevPos.X, 0, pos.Z - prevPos.Z)
             if move.Magnitude > 0.5 then
                 local m = move.Unit
@@ -583,34 +585,39 @@ local okBuild, errBuild = pcall(function()
             if not fwd then
                 local look = seat.CFrame.LookVector
                 fwd = Vector3.new(look.X, 0, look.Z)
-                fwd = fwd.Magnitude > 0.1 and fwd.Unit or Vector3.new(0, 0, -1)
+                fwd = fwd.Magnitude > 0.1 and fwd.Unit or dir
             end
-            local right = Vector3.new(-fwd.Z, 0, fwd.X)
-            local d = to.Unit
-            local side = d:Dot(right) -- >0 = goal is off to the right
-            local sharp = math.abs(side) > 0.5
-            local turnSlot, thrSlot = tick % 3, tick % 3
-            -- goal BEHIND = wide forward U-turn at creep (never reverse)
-            -- proportional steering: hard turn far off-heading, feather near
-            local want = side > 0.18 and 1 or (side < -0.18 and -1 or 0)
-            local duty = sharp and 3 or (math.abs(side) > 0.28 and 2 or 1)
-            setKey(KEY_D, want == 1 and turnSlot < duty)
-            setKey(KEY_A, want == -1 and turnSlot < duty)
-            -- throttle: gentle cruise far out, creep in turns and up close
-            local tDuty = (sharp or dist <= 14) and 1 or 2
-            setKey(KEY_W, thrSlot < tDuty)
+            -- sinE > 0 = nose points RIGHT of the leg line → steer LEFT (A)
+            local sinE = fwd:Dot(perp)
+            local slot = tick % 3
+            alignTicks = math.abs(sinE) > 0.14 and alignTicks + 1 or 0
+            if math.abs(sinE) > 0.14 and alignTicks < 50 then
+                -- ALIGN: creep + held steer toward the line's direction
+                setKey(sinE > 0 and KEY_A or KEY_D, true)
+                setKey(sinE > 0 and KEY_D or KEY_A, false)
+                setKey(KEY_W, slot < 1)
+            else
+                -- DRIVE: dead straight; feather back to the line if drifted
+                setKey(KEY_A, false) setKey(KEY_D, false)
+                if cross > 6 then       -- right of the line → nudge left
+                    setKey(KEY_A, true)
+                elseif cross < -6 then  -- left of the line → nudge right
+                    setKey(KEY_D, true)
+                end
+                setKey(KEY_W, slot < 2)
+            end
             task.wait(0.12)
-
             if tick == 15 then -- ~1.8 s probe: keys must produce motion
                 local moved = (Vector3.new(pos.X, 0, pos.Z)
                     - Vector3.new(startPos.X, 0, startPos.Z)).Magnitude
-                if moved < 1 and dist > tol + 4 then
+                if moved < 1 and legLen > tol + 4 then
                     releaseDriveKeys()
                     return false
                 end
-            elseif tick == 125 and dist < 16 then -- ~15 s: close enough
-                if dist > 10 then
-                    log(string.format("row end ~%.0f studs short — accepting (plow overlap covers it)", dist))
+            elseif tick == 125 and math.abs(cross) <= 16 then -- ~15 s: close
+                if along < legLen - 10 then
+                    log(string.format("leg ~%.0f studs short — accepting (plow overlap covers it)",
+                        legLen - along))
                 end
                 break
             end
@@ -644,10 +651,10 @@ local okBuild, errBuild = pcall(function()
             before and string.format("%d/%d cells already Plowed", before, total)
                 or "cell read unavailable"))
         local realDrive -- nil = not probed yet; true = seat driving; false = glide
-        local function doLeg(goal, tol)
+        local function doLeg(from, goal, tol)
             if stopping() then return nil end
             if realDrive ~= false then
-                local res = driveLegKeys(tr, seat, goal, tol or 7)
+                local res = driveLegKeys(tr, seat, from, goal, tol or 7)
                 if res == nil then return nil end
                 if realDrive == nil then
                     realDrive = res == true
@@ -662,18 +669,26 @@ local okBuild, errBuild = pcall(function()
             task.wait(0.1)
             return true
         end
-        -- snake: start on the tractor's OWN end and row, alternate ends each
-        -- row. Every leg is aligned with the field — a short crossover at the
-        -- row end, then the full row drive. (v4 cut diagonals between far
-        -- ends → triangular unplowed gaps, video-confirmed.)
-        local p0 = tr:GetPivot().Position
-        local endSide = ((alongX and p0.X or p0.Z) >= (alongX and c.X or c.Z)) and 1 or -1
-        local rowSide = ((alongX and p0.Z or p0.X) >= (alongX and c.Z or c.X)) and 1 or -1
+        -- THE MAP (user's plan): precompute the whole snake ONCE — start on
+        -- the tractor's OWN end and row, then per row a short crossover hop
+        -- at the row end + the full row drive, alternating ends. The script
+        -- just FOLLOWS this list; every leg is aligned with the field, no
+        -- diagonals (v4 cut diagonals between far ends → triangular
+        -- unplowed gaps, video-confirmed).
+        local at = tr:GetPivot().Position
+        local endSide = ((alongX and at.X or at.Z) >= (alongX and c.X or c.Z)) and 1 or -1
+        local rowSide = ((alongX and at.Z or at.X) >= (alongX and c.Z or c.X)) and 1 or -1
+        local map = {}
         for r = 1, rows do
             local row = rowSide * (rowSpan / 2 - 5) - rowSide * (r - 1) * 10
-            if not doLeg(pt(endSide * driveHalf, row), 4) then return nil end -- crossover/start
-            if not doLeg(pt(-endSide * driveHalf, row)) then return nil end   -- the row itself
+            map[#map + 1] = { pt(endSide * driveHalf, row), 4, nil } -- crossover/start
+            map[#map + 1] = { pt(-endSide * driveHalf, row), 7, r }   -- the row drive
             endSide = -endSide
+        end
+        for _, leg in ipairs(map) do
+            if not doLeg(at, leg[1], leg[2]) then return nil end
+            at = leg[1]
+            if leg[3] then log(string.format("row %d/%d done", leg[3], rows)) end
         end
         if stopping() then return nil end
         local after, tot2 = countPlowedCells(field)
