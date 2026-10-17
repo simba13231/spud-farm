@@ -49,6 +49,7 @@ local okBuild, errBuild = pcall(function()
     })
 
     local Tabs = {
+        Home     = Window:CreateTab({ Title = "Home", Icon = "house" }),
         Farm     = Window:CreateTab({ Title = "Farm", Icon = "wheat" }),
         Player   = Window:CreateTab({ Title = "Player", Icon = "user" }),
         Console  = Window:CreateTab({ Title = "Console", Icon = "terminal" }),
@@ -68,6 +69,35 @@ local okBuild, errBuild = pcall(function()
         print("[spud] " .. tostring(msg))
         pcall(function() logPara:SetValue(table.concat(LOG, "\n")) end)
     end
+
+    -- ▸ HOME: recent commits + last edit, fetched live from GitHub
+    local homePara = Tabs.Home:CreateParagraph("HomeUpdates", {
+        Title = "Recent updates",
+        Content = "loading latest commits…",
+    })
+    task.spawn(function()
+        local ok, data = pcall(function()
+            local src = game:HttpGet(
+                "https://api.github.com/repos/simba13231/spud-farm/commits?per_page=6", true)
+            return game:GetService("HttpService"):JSONDecode(src)
+        end)
+        if ok and type(data) == "table" and data[1] then
+            local lines = { VERSION }
+            for i, c in ipairs(data) do
+                if i > 6 then break end
+                local msg = tostring(c.commit and c.commit.message or "?")
+                msg = msg:gsub("\r", ""):match("^[^\n]*") or msg
+                local date = tostring(c.commit and c.commit.author and c.commit.author.date or "")
+                lines[#lines + 1] = string.format("%s  %s  %s",
+                    string.sub(tostring(c.sha), 1, 7), msg, string.sub(date, 1, 16):gsub("T", " "))
+            end
+            pcall(function() homePara:SetValue(table.concat(lines, "\n")) end)
+            log("home: fetched " .. math.min(#data, 6) .. " recent commits")
+        else
+            pcall(function() homePara:SetValue("updates unavailable right now (GitHub unreachable)") end)
+            log("home: commit fetch failed")
+        end
+    end)
 
     -- placeholder tab (features return one at a time)
     Tabs.Player:CreateParagraph("PlayerInfo", {
