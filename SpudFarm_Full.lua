@@ -69,12 +69,64 @@ local okBuild, errBuild = pcall(function()
         pcall(function() logPara:SetValue(table.concat(LOG, "\n")) end)
     end
 
-    -- placeholder tabs (features return one at a time)
-    Tabs.Farm:CreateParagraph("FarmInfo", {
-        Title = "Nothing here yet",
-    })
+    -- placeholder tab (features return one at a time)
     Tabs.Player:CreateParagraph("PlayerInfo", {
         Title = "Nothing here yet",
+    })
+
+    -- ▸ AUTO-FARM STEP 1 (and nothing more): mount the tractor
+    local VIM = game:GetService("VirtualInputManager")
+    local function pressKey(key)
+        VIM:SendKeyEvent(true, key, false, game)
+        task.wait(0.08)
+        VIM:SendKeyEvent(false, key, false, game)
+    end
+
+    local function findTractor()
+        local hrp = LocalPlayer.Character
+            and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        local best, bestDist
+        for _, d in ipairs(workspace:GetDescendants()) do
+            if d:IsA("Model") and d.Name:lower():find("zm80", 1, true) then
+                local seat = d:FindFirstChildWhichIsA("VehicleSeat", true)
+                    or d:FindFirstChildWhichIsA("Seat", true)
+                if seat and hrp then
+                    local dist = (seat.Position - hrp.Position).Magnitude
+                    if not bestDist or dist < bestDist then
+                        best, bestDist = d, dist
+                    end
+                end
+            end
+        end
+        return best, bestDist
+    end
+
+    Tabs.Farm:CreateButton({
+        Title = "🚜 Mount tractor",
+        Callback = function()
+            local char = LocalPlayer.Character
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            if not hum then log("no character") return end
+            if hum.SeatPart then log("already seated") return end
+            local tr, dist = findTractor()
+            if not tr then log("tractor (ZM80) not found") return end
+            if dist > 10 then
+                log(string.format("tractor is %.0f studs away — stand next to it", dist))
+                return
+            end
+            log("pressing F to mount…")
+            pressKey(Enum.KeyCode.F)
+            task.wait(0.7)
+            if not (hum.SeatPart and hum.SeatPart:IsDescendantOf(tr)) then
+                pressKey(Enum.KeyCode.F) -- context can take a moment to register
+                task.wait(0.7)
+            end
+            if hum.SeatPart and hum.SeatPart:IsDescendantOf(tr) then
+                log("✅ mounted " .. tr.Name)
+            else
+                log("F pressed but not seated — game didn't accept the enter")
+            end
+        end,
     })
 
     -- Settings: reload + unload
