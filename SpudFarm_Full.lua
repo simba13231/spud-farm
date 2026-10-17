@@ -634,49 +634,49 @@ local okBuild, errBuild = pcall(function()
     --   SHORT axis, step 10 studs along the LONG one, alternating ends each
     --   row. Overshoot both ends slightly so the TRAILING plow still
     --   covers the edge cells.
-    -- ── visual debug: draw the planned path over the field (Drawing API) ──
-    -- thin green lines = every leg of the map, thick bright line = the leg
-    -- being driven right now. pcall-guarded: if the executor has no
-    -- Drawing API the run is unaffected (just no overlay).
-    local dbgLines, dbgConn = {}, nil
-    local function dbgShow(points)
-        if not (Drawing and Drawing.new) then return end
+    -- ── visual debug: glowing bars ON the field along every leg of the
+    -- snake (anchored 3D parts in workspace — always visible in every
+    -- executor; the 2D Drawing-API lines didn't show up in Delta).
+    -- thin green = all legs, thick bright yellow = the leg being driven.
+    local dbgParts = {}
+    local function dbgShow(tr, map, at)
         pcall(function()
-            for i = 1, #points - 1 do
-                local l = Drawing.new("Line")
-                l.Color = Color3.fromRGB(90, 220, 120)
-                l.Thickness = 2
-                l.Transparency = 0.35
-                l.Visible = true
-                l.From = Vector2.new(0, 0)
-                l.To = Vector2.new(0, 0)
-                dbgLines[i] = l
-            end
-        end)
-        if #dbgLines == 0 then return end
-        dbgConn = game:GetService("RunService").RenderStepped:Connect(function()
-            local cam = workspace.CurrentCamera
-            if not cam then return end
-            for i, l in ipairs(dbgLines) do
-                local a = cam:WorldToViewportPoint(points[i])
-                local b = cam:WorldToViewportPoint(points[i + 1])
-                l.From = Vector2.new(a.X, a.Y)
-                l.To = Vector2.new(b.X, b.Y)
+            local drawY = tr:GetPivot().Position.Y + 0.6 -- hover over soil
+            local pts = { at }
+            for _, leg in ipairs(map) do pts[#pts + 1] = leg[1] end
+            for i = 1, #pts - 1 do
+                local a = Vector3.new(pts[i].X, drawY, pts[i].Z)
+                local b = Vector3.new(pts[i + 1].X, drawY, pts[i + 1].Z)
+                local len = (b - a).Magnitude
+                if len < 0.5 then continue end
+                local bar = Instance.new("Part")
+                bar.Anchored = true
+                bar.CanCollide = false bar.CanQuery = false bar.CanTouch = false
+                bar.CastShadow = false
+                bar.Material = Enum.Material.Neon
+                bar.Size = Vector3.new(0.35, 0.1, len)
+                bar.CFrame = CFrame.lookAt((a + b) / 2, b)
+                bar.Color = Color3.fromRGB(90, 220, 120)
+                bar.Transparency = 0.45
+                bar.Parent = workspace
+                dbgParts[i] = bar
             end
         end)
     end
     local function dbgLeg(i)
-        for j, l in ipairs(dbgLines) do
-            l.Color = j == i and Color3.fromRGB(255, 220, 60)
-                or Color3.fromRGB(90, 220, 120)
-            l.Thickness = j == i and 3 or 2
-            l.Transparency = j == i and 1 or 0.35
+        for j, bar in ipairs(dbgParts) do
+            if j == i then
+                bar.Color = Color3.fromRGB(255, 220, 60)
+                bar.Transparency = 0
+            else
+                bar.Color = Color3.fromRGB(90, 220, 120)
+                bar.Transparency = 0.45
+            end
         end
     end
     local function dbgClear()
-        if dbgConn then dbgConn:Disconnect() dbgConn = nil end
-        for _, l in ipairs(dbgLines) do pcall(function() l:Remove() end) end
-        table.clear(dbgLines)
+        for _, bar in ipairs(dbgParts) do pcall(function() bar:Destroy() end) end
+        table.clear(dbgParts)
     end
 
     local function plowTheField(tr, field, seat)
@@ -730,14 +730,7 @@ local okBuild, errBuild = pcall(function()
             map[#map + 1] = { pt(-endSide * driveHalf, row), 7, r }   -- the row drive
             endSide = -endSide
         end
-        -- overlay the whole path at tractor height (field surface) so the
-        -- lines visually sit ON the field, not sunk below it
-        local drawY = tr:GetPivot().Position.Y
-        local pts = { Vector3.new(at.X, drawY, at.Z) }
-        for _, leg in ipairs(map) do
-            pts[#pts + 1] = Vector3.new(leg[1].X, drawY, leg[1].Z)
-        end
-        dbgShow(pts) -- thin green = every leg; bright = the active one
+        dbgShow(tr, map, at) -- glowing bars on the field; bright = active leg
         for i, leg in ipairs(map) do
             dbgLeg(i)
             if not doLeg(at, leg[1], leg[2]) then dbgClear() return nil end
