@@ -695,6 +695,96 @@ local ok, err = pcall(function()
     else
         w("  (no myPlot)")
     end
+
+    ------------------------------------------------------------------
+    -- 20. EQUIPMENT MANAGER (which coded model is the plow?)
+    --     open the Equipment Manager in-game BEFORE running the dump,
+    --     so its labels are populated
+    ------------------------------------------------------------------
+    header("EQUIPMENT MANAGER GUI (open it first!)")
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    local guiViews = pg and pg:FindFirstChild("GuiViews")
+    local menus = guiViews and guiViews:FindFirstChild("Menus")
+    if menus then
+        w("GuiViews.Menus children:")
+        for _, m in ipairs(menus:GetChildren()) do
+            local en = (m:IsA("LayerCollector") or m:IsA("GuiObject"))
+                and ("  Enabled=" .. tostring(m.Enabled)) or ""
+            w("  - " .. m.Name .. " [" .. m.ClassName .. "]" .. en)
+        end
+    else
+        w("  (no PlayerGui.GuiViews.Menus)")
+    end
+    -- find equipment-related GUIs anywhere in PlayerGui
+    local roots, seen = {}, {}
+    local function addRoot(d)
+        if d and not seen[d] then
+            seen[d] = true
+            roots[#roots + 1] = d
+        end
+    end
+    if pg then
+        for _, d in ipairs(pg:GetDescendants()) do
+            local n = d.Name:lower()
+            if n:find("equip", 1, true) or n:find("garage", 1, true)
+                or n == "vehicleselection" then
+                addRoot(d)
+            end
+        end
+    end
+    w("equipment-named GUI hits: " .. #roots)
+    if #roots == 0 then
+        w("  (nothing — is the Equipment Manager open?)")
+    end
+    local shown = 0
+    for _, d in ipairs(roots) do
+        if (d:IsA("LayerCollector") or d:IsA("GuiObject")) and shown < 100 then
+            w("  ▸ " .. pathOf(d, 6))
+            for _, t in ipairs(d:GetDescendants()) do
+                if (t:IsA("TextLabel") or t:IsA("TextButton")) and shown < 100 then
+                    w("      " .. t.Name .. "  text=\"" .. tostring(t.Text) .. "\"")
+                    shown += 1
+                end
+            end
+        end
+    end
+    if shown >= 100 then w("      … text cap reached") end
+
+    ------------------------------------------------------------------
+    -- 21. EQUIPMENT MODELS deep (attributes / configuration = type?)
+    ------------------------------------------------------------------
+    header("EQUIPMENT MODELS deep (attributes + configuration)")
+    local eqFolder = Workspace:FindFirstChild("Objects")
+        and Workspace.Objects:FindFirstChild("Equipment")
+    if eqFolder then
+        for _, m in ipairs(eqFolder:GetChildren()) do
+            if m:IsA("Model") then
+                w("  " .. m.Name .. " [" .. m.ClassName .. "]")
+                local any = false
+                for k, v in pairs(m:GetAttributes()) do
+                    w("    attr." .. tostring(k) .. " = " .. tostring(v))
+                    any = true
+                end
+                for _, cfgName in ipairs({ "Configurations", "Configuration" }) do
+                    local cfg = m:FindFirstChild(cfgName)
+                    if cfg then
+                        w("    " .. cfgName .. ":")
+                        for _, d in ipairs(cfg:GetDescendants()) do
+                            local line = "      - " .. d.Name .. " [" .. d.ClassName .. "]"
+                            if d:IsA("ValueBase") then
+                                line = line .. " = " .. tostring(d.Value)
+                            end
+                            w(line)
+                        end
+                        any = true
+                    end
+                end
+                if not any then w("    (no attributes or configuration)") end
+            end
+        end
+    else
+        w("  (no Objects.Equipment folder)")
+    end
 end)
 
 w("")
