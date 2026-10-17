@@ -1597,10 +1597,12 @@ local function applyFpsBoost(enabled)
         try(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 end)
         try(function() settings().Rendering.MeshPartDetailLevel = Enum.MeshPartDetailLevel.Level01 end)
         try(function() Lighting.GlobalShadows = false end)
-        for _, obj in ipairs(Lighting:GetDescendants()) do
-            if (obj:IsA("Atmosphere") or obj:IsA("Sky")) and obj.Enabled then
-                obj.Enabled = false
+        -- Atmosphere/Sky have NO .Enabled property (that used to error) —
+        -- set them aside by reparenting; boost-off puts them back
+        for _, obj in ipairs(Lighting:GetChildren()) do
+            if obj:IsA("Atmosphere") or obj:IsA("Sky") then
                 table.insert(FxDisabled, obj)
+                obj.Parent = nil
             end
         end
         for _, obj in ipairs(Workspace:GetDescendants()) do
@@ -1612,7 +1614,7 @@ local function applyFpsBoost(enabled)
         try(function() settings().Rendering.MeshPartDetailLevel = Enum.MeshPartDetailLevel.Level02 end)
         try(function() Lighting.GlobalShadows = true end)
         for _, obj in ipairs(FxDisabled) do
-            if obj.Parent then obj.Enabled = true end
+            if obj and not obj.Parent then obj.Parent = Lighting end
         end
         FxDisabled = {}
         log("FPS boost off")
