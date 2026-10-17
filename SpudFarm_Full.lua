@@ -605,13 +605,14 @@ local okBuild, errBuild = pcall(function()
     --   the genuinely quickest way around and re-plans while moving.
     --   Marks grid cells covered by each obstacle's fat bounding square.
     local function obstacleCells(x0, z0, x1, z1, cell, blocked, ignore1, ignore2, counter)
+        local pad = 6 -- keep at least THIS far from any equipment/building
         local function scan(folder)
             if not folder then return end
             for _, m in ipairs(folder:GetChildren()) do
                 if m:IsA("Model") and m ~= ignore1 and m ~= ignore2 then
                     local ok, cf, sz = pcall(function() return m:GetBoundingBox() end)
                     if ok and cf then
-                        local r = math.max(sz.X, sz.Z) / 2 + 3
+                        local r = math.max(sz.X, sz.Z) / 2 + pad
                         local minX, maxX = cf.Position.X - r, cf.Position.X + r
                         local minZ, maxZ = cf.Position.Z - r, cf.Position.Z + r
                         if maxX >= x0 and minX <= x1 and maxZ >= z0 and minZ <= z1 then
@@ -636,10 +637,57 @@ local okBuild, errBuild = pcall(function()
         end
     end
 
+    -- clearance field: for every free cell, the (capped) distance to the
+    -- nearest blocked cell — multi-source BFS. The A* hug penalty and the
+    -- string-pull both read it, so routes prefer the MIDDLE of open space
+    -- instead of skimming equipment (user: "pathfinding is getting very
+    -- close to my equipment").
+    local function clearanceField(nx, nz, blocked)
+        local dist, bucket = {}, {}
+        local dirs = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 },
+                       { 1, 1 }, { 1, -1 }, { -1, 1 }, { -1, -1 } }
+        for ix = 0, nx - 1 do
+            for iz = 0, nz - 1 do
+                local k = ix * 100000 + iz
+                if blocked[k] then
+                    dist[k] = 0
+                    bucket[0] = bucket[0] or {}
+                    table.insert(bucket[0], k)
+                else
+                    dist[k] = 5 -- "far" (at/over the cap)
+                end
+            end
+        end
+        for d = 0, 4 do
+            local b = bucket[d]
+            if b then
+                for i = 1, #b do
+                    local k = b[i]
+                    local ix, iz = math.floor(k / 100000), k % 100000
+                    for _, dir in ipairs(dirs) do
+                        local jx, jz = ix + dir[1], iz + dir[2]
+                        if jx >= 0 and jz >= 0 and jx < nx and jz < nz then
+                            local jk = jx * 100000 + jz
+                            if dist[jk] and dist[jk] > d + 1 then
+                                dist[jk] = d + 1
+                                bucket[d + 1] = bucket[d + 1] or {}
+                                table.insert(bucket[d + 1], jk)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        return dist
+    end
+
     -- classic A* over the grid: 8-connected, sqrt(2) diagonal cost, no
-    -- corner cutting, octile heuristic. Returns the waypoint cell list
-    -- (start -> goal) or nil when boxed in.
-    local function astarPath(cell, nx, nz, blocked, sx, sz, gx, gz)
+    -- corner cutting, octile heuristic — plus a HUG PENALTY: steps near
+    -- an obstacle cost extra (×4.5 at 1 cell, ×2.5, ×1.5) so the route
+    -- takes open space whenever any exists (penalties only ADD cost, so
+    -- the heuristic stays admissible — still the quickest path). Returns
+    -- the waypoint cell list (start -> goal) or nil when boxed in.
+    local function astarPath(cell, nx, nz, blocked, clearDist, sx, sz, gx, gz)
         local function key(ix, iz) return ix * 100000 + iz end
         local function h(ix, iz)
             local dx, dz = math.abs(ix - gx), math.abs(iz - gz)
@@ -677,7 +725,11 @@ local okBuild, errBuild = pcall(function()
                         local diag = d[1] ~= 0 and d[2] ~= 0
                         if not diag or (not blocked[key(cur.ix + d[1], cur.iz)]
                             and not blocked[key(cur.ix, cur.iz + d[2])]) then
-                            local ng = gsc[cur.k] + (diag and 1.4142 or 1)
+                            local base = diag and 1.4142 or 1
+                            local cd = clearDist[kk] or 5
+                            local mul = cd >= 4 and 1 or (cd == 3 and 1.5
+                                or (cd == 2 and 2.5 or 4.5))
+                            local ng = gsc[cur.k] + base * mul
                             if not gsc[kk] or ng < gsc[kk] then
                                 gsc[kk] = ng
                                 came[kk] = cur.k
@@ -697,7 +749,7 @@ local okBuild, errBuild = pcall(function()
     -- first point is where we stand, the last is the exact goal. Returns
     -- world waypoints { {x,z}, ... } + obstacle count, or nil + reason.
     local function pathfindAround(startPos, goalPos, ignore1, ignore2)
-        local cell, margin = 10, 50
+        local cell, margin = 6, 50 -- 6-stud grid: shaves no corners around gear
         local x0 = math.min(startPos.X, goalPos.X) - margin
         local x1 = math.max(startPos.X, goalPos.X) + margin
         local z0 = math.min(startPos.Z, goalPos.Z) - margin
@@ -714,7 +766,8 @@ local okBuild, errBuild = pcall(function()
         -- when their cells got inflated-marked by a nearby obstacle
         blocked[sx * 100000 + sz] = nil
         blocked[gx * 100000 + gz] = nil
-        local grid = astarPath(cell, nx, nz, blocked, sx, sz, gx, gz)
+        local clearDist = clearanceField(nx, nz, blocked) -- AFTER the force-clears
+        local grid = astarPath(cell, nx, nz, blocked, clearDist, sx, sz, gx, gz)
         if not grid then return nil, "no path" end
         local function nodeWorld(i)
             if i == 1 then return startPos.X, startPos.Z end
@@ -727,7 +780,11 @@ local okBuild, errBuild = pcall(function()
                 local ix = cellOf(ax + (bx - ax) * t, x0)
                 local iz = cellOf(az + (bz - az) * t, z0)
                 if ix < 0 or iz < 0 or ix >= nx or iz >= nz then return false end
-                if blocked[ix * 100000 + iz] then return false end
+                local k = ix * 100000 + iz
+                if blocked[k] then return false end
+                -- long shortcuts keep a real margin: never cut closer than
+                -- 2 clear cells to anything the mapper marked
+                if (clearDist[k] or 0) < 2 then return false end
             end
             return true
         end
@@ -747,7 +804,15 @@ local okBuild, errBuild = pcall(function()
             pts[#pts + 1] = { px, pz }
             a = last
         end
-        pts[#pts + 1] = { goalPos.X, goalPos.Z } -- land on the exact goal
+        -- land on the exact goal — if that straight hop fails the margin
+        -- check, step through the last grid node first instead of cutting it
+        local ax, az = pts[#pts][1], pts[#pts][2]
+        local bx, bz = nodeWorld(#grid)
+        if not lineClear(ax, az, goalPos.X, goalPos.Z)
+            and (math.abs(bx - ax) > 0.5 or math.abs(bz - az) > 0.5) then
+            pts[#pts + 1] = { bx, bz }
+        end
+        pts[#pts + 1] = { goalPos.X, goalPos.Z }
         return pts, counter.n
     end
 
@@ -855,6 +920,61 @@ local okBuild, errBuild = pcall(function()
             return st
         end)
         if ok then return stages end
+        return nil
+    end
+
+    -- world centers of every cell still at `stage` — §26 ground truth:
+    -- GetCells is a dict keyed by id = x*128+y (1-based x/y), the grid is
+    -- cols×rows of 10-stud tiles laid over the plate, and the plate is
+    -- ROTATED — so the columns' axis follows whichever plate side measures
+    -- cols*10 studs. Returns { {X=, Y=, Z=}, ... } or nil when unreadable.
+    local function cellsAtStage(field, stage, baseCF, baseSize)
+        local ok, out = pcall(function()
+            local mods = game:GetService("ReplicatedStorage"):FindFirstChild("Modules")
+            local F = mods and mods:FindFirstChild("FieldHelper")
+            assert(F, "FieldHelper missing")
+            F = require(F)
+            assert(type(F.GetCells) == "function", "GetCells missing")
+            local cells = F.GetCells(field)
+            assert(type(cells) == "table", "GetCells returned no table")
+            local cols, rows, missed = 0, 0, {}
+            for k, cell in pairs(cells) do
+                if type(cell) == "table" then
+                    local x, y
+                    local id = tonumber(k)
+                    if id then -- dict key = encoded id (all 50 decoded §26)
+                        x, y = math.floor(id / 128), id % 128
+                    elseif typeof(cell.Position) == "Vector3" then
+                        x, y = cell.Position.X, cell.Position.Y
+                    end
+                    if x and y then
+                        if x > cols then cols = x end
+                        if y > rows then rows = y end
+                        if tostring(cell.Stage or "?") == stage then
+                            missed[#missed + 1] = { x = x, y = y }
+                        end
+                    end
+                end
+            end
+            if cols == 0 or rows == 0 then return nil end
+            local axX = baseSize.X / 10 -- cells across the plate's local X
+            local colsAlongX = math.abs(axX - cols) <= math.abs(axX - rows)
+            local pts = {}
+            for _, m in ipairs(missed) do
+                local lx, lz
+                if colsAlongX then
+                    lx = (m.x - (cols + 1) / 2) * 10
+                    lz = (m.y - (rows + 1) / 2) * 10
+                else -- plate turned: the columns span local Z instead
+                    lx = (m.y - (rows + 1) / 2) * 10
+                    lz = (m.x - (cols + 1) / 2) * 10
+                end
+                local p = (baseCF * CFrame.new(lx, 0, lz)).Position
+                pts[#pts + 1] = { X = p.X, Y = p.Y, Z = p.Z }
+            end
+            return pts
+        end)
+        if ok then return out end
         return nil
     end
 
@@ -1124,6 +1244,53 @@ local okBuild, errBuild = pcall(function()
         end
         dbgClear()
         if stopping() then return nil end
+        -- ▸ TOUCH-UP (user: "if it missed anything during the plow/
+        --   cultivating make it go to that cube and then stop so nothing is
+        --   missed"): every cube still at the job's stage gets a visit,
+        --   nearest first — TRANSIT to one side, then THROUGH the cube on
+        --   the plate's own axis so the trailing tool sweeps its full
+        --   width (a diagonal crossing can miss the corners of a 10×10
+        --   cell). Then stop and recount — verdict below stays honest.
+        local missed = cellsAtStage(field, job.stage, baseCF, baseSize)
+        if missed == nil then
+            log("touch-up: cell read unavailable — can't locate missed cubes")
+        elseif #missed > 0 then
+            log(string.format("touch-up: %d cube(s) missed by the spiral — going to each", #missed))
+            local function flat(p) return Vector3.new(p.X, 0, p.Z) end
+            local route, pool, cur = {}, table.clone(missed), at
+            while #pool > 0 do
+                local bi, bd
+                for i, p in ipairs(pool) do
+                    local d = (flat(p) - flat(cur)).Magnitude
+                    if not bd or d < bd then bi, bd = i, d end
+                end
+                local cube = table.remove(pool, bi)
+                local c = Vector3.new(cube.X, cube.Y, cube.Z)
+                -- enter from the side I'm on, exit out the far side (±15)
+                local s = (flat(cur) - flat(c)):Dot(driveDir) >= 0 and 15 or -15
+                route[#route + 1] = { goal = c + driveDir * s,     cx = cube.X, cz = cube.Z, kind = "transit" }
+                route[#route + 1] = { goal = c + driveDir * (-s),  cx = cube.X, cz = cube.Z, kind = "through" }
+                cur = c + driveDir * (-s)
+            end
+            local barMap = {}
+            for i, r in ipairs(route) do barMap[i] = { r.goal, 6, nil } end
+            dbgShow(tr, barMap, at)
+            local through = 0
+            for i, r in ipairs(route) do
+                dbgLeg(i)
+                if not doLeg(at, r.goal, 6) then dbgClear() return nil end
+                at = r.goal
+                if r.kind == "through" then
+                    through += 1
+                    log(string.format("touch-up %d/%d: drove through cube (%.0f, %.0f)",
+                        through, #missed, r.cx, r.cz))
+                end
+                task.wait(0.15)
+            end
+            dbgClear()
+            task.wait(1) -- let the server register the drive-overs before recounting
+            if stopping() then return nil end
+        end
         local st1 = countStages(field)
         if st1 then
             local need1 = st1[job.stage] or 0
