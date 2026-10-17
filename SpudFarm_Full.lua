@@ -112,6 +112,17 @@ local okBuild, errBuild = pcall(function()
         VIM:SendKeyEvent(false, key, false, game)
     end
 
+    -- the live farming-loop thread (nil = no loop running). Every movement /
+    -- creep / hitch helper checks stopping(), so switching the toggle OFF
+    -- kills the loop at its next step instead of letting it keep going.
+    -- coroutine identity (not just a bool) so a zombie loop can never be
+    -- revived by turning the toggle back on for a NEW loop.
+    local loopThread = nil
+    local function stopping()
+        if not loopThread then return true end
+        return coroutine.running() ~= loopThread
+    end
+
     -- ▸ AUTO-FARM STEP 2: movement (VFly = BodyVelocity fly + snap,
     --   Tween = stepped glide). Nothing else uses this yet.
     local Move = { Mode = "Tween", Speed = 200 }
@@ -127,12 +138,20 @@ local okBuild, errBuild = pcall(function()
                 TweenInfo.new(dur, Enum.EasingStyle.Linear),
                 { CFrame = CFrame.new(target) })
             tween:Play()
-            tween.Completed:Wait()
+            local deadline = os.clock() + dur + 1
+            while tween.Playing and os.clock() < deadline do
+                if stopping() then
+                    tween:Cancel()
+                    return false
+                end
+                task.wait(0.05)
+            end
             return true
         end
         -- VFly: pure CFrame steps, NO physics objects. (BodyVelocity made the
         -- physics solver fight the humanoid → lag spikes + server rubber-band)
         for _ = 1, 200 do -- ~10s max
+            if stopping() then return false end
             local off = target - root.Position
             local d = off.Magnitude
             if d < 2.5 then return true end
@@ -248,6 +267,7 @@ local okBuild, errBuild = pcall(function()
         local y = pos.Y -- stay on the ground plane
         local steps = math.clamp(math.floor(flat.Magnitude / 1.5), 3, 40)
         for i = 1, steps do
+            if stopping() then return end
             local t = i / steps
             local ease = 1 - (1 - t) * (1 - t) -- ease-out: quick start, soft landing
             local p = Vector3.new(pos.X, y, pos.Z) + flat * ease
@@ -290,6 +310,7 @@ local okBuild, errBuild = pcall(function()
     -- no guessed stand-off direction (user's plan: teleport to the tool,
     -- align with the tool, then creep forward)
     local function alignToPlow(tr, plow, backOff)
+        if stopping() then return end
         local pp = plow:GetPivot()
         local tp = tr:GetPivot()
         local f = Vector3.new(pp.LookVector.X, 0, pp.LookVector.Z)
@@ -314,6 +335,7 @@ local okBuild, errBuild = pcall(function()
     -- the GAME decides when we're in range, not our math
     local function creepUntilPrompt(tr, maxSteps, stepLen)
         for i = 1, maxSteps do
+            if stopping() then return nil end
             if hitchPromptUp() then return i - 1 end
             tr:PivotTo(tr:GetPivot() * CFrame.new(0, 0, -stepLen)) -- -Z = forward
             task.wait(0.06)
@@ -346,6 +368,7 @@ local okBuild, errBuild = pcall(function()
     -- park the tractor so its hitch part sits EXACTLY on the plow's hitch
     -- part, rotating with the plow — physical line-up, no stand-off guessing
     local function lineUpHitch(tr, plow)
+        if stopping() then return false end
         local tH = findHitchPart(tr)
         local pH = findHitchPart(plow)
         if not (tH and pH) then
@@ -371,6 +394,7 @@ local okBuild, errBuild = pcall(function()
             end
             glideTractor(tr, tgt)
         end
+        if stopping() then return false end
         tr:PivotTo(newPivot)
         task.wait(0.2)
         log(string.format("lined up %s ↔ %s (gap %.2f studs)",
@@ -382,6 +406,7 @@ local okBuild, errBuild = pcall(function()
     local function attemptHitch(tr, plow)
         pressKey(Enum.KeyCode.X)
         task.wait(0.6)
+        if stopping() then return false, 0 end
         local before = plow:GetPivot().Position
         local pivot = tr:GetPivot()
         local fwd = Vector3.new(pivot.LookVector.X, 0, pivot.LookVector.Z)
@@ -392,108 +417,151 @@ local okBuild, errBuild = pcall(function()
         return moved > 2.5, moved
     end
 
-    Tabs.Farm:CreateButton({
-        Title = "farming loop",
-        Callback = function()
-            local char = LocalPlayer.Character
-            local hum = char and char:FindFirstChildOfClass("Humanoid")
-            if not hum then log("no character") return end
-            local tr, dist, seat = findTractor()
-            if not tr then log("tractor (ZM80) not found") return end
+    -- the actual farming loop, run on its own thread by the toggle below.
+    -- stopping() is checked at every wait/step so switching the toggle off
+    -- kills the loop at its next step instead of letting it run on.
+    local function runFarmingLoop()
+        local char = LocalPlayer.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if not hum then log("no character") return end
+        local tr, dist, seat = findTractor()
+        if not tr then log("tractor (ZM80) not found") return end
 
-            -- ▸ step 1: mount (skipped when already in the tractor)
-            if hum.SeatPart and not hum.SeatPart:IsDescendantOf(tr) then
-                log("seated in another vehicle — stand up first")
-                return
-            end
-            if not hum.SeatPart then
-                if dist > 10 then
-                    log(string.format("moving to tractor (%.0f studs)…", dist))
-                    if not moveTo(seat.Position + Vector3.new(0, 3, 0)) then
-                        log("couldn't reach the tractor")
-                        return
-                    end
-                    local root = char:FindFirstChild("HumanoidRootPart")
-                    dist = root and (seat.Position - root.Position).Magnitude or 0
+        -- ▸ step 1: mount (skipped when already in the tractor)
+        if hum.SeatPart and not hum.SeatPart:IsDescendantOf(tr) then
+            log("seated in another vehicle — stand up first")
+            return
+        end
+        if not hum.SeatPart then
+            if dist > 10 then
+                log(string.format("moving to tractor (%.0f studs)…", dist))
+                local reached = moveTo(seat.Position + Vector3.new(0, 3, 0))
+                if stopping() then return end
+                if not reached then
+                    log("couldn't reach the tractor")
+                    return
                 end
-                if dist > 10 then log("still too far after moving") return end
-                log("pressing F to mount…")
-                pressKey(Enum.KeyCode.F)
+                local root = char:FindFirstChild("HumanoidRootPart")
+                dist = root and (seat.Position - root.Position).Magnitude or 0
+            end
+            if stopping() then return end
+            if dist > 10 then log("still too far after moving") return end
+            log("pressing F to mount…")
+            pressKey(Enum.KeyCode.F)
+            task.wait(0.7)
+            if stopping() then return end
+            if not (hum.SeatPart and hum.SeatPart:IsDescendantOf(tr)) then
+                pressKey(Enum.KeyCode.F) -- context can take a moment to register
                 task.wait(0.7)
-                if not (hum.SeatPart and hum.SeatPart:IsDescendantOf(tr)) then
-                    pressKey(Enum.KeyCode.F) -- context can take a moment to register
-                    task.wait(0.7)
+            end
+            if stopping() then return end
+            if hum.SeatPart and hum.SeatPart:IsDescendantOf(tr) then
+                log("✅ mounted " .. tr.Name)
+            else
+                log("F pressed but not seated — game didn't accept the enter")
+                return
+            end
+        end
+
+        -- ▸ step 3: hitch the plow
+        logEquipment() -- always show the names so we can confirm the pick
+        local tractorPos = tr:GetPivot().Position
+        local plow, pdist = findPlow(tractorPos, tr)
+
+        -- if the HUD already lists a hitched implement, X would UNHITCH it
+        local attached = hitchedImplementName()
+        if attached then
+            log("implement already hitched (HUD: " .. attached .. ") — nothing to do")
+            log("press X in-game to unhitch first, then run again")
+            return
+        end
+
+        if not plow then
+            log("no equipment with EquipmentType=Plow found — see list above")
+            return
+        end
+        if plow:GetAttribute("InStorage") then
+            log(plow.Name .. " (the plow) is IN STORAGE — can't hitch it")
+            log("pull it out of the Equipment Manager in-game first, then run again")
+            return
+        end
+        log("hitch target: " .. plow.Name .. string.format(" (%.0f studs)", pdist or 0))
+
+        -- user's plan: physical line-up of the hitch PARTS (fallback:
+        -- align+creep), then the game's Hitch prompt gates the X press.
+        -- Retry until the tug-test passes.
+        local attempt, forceCreep = 0, false
+        while not stopping() do
+            attempt += 1
+            if not (plow and plow:IsDescendantOf(workspace)) then
+                log("plow disappeared (despawned?) — stopping retries")
+                return
+            end
+            local backOff = math.min((attempt - 1) * 1.5, 6) -- widen stance on retries
+            local lined = false
+            if not forceCreep then
+                lined = lineUpHitch(tr, plow)
+            end
+            if stopping() then return end
+            if not lined then
+                alignToPlow(tr, plow, backOff)
+            end
+            if stopping() then return end
+            local crept = creepUntilPrompt(tr, 20, 1) -- up to 20 studs forward
+            if stopping() then return end
+            if not crept then
+                log(string.format("attempt %d: hitch prompt never showed within 20 studs — re-aligning", attempt))
+                if lined then
+                    -- parts found but prompt still dead: line-up pose is
+                    -- wrong for the game → stop trusting it, creep from now
+                    forceCreep = true
+                    log("line-up pose didn't satisfy the game — falling back to creep alignment")
                 end
-                if hum.SeatPart and hum.SeatPart:IsDescendantOf(tr) then
-                    log("✅ mounted " .. tr.Name)
-                else
-                    log("F pressed but not seated — game didn't accept the enter")
+                task.wait(0.4)
+            else
+                log(string.format("attempt %d: hitch prompt shows — pressing X", attempt))
+                local hooked, moved = attemptHitch(tr, plow)
+                if stopping() then return end
+                if hooked then
+                    log(string.format("✅ hitched the plow (attempt %d)", attempt))
                     return
                 end
+                log(string.format("attempt %d: X pressed but plow didn't follow (%.1f studs) — retrying",
+                    attempt, moved))
             end
+        end
+    end
 
-            -- ▸ step 3: hitch the plow
-            logEquipment() -- always show the names so we can confirm the pick
-            local tractorPos = tr:GetPivot().Position
-            local plow, pdist = findPlow(tractorPos, tr)
-
-            -- if the HUD already lists a hitched implement, X would UNHITCH it
-            local attached = hitchedImplementName()
-            if attached then
-                log("implement already hitched (HUD: " .. attached .. ") — nothing to do")
-                log("press X in-game to unhitch first, then run again")
-                return
-            end
-
-            if not plow then
-                log("no equipment with EquipmentType=Plow found — see list above")
-                return
-            end
-            if plow:GetAttribute("InStorage") then
-                log(plow.Name .. " (the plow) is IN STORAGE — can't hitch it")
-                log("pull it out of the Equipment Manager in-game first, then run again")
-                return
-            end
-            log("hitch target: " .. plow.Name .. string.format(" (%.0f studs)", pdist or 0))
-
-            -- user's plan: physical line-up of the hitch PARTS (fallback:
-            -- align+creep), then the game's Hitch prompt gates the X press.
-            -- Retry until the tug-test passes.
-            local attempt, forceCreep = 0, false
-            while true do
-                attempt += 1
-                if not (plow and plow:IsDescendantOf(workspace)) then
-                    log("plow disappeared (despawned?) — stopping retries")
-                    return
-                end
-                local backOff = math.min((attempt - 1) * 1.5, 6) -- widen stance on retries
-                local lined = false
-                if not forceCreep then
-                    lined = lineUpHitch(tr, plow)
-                end
-                if not lined then
-                    alignToPlow(tr, plow, backOff)
-                end
-                local crept = creepUntilPrompt(tr, 20, 1) -- up to 20 studs forward
-                if not crept then
-                    log(string.format("attempt %d: hitch prompt never showed within 20 studs — re-aligning", attempt))
-                    if lined then
-                        -- parts found but prompt still dead: line-up pose is
-                        -- wrong for the game → stop trusting it, creep from now
-                        forceCreep = true
-                        log("line-up pose didn't satisfy the game — falling back to creep alignment")
+    -- ON = spawn the loop on its own thread; OFF = clear the thread id so
+    -- stopping() flips true everywhere and the loop dies at its next step.
+    -- (coroutine identity, not a bool: a zombie loop can never be revived
+    -- by turning the toggle back on for a NEW loop)
+    local farmingToggle
+    farmingToggle = Tabs.Farm:CreateToggle("farmingLoop", {
+        Title = "farming loop",
+        Default = false,
+        Callback = function(on)
+            if on then
+                if loopThread then return end -- already running
+                log("farming loop: on")
+                task.spawn(function()
+                    loopThread = coroutine.running()
+                    runFarmingLoop()
+                    if loopThread == coroutine.running() then
+                        -- ended on its own (success or honest failure)
+                        loopThread = nil
+                        log("farming loop: ended")
+                        pcall(function()
+                            (Fluent.Options and Fluent.Options.farmingLoop
+                                or farmingToggle):SetValue(false)
+                        end)
                     end
-                    task.wait(0.4)
-                else
-                    log(string.format("attempt %d: hitch prompt shows — pressing X", attempt))
-                    local hooked, moved = attemptHitch(tr, plow)
-                    if hooked then
-                        log(string.format("✅ hitched the plow (attempt %d)", attempt))
-                        return
-                    end
-                    log(string.format("attempt %d: X pressed but plow didn't follow (%.1f studs) — retrying",
-                        attempt, moved))
-                end
+                    -- else: user killed it — they already flipped the UI
+                end)
+            else
+                if not loopThread then return end -- already off (echo-safe)
+                loopThread = nil
+                log("farming loop: off — stopped")
             end
         end,
     })
