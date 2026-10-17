@@ -1062,27 +1062,50 @@ local ok, err = pcall(function()
             w(string.format("      · %s [%s]%s", d.Name, d.ClassName,
                 ad and ad:IsA("BasePart") and string.format("  @ (%.0f, %.0f, %.0f)",
                     ad.Position.X, ad.Position.Y, ad.Position.Z) or ""))
+            -- deep: what does the progress board SHOW? texts may reveal
+            -- cell counts ("0 / 125") or stage names
+            local shown = 0
+            for _, sub in ipairs(d:GetDescendants()) do
+                if shown >= 20 then w("        … (cap)"); break end
+                shown += 1
+                local txt = ""
+                if sub:IsA("TextLabel") or sub:IsA("TextButton") or sub:IsA("TextBox") then
+                    txt = "  text=" .. string.sub(sub.Text, 1, 70)
+                end
+                w("        · " .. sub.Name .. " [" .. sub.ClassName .. "]" .. txt)
+            end
         end
     else
         w("  AdorneeGuis.FieldProgressGuis NOT FOUND")
     end
 
-    -- C. CropAesthetics (visual layer that might BE the cell grid)
+    -- C. CropAesthetics — folders named like "0->129" (last run: 56 of
+    --    them). Dump ALL top-level names + what's inside the first two.
     local gameplay = Workspace:FindFirstChild("GameplayVisuals")
     local crop = gameplay and gameplay:FindFirstChild("CropAesthetics")
     if crop then
-        local kinds = {}
-        for _, d in ipairs(crop:GetDescendants()) do
-            local key = d.ClassName .. " · " .. d.Name
-            kinds[key] = (kinds[key] or 0) + 1
+        local tops = crop:GetChildren()
+        w("  CropAesthetics top-level: " .. #tops)
+        for i, d in ipairs(tops) do
+            if i > 60 then w("      … +" .. (#tops - 60) .. " more"); break end
+            w(string.format("      · %s [%s]  children=%d",
+                d.Name, d.ClassName, #d:GetChildren()))
         end
-        local ck = {}
-        for k, c in pairs(kinds) do ck[#ck + 1] = k .. (c > 1 and (" ×" .. c) or "") end
-        table.sort(ck)
-        w("  CropAesthetics kinds (" .. #ck .. "):")
-        for i, k in ipairs(ck) do
-            if i > 20 then w("      … +" .. (#ck - 20) .. " more"); break end
-            w("      · " .. k)
+        for i = 1, math.min(2, #tops) do
+            local f = tops[i]
+            w("  inside " .. f.Name .. ":")
+            local shown = 0
+            for _, sub in ipairs(f:GetDescendants()) do
+                if shown >= 20 then w("      … (cap)"); break end
+                shown += 1
+                local extra = ""
+                if sub:IsA("BasePart") then
+                    extra = string.format("  @ (%.1f, %.1f, %.1f)  size (%.1f, %.1f, %.1f)",
+                        sub.Position.X, sub.Position.Y, sub.Position.Z,
+                        sub.Size.X, sub.Size.Y, sub.Size.Z)
+                end
+                w("      · " .. sub.Name .. " [" .. sub.ClassName .. "]" .. extra)
+            end
         end
     else
         w("  CropAesthetics NOT FOUND")
@@ -1106,8 +1129,10 @@ local ok, err = pcall(function()
         w("      · " .. h)
     end
 
-    -- E. field/grid ModuleScripts + source peek (first 1400 chars × up to 3
-    --    — the origin + cell-size formula would let us COMPUTE every cell)
+    -- E. field modules: list them all, probe Source on the richest one
+    --    (last run: 3 peeks burned on EMPTY Cmdr stubs — blocked or
+    --    stub?), then REQUIRE the real candidates and dump their
+    --    exports: function names + config keys ARE the cell math.
     local mods = {}
     for _, d in ipairs(RS:GetDescendants()) do
         if d:IsA("ModuleScript") then
@@ -1121,24 +1146,79 @@ local ok, err = pcall(function()
     end
     table.sort(mods, function(a, b) return a:GetFullName() < b:GetFullName() end)
     w("  field-ish ModuleScripts in ReplicatedStorage: " .. #mods)
-    local peeked = 0
     for _, m in ipairs(mods) do
         w("      · " .. pathOf(m, 7))
-        if peeked < 3 and m.Name:lower():find("field", 1, true) then
-            peeked += 1
-            local okS, src = pcall(function() return m.Source end)
-            if okS and type(src) == "string" then
-                w("        source (" .. #src .. " chars), first 1400:")
-                local chunk = string.sub(src, 1, 1400)
-                for line in (chunk .. "\n"):gmatch("(.-)\n") do
-                    w("        | " .. line)
+    end
+
+    local probe = RS:FindFirstChild("FieldHelper", true)
+    if probe then
+        local okS, src = pcall(function() return probe.Source end)
+        if okS and type(src) == "string" and #src > 0 then
+            w("  Source probe FieldHelper: readable (" .. #src
+                .. " chars), first 1200:")
+            for line in (string.sub(src, 1, 1200) .. "\n"):gmatch("(.-)\n") do
+                w("    | " .. line)
+            end
+        elseif okS and type(src) == "string" then
+            w("  Source probe FieldHelper: EMPTY string → Source is blocked"
+                .. " in live games (use require() below instead)")
+        else
+            w("  Source probe FieldHelper: error → "
+                .. string.sub(tostring(src), 1, 80))
+        end
+    else
+        w("  Source probe: FieldHelper NOT FOUND")
+    end
+
+    local function dumpExport(label, mod)
+        if type(mod) ~= "table" then
+            w("  " .. label .. " → returned type=" .. type(mod))
+            return
+        end
+        local keys = {}
+        for k in pairs(mod) do keys[#keys + 1] = k end
+        table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+        w("  require " .. label .. " → table, " .. #keys .. " keys:")
+        for i, k in ipairs(keys) do
+            if i > 40 then w("      … +" .. (#keys - 40) .. " more keys"); break end
+            local v = mod[k]
+            local t = type(v)
+            if t == "function" then
+                w("      · " .. tostring(k) .. "()")
+            elseif t == "table" then
+                local n = 0
+                for _ in pairs(v) do n += 1 end
+                local sample, shown = "", 0
+                for kk, vv in pairs(v) do
+                    shown += 1
+                    if shown > 6 then sample = sample .. "…"; break end
+                    local vt = type(vv)
+                    sample = sample .. tostring(kk) .. "="
+                        .. (vt == "function" and "fn" or string.sub(tostring(vv), 1, 40))
+                        .. " "
                 end
+                w("      · " .. tostring(k) .. " = table{" .. n .. "} " .. sample)
             else
-                w("        source: protected/unreadable")
+                w("      · " .. tostring(k) .. " = " .. t .. "("
+                    .. string.sub(tostring(v), 1, 60) .. ")")
             end
         end
     end
-    if peeked == 0 then w("        (no *field* module to peek)") end
+    for _, name in ipairs({ "FieldHelper", "CellBufferStructure",
+        "CropGrowthConfigClient", "FieldConstruction" }) do
+        local m = RS:FindFirstChild(name, true)
+        if not m then
+            w("  require " .. name .. ": NOT FOUND")
+        else
+            local okR, mod = pcall(require, m)
+            if okR then
+                dumpExport(name, mod)
+            else
+                w("  require " .. name .. " FAILED: "
+                    .. string.sub(tostring(mod), 1, 100))
+            end
+        end
+    end
 
     -- F. LIVE server→client watchers (stay connected after this dump
     --    prints!). The server PUSHES field state to us — connect and echo
@@ -1170,21 +1250,27 @@ local ok, err = pcall(function()
         warn(prefix .. " " .. table.concat(parts, "  "))
     end
     local function watch(remoteName)
-        local r = RS:FindFirstChild(remoteName)
-        if not r then w("  live-watch: " .. remoteName .. " NOT FOUND") return end
+        -- RECURSIVE: remotes live under Modules.Larry / Modules.Beast… —
+        -- last run's plain FindFirstChild reported every one NOT FOUND
+        local r = RS:FindFirstChild(remoteName, true)
+        if not r then
+            w("  live-watch: " .. remoteName .. " NOT FOUND (recursive)")
+            return
+        end
         local okC = pcall(function()
             r.OnClientEvent:Connect(function(...)
                 nLogged += 1
                 summarize("[FIELDDATA " .. remoteName .. " #" .. nLogged .. "]", ...)
             end)
         end)
-        w(okC and ("  live-watch ON: " .. remoteName
+        w(okC and ("  live-watch ON: " .. r:GetFullName()
                 .. " — watch executor console; rejoin/drive to trigger a send")
             or ("  live-watch FAILED: " .. remoteName))
     end
     watch("EVTFieldPacket")
     watch("EventEventDataUpdated")
     watch("EventConfigChanged")
+    watch("EVTUpdateCropGrowthConfig")
 end)
 
 w("")
