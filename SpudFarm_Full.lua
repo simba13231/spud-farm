@@ -38,11 +38,11 @@ local okBuild, errBuild = pcall(function()
 
     local Window = Fluent:CreateWindow({
         Title = "SPUD FARM",
-        SubTitle = VERSION,
+        SubTitle = "",
         TabWidth = 160,
-        Size = UDim2.fromOffset(830, 525),
+        Size = UDim2.fromOffset(1250, 780),
         Resize = true,      -- auto-fits the window to the actual screen (mobile!)
-        MinSize = Vector2.new(470, 380),
+        MinSize = Vector2.new(620, 460),
         Acrylic = false,    -- no blur: lighter on emulators
         Theme = "Dark",
         MinimizeKey = Enum.KeyCode.RightShift,
@@ -72,11 +72,9 @@ local okBuild, errBuild = pcall(function()
     -- placeholder tabs (features return one at a time)
     Tabs.Farm:CreateParagraph("FarmInfo", {
         Title = "Nothing here yet",
-        Content = "Game features come back ONE AT A TIME,\ntested in-game before the next one lands.",
     })
     Tabs.Player:CreateParagraph("PlayerInfo", {
         Title = "Nothing here yet",
-        Content = "Player mods return in a later build.",
     })
 
     -- Settings: reload + unload
@@ -94,7 +92,6 @@ local okBuild, errBuild = pcall(function()
 
     Tabs.Settings:CreateButton({
         Title = "🔄 Reload latest update",
-        Description = "fetch the newest build from GitHub (no re-pasting)",
         Callback = function()
             log("fetching latest build…")
             local ok, src = pcall(function() return game:HttpGet(SCRIPT_URL, true) end)
@@ -116,7 +113,6 @@ local okBuild, errBuild = pcall(function()
 
     Tabs.Settings:CreateButton({
         Title = "⏏ Unload",
-        Description = "remove the UI (nothing else to clean up yet)",
         Callback = function()
             destroyUI()
             print("[spud] unloaded")

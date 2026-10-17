@@ -5,6 +5,13 @@
 > one at a time and tested in-game. The full previous version is preserved in the
 > git history.
 
+## UI RULES (non-negotiable, per project owner)
+1. **No text under anything.** Elements get a title and nothing else: no window
+   SubTitle, no Description lines under buttons/toggles, no helper text, no
+   placeholder sub-text. Titles only. This applies to every future feature.
+2. The window must stay comfortably large on mobile/emulator screens (use
+   `Resize = true` and a generous base Size).
+
 ## Quick start (using the script)
 1. Copy the raw script link:
    `https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua`
