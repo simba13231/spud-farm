@@ -200,24 +200,32 @@ local okBuild, errBuild = pcall(function()
           past = "cultivated", prog = "cultivating", remote = "EVTCultivateFieldCell" },
     }
 
-    -- the implement of a given TYPE (S4204 for this user's plow, KADL for
-    -- the cultivator) — match by TYPE so it survives selling/buying
-    -- different models; the KADL name is a belt-and-braces fallback in
-    -- case the attribute casing ever differs.
+    -- dump-named MODEL per type — live bug (33bb188): the EquipmentType
+    -- match hitched the KQF3000 SEEDER for the cultivator job, so the
+    -- dump-named model (KADL = the cultivator) wins whenever it exists;
+    -- the type attribute is only the fallback. Returns impl, dist, basis.
+    local TYPE_MODEL = { Cultivator = "KADL" }
     local function findImplement(typeName, nearPos, tractorModel)
         local folder = equipmentFolder()
-        local best, bestDist
+        local wantName = TYPE_MODEL[typeName]
+        local byName, nameDist, byType, typeDist
         for _, d in ipairs(folder and folder:GetChildren() or {}) do
-            if d:IsA("Model") and d ~= tractorModel
-                and (d:GetAttribute("EquipmentType") == typeName
-                    or (typeName == "Cultivator" and d.Name == "KADL")) then
+            if d:IsA("Model") and d ~= tractorModel then
                 local dist = (d:GetPivot().Position - nearPos).Magnitude
-                if not bestDist or dist < bestDist then
-                    best, bestDist = d, dist
+                if wantName and d.Name == wantName then
+                    if not nameDist or dist < nameDist then
+                        byName, nameDist = d, dist
+                    end
+                elseif d:GetAttribute("EquipmentType") == typeName then
+                    if not typeDist or dist < typeDist then
+                        byType, typeDist = d, dist
+                    end
                 end
             end
         end
-        return best, bestDist
+        if byName then return byName, nameDist, "model name " .. wantName end
+        if byType then return byType, typeDist, "EquipmentType" end
+        return nil
     end
 
     -- the VehicleHUD Secondary slot = hitched implement, BUT the label goes
@@ -576,34 +584,28 @@ local okBuild, errBuild = pcall(function()
         return nil
     end
 
-    -- parked things a GROUND drive could run into: every vehicle and
-    -- implement lives in Objects.Equipment (dump: ZM80 tractors, trucks,
-    -- trailers, S4204 plows …); trees are Foliage models on the plots.
-    -- Nearest obstacle whose fat bounding ball pokes into the flat-XZ
-    -- corridor from startPos to goalPos (our tractor + our towed plow
-    -- excluded). Returns { name, dist, radius, center } or nil.
-    local function corridorObstacle(startPos, goalPos, ignore1, ignore2)
-        local function flat(v) return Vector3.new(v.X, 0, v.Z) end
-        local A, B = flat(startPos), flat(goalPos)
-        local AB = B - A
-        local len = AB.Magnitude
-        if len < 2 then return nil end
-        local dirV = AB / len
-        local best
+    -- ▸ PATHFINDER (user request): A* on a coarse 10-stud grid over the
+    --   area between here and the goal, avoiding everything parked on the
+    --   farm — equipment, buildings, draggables and plot trees. The old
+    --   single far-side corridor waypoint "kind of struggled"; this finds
+    --   the genuinely quickest way around and re-plans while moving.
+    --   Marks grid cells covered by each obstacle's fat bounding square.
+    local function obstacleCells(x0, z0, x1, z1, cell, blocked, ignore1, ignore2, counter)
         local function scan(folder)
-            for _, m in ipairs(folder and folder:GetChildren() or {}) do
+            if not folder then return end
+            for _, m in ipairs(folder:GetChildren()) do
                 if m:IsA("Model") and m ~= ignore1 and m ~= ignore2 then
                     local ok, cf, sz = pcall(function() return m:GetBoundingBox() end)
                     if ok and cf then
-                        local C = flat(cf.Position)
-                        local along = (C - A):Dot(dirV)
-                        local radius = math.max(sz.X, sz.Z) / 2 + 3
-                        if along > 2 and along < len - 2 then
-                            local perpOff = (C - A) - dirV * along
-                            local d = perpOff.Magnitude
-                            if d < radius + 4 and (not best or d - radius < best.clear) then
-                                best = { name = m.Name, dist = d, radius = radius,
-                                    center = C, clear = d - radius }
+                        local r = math.max(sz.X, sz.Z) / 2 + 3
+                        local minX, maxX = cf.Position.X - r, cf.Position.X + r
+                        local minZ, maxZ = cf.Position.Z - r, cf.Position.Z + r
+                        if maxX >= x0 and minX <= x1 and maxZ >= z0 and minZ <= z1 then
+                            counter.n += 1
+                            for ix = math.floor((minX - x0) / cell), math.floor((maxX - x0) / cell) do
+                                for iz = math.floor((minZ - z0) / cell), math.floor((maxZ - z0) / cell) do
+                                    blocked[ix * 100000 + iz] = true
+                                end
                             end
                         end
                     end
@@ -612,21 +614,137 @@ local okBuild, errBuild = pcall(function()
         end
         local objects = workspace:FindFirstChild("Objects")
         scan(objects and objects:FindFirstChild("Equipment"))
+        scan(objects and objects:FindFirstChild("Buildings"))
+        scan(objects and objects:FindFirstChild("DraggableObjects"))
         local plots = workspace:FindFirstChild("Plots")
         for _, plot in ipairs(plots and plots:GetChildren() or {}) do
-            if plot:IsA("Model") then
-                scan(plot:FindFirstChild("Foliage"))
+            if plot:IsA("Model") then scan(plot:FindFirstChild("Foliage")) end
+        end
+    end
+
+    -- classic A* over the grid: 8-connected, sqrt(2) diagonal cost, no
+    -- corner cutting, octile heuristic. Returns the waypoint cell list
+    -- (start -> goal) or nil when boxed in.
+    local function astarPath(cell, nx, nz, blocked, sx, sz, gx, gz)
+        local function key(ix, iz) return ix * 100000 + iz end
+        local function h(ix, iz)
+            local dx, dz = math.abs(ix - gx), math.abs(iz - gz)
+            return (dx + dz) + (2 - math.sqrt(2)) * math.min(dx, dz)
+        end
+        local open, came, gsc = {}, {}, {}
+        local startK, goalK = key(sx, sz), key(gx, gz)
+        gsc[startK] = 0
+        open[1] = { k = startK, ix = sx, iz = sz, f = h(sx, sz) }
+        local dirs = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 },
+                       { 1, 1 }, { 1, -1 }, { -1, 1 }, { -1, -1 } }
+        local guard = 0
+        while #open > 0 do
+            guard += 1
+            if guard > 8000 then return nil end -- give up on absurd areas
+            local bi = 1
+            for i = 2, #open do
+                if open[i].f < open[bi].f then bi = i end
+            end
+            local cur = table.remove(open, bi)
+            if cur.k == goalK then
+                local path = { { cur.ix, cur.iz } }
+                local k = cur.k
+                while came[k] do
+                    k = came[k]
+                    path[#path + 1] = { math.floor(k / 100000), k % 100000 }
+                end
+                return path
+            end
+            for _, d in ipairs(dirs) do
+                local ix2, iz2 = cur.ix + d[1], cur.iz + d[2]
+                if ix2 >= 0 and iz2 >= 0 and ix2 < nx and iz2 < nz then
+                    local kk = key(ix2, iz2)
+                    if not blocked[kk] then
+                        local diag = d[1] ~= 0 and d[2] ~= 0
+                        if not diag or (not blocked[key(cur.ix + d[1], cur.iz)]
+                            and not blocked[key(cur.ix, cur.iz + d[2])]) then
+                            local ng = gsc[cur.k] + (diag and 1.4142 or 1)
+                            if not gsc[kk] or ng < gsc[kk] then
+                                gsc[kk] = ng
+                                came[kk] = cur.k
+                                open[#open + 1] = { k = kk, ix = ix2, iz = iz2,
+                                    f = ng + h(ix2, iz2) }
+                            end
+                        end
+                    end
+                end
             end
         end
-        return best
+        return nil -- no path
+    end
+
+    -- plan a route around everything: trip bbox + 50 studs margin, A* on
+    -- the grid, then string-pulled (only direction changes survive). The
+    -- first point is where we stand, the last is the exact goal. Returns
+    -- world waypoints { {x,z}, ... } + obstacle count, or nil + reason.
+    local function pathfindAround(startPos, goalPos, ignore1, ignore2)
+        local cell, margin = 10, 50
+        local x0 = math.min(startPos.X, goalPos.X) - margin
+        local x1 = math.max(startPos.X, goalPos.X) + margin
+        local z0 = math.min(startPos.Z, goalPos.Z) - margin
+        local z1 = math.max(startPos.Z, goalPos.Z) + margin
+        local nx = math.floor((x1 - x0) / cell) + 1
+        local nz = math.floor((z1 - z0) / cell) + 1
+        if nx * nz > 12000 then return nil, "area too big" end
+        local blocked, counter = {}, { n = 0 }
+        obstacleCells(x0, z0, x1, z1, cell, blocked, ignore1, ignore2, counter)
+        local function cellOf(v, o) return math.floor((v - o) / cell) end
+        local sx, sz = cellOf(startPos.X, x0), cellOf(startPos.Z, z0)
+        local gx, gz = cellOf(goalPos.X, x0), cellOf(goalPos.Z, z0)
+        -- we're standing at the start and the goal must be enterable even
+        -- when their cells got inflated-marked by a nearby obstacle
+        blocked[sx * 100000 + sz] = nil
+        blocked[gx * 100000 + gz] = nil
+        local grid = astarPath(cell, nx, nz, blocked, sx, sz, gx, gz)
+        if not grid then return nil, "no path" end
+        local function nodeWorld(i)
+            if i == 1 then return startPos.X, startPos.Z end
+            return x0 + grid[i][1] * cell + cell / 2, z0 + grid[i][2] * cell + cell / 2
+        end
+        local function lineClear(ax, az, bx, bz)
+            local steps = math.ceil(math.max(math.abs(bx - ax), math.abs(bz - az)) / (cell * 0.5))
+            for i = 0, steps do
+                local t = i / math.max(steps, 1)
+                local ix = cellOf(ax + (bx - ax) * t, x0)
+                local iz = cellOf(az + (bz - az) * t, z0)
+                if ix < 0 or iz < 0 or ix >= nx or iz >= nz then return false end
+                if blocked[ix * 100000 + iz] then return false end
+            end
+            return true
+        end
+        -- string-pull: from the last kept point keep the furthest node
+        -- still reachable in one straight clear line
+        local pts = { { startPos.X, startPos.Z } }
+        local a = 1
+        while a < #grid do
+            local last = a + 1
+            local ax, az = nodeWorld(a)
+            for b = a + 2, #grid do
+                local bx, bz = nodeWorld(b)
+                if not lineClear(ax, az, bx, bz) then break end
+                last = b
+            end
+            local px, pz = nodeWorld(last)
+            pts[#pts + 1] = { px, pz }
+            a = last
+        end
+        pts[#pts + 1] = { goalPos.X, goalPos.Z } -- land on the exact goal
+        return pts, counter.n
     end
 
     -- to the NEAREST CORNER of the field (user: start at a corner, not the
-    -- center) — 4 studs inside the edge; arrive within 6 studs of it. Drives
-    -- with REAL keys now: the old glide (PivotTo steps at ~30 studs/s) WHIPPED
-    -- the hitched plow — video showed it bouncing/tumbling the whole transit.
-    -- Glide stays only as the fallback if keys can't move the tractor.
-    local function driveToField(tr, field, seat, plow)
+    -- center) — 4 studs inside the edge; arrive within 8 studs of it. The
+    -- route comes from A* around everything parked on the farm and is
+    -- RE-PLANNED about once a second while moving (user request: "find the
+    -- most useful and quickest path every second"). REAL keys drive it
+    -- (true physics — the old glide WHIPPED the towed tool); the glide
+    -- stays only as the fallback when keys can't move the tractor.
+    local function driveToField(tr, field, seat, impl)
         local baseCF, baseSize = fieldFrame(field)
         if not baseCF then return false, "no bounds" end
         local c = baseCF.Position
@@ -638,40 +756,49 @@ local okBuild, errBuild = pcall(function()
             + rx * math.max(baseSize.X / 2 - 4, 2) * (p0:Dot(rx) >= 0 and 1 or -1)
             + rz * math.max(baseSize.Z / 2 - 4, 2) * (p0:Dot(rz) >= 0 and 1 or -1)
         log(string.format("field corner target: (%.0f, %.0f)", goal.X, goal.Z))
-        -- the plow is TOWED (ground only, can't fly): if parked equipment,
-        -- vehicles or trees sit in the direct corridor, swing around them
-        -- via a midpoint waypoint on the FAR side of the obstacle
         local startPos = tr:GetPivot().Position
-        local goals = { goal }
-        local ob = corridorObstacle(startPos, goal, tr, plow)
-        if ob then
-            local A = Vector3.new(startPos.X, 0, startPos.Z)
-            local B = Vector3.new(goal.X, 0, goal.Z)
-            local dirV = (B - A).Unit
-            local perp = Vector3.new(-dirV.Z, 0, dirV.X)
-            local side = (ob.center - A):Dot(perp) >= 0 and -1 or 1
-            local way = (A + B) / 2 + perp * side * (ob.radius + 10)
-            goals = { way, goal }
-            log(string.format("obstacle ahead: %s (%.0f studs off the line) — routing around",
-                ob.name, ob.dist))
+        local legs, info = pathfindAround(startPos, goal, tr, impl)
+        if not legs then
+            log("⚠ pathfinding failed (" .. tostring(info) .. ") — driving straight at the corner")
+            legs = { { goal.X, goal.Z } }
+            info = 0
+        else
+            log(string.format("path: %d legs around %d obstacles", #legs - 1, info))
         end
         local useKeys = driveLegKeys ~= nil
-        local gi = 1
-        for pass = 1, 16 do
+        local li, lastPlan = 2, 0
+        for pass = 1, 40 do
             if stopping() then return nil end
             local p = tr:GetPivot().Position
-            local g = goals[gi]
-            local d = (Vector3.new(p.X, 0, p.Z) - Vector3.new(g.X, 0, g.Z)).Magnitude
-            if d <= 6 then
-                if gi < #goals then
-                    gi += 1
-                    g = goals[gi]
+            -- re-plan ~once a second: parked tools shift around, and the
+            -- fresh A* always re-picks the quickest current route
+            if os.clock() - lastPlan > 1 then
+                lastPlan = os.clock()
+                local newLegs, n = pathfindAround(p, goal, tr, impl)
+                if stopping() then return nil end
+                if newLegs then
+                    if info ~= n then
+                        log(string.format("re-routed: %d legs around %d obstacles", #newLegs - 1, n))
+                    end
+                    legs, info = newLegs, n
                 else
-                    return true, pass
+                    log("re-plan failed (" .. tostring(n) .. ") — keeping the last path")
+                end
+                li = 2 -- follow the fresh path from here (legs[1] = now)
+            end
+            local g = legs[math.min(li, #legs)]
+            local d = (Vector3.new(p.X, 0, p.Z) - Vector3.new(g[1], 0, g[2])).Magnitude
+            if d <= 6 then
+                if li < #legs then
+                    li += 1
+                    g = legs[li]
+                else
+                    local dg = (Vector3.new(p.X, 0, p.Z) - Vector3.new(goal.X, 0, goal.Z)).Magnitude
+                    if dg <= 8 then return true, pass end
                 end
             end
             if useKeys then
-                local res = driveLegKeys(tr, seat, p, g, 6)
+                local res = driveLegKeys(tr, seat, p, Vector3.new(g[1], p.Y, g[2]), 6)
                 if res == nil then return nil end
                 if res == false then
                     useKeys = false
@@ -679,13 +806,13 @@ local okBuild, errBuild = pcall(function()
                 end
             end
             if not useKeys then
-                glideTractor(tr, Vector3.new(g.X, p.Y, g.Z))
+                glideTractor(tr, Vector3.new(g[1], p.Y, g[2]))
             end
             task.wait(0.2)
         end
         local p = tr:GetPivot().Position
-        local d = (Vector3.new(p.X, 0, p.Z) - Vector3.new(goals[#goals].X, 0, goals[#goals].Z)).Magnitude
-        if d <= 6 then return true, 16 end
+        local d = (Vector3.new(p.X, 0, p.Z) - Vector3.new(goal.X, 0, goal.Z)).Magnitude
+        if d <= 8 then return true, 40 end
         return false, "still " .. math.floor(d) .. " studs short"
     end
 
@@ -1087,7 +1214,7 @@ local okBuild, errBuild = pcall(function()
             end
             log(string.format("%s pass: %s (nearest with %s cells)",
                 job.verb, field.Name, job.stage))
-            local impl, idist = findImplement(job.typeName, tr:GetPivot().Position, tr)
+            local impl, idist, basis = findImplement(job.typeName, tr:GetPivot().Position, tr)
             if not impl then
                 log("no equipment with EquipmentType=" .. job.typeName .. " found — see list above")
                 return false
@@ -1101,7 +1228,8 @@ local okBuild, errBuild = pcall(function()
             -- unhitched back at THIS spot (user: "unhitch the tools where
             -- they came from")
             local origin = impl:GetPivot().Position
-            log("hitch target: " .. impl.Name .. string.format(" (%.0f studs)", idist or 0))
+            log(string.format("hitch target: %s (%.0f studs, by %s)",
+                impl.Name, idist or 0, basis or "?"))
 
             -- the HUD label alone can be stale (dump-proven: it said "S4204"
             -- while the hitch points sat 9.5 studs apart) — if it claims a
@@ -1109,6 +1237,21 @@ local okBuild, errBuild = pcall(function()
             -- straight to drive. Fail → treat as unhitched, hitch normally.
             local didHitch = false
             local attached = hitchedImplementName()
+            -- a DIFFERENT tool on the hitch (live bug: it hitched the
+            -- KQF3000 seeder) — X it off first; unhitching is proximity-
+            -- gated, so if it stays, only the user can free the hitch
+            if attached and attached ~= impl.Name then
+                log("a different tool is hitched (" .. attached .. ") — unhitching it first")
+                pressKey(Enum.KeyCode.X)
+                task.wait(0.8)
+                if stopping() then return false end
+                attached = hitchedImplementName()
+                if attached and attached ~= impl.Name then
+                    log("⚠ " .. attached .. " is still hitched — unhitch it manually (X next to it), then run again")
+                    return false
+                end
+                log("hitch is free")
+            end
             if attached then
                 log("HUD says hitched (" .. attached .. ") — tug-verifying…")
                 local before = impl:GetPivot().Position
@@ -1168,8 +1311,21 @@ local okBuild, errBuild = pcall(function()
                             didHitch = true
                             break
                         end
-                        log(string.format("attempt %d: X pressed but the tool didn't follow (%.1f studs) — retrying",
-                            attempt, moved))
+                        -- X may have grabbed a NEIGHBOR instead (live bug:
+                        -- the KQF3000 seeder): the tool we lined up on
+                        -- didn't follow, but if the HUD now names some
+                        -- other tool, THAT one got grabbed — take it off
+                        -- again before retrying
+                        local got = hitchedImplementName()
+                        if got and got ~= impl.Name then
+                            log(string.format("⚠ X grabbed the wrong tool (HUD: %s, wanted %s) — unhitching",
+                                got, impl.Name))
+                            pressKey(Enum.KeyCode.X)
+                            task.wait(0.8)
+                        else
+                            log(string.format("attempt %d: X pressed but the tool didn't follow (%.1f studs) — retrying",
+                                attempt, moved))
+                        end
                     end
                 end
                 if not didHitch then return false end -- killed (toggle off)
@@ -1310,12 +1466,35 @@ local okBuild, errBuild = pcall(function()
     Window:SelectTab(1)
     Fluent:Notify({
         Title = "SPUD FARM",
-        Content = "rebuilt on Fluent — skeleton only (no game features yet)",
+        Content = "farming loop ready",
         Duration = 6,
     })
     log("loaded — " .. VERSION)
     log("GUI: Fluent Renewed · RIGHT SHIFT hides the window")
-    log("no game features yet; they return one at a time")
+
+    -- FIELD WATCH (user request): scan at launch and re-scan every 15
+    -- minutes so newly placed fields get discovered. The farming loop
+    -- already re-picks its field per pass — this only REPORTS changes.
+    local fieldsKnown, fieldsScanned = {}, false
+    local function scanFieldsReport()
+        local char = LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        for _, m in ipairs(findMyFields(root and root.Position or Vector3.new(0, 0, 0))) do
+            if not fieldsKnown[m.d] then
+                fieldsKnown[m.d] = true
+                log(string.format("field %s: %s (%s, %.0f studs)",
+                    fieldsScanned and "NEW" or "found", m.d.Name, m.typeName, m.dist))
+            end
+        end
+        fieldsScanned = true
+    end
+    scanFieldsReport()
+    task.spawn(function()
+        while task.wait(900) do
+            log("field re-scan (every 15 min)")
+            scanFieldsReport()
+        end
+    end)
 end)
 
 if not okBuild then
