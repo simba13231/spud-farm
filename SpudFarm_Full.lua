@@ -463,10 +463,15 @@ local okBuild, errBuild = pcall(function()
         return best, bestType
     end
 
-    -- glide to the NEAREST CORNER of the field (user: start at a corner,
-    -- not the center) — 4 studs inside the edge; arrive within 6 studs of
-    -- it; short rubber-banded moves retry on the next pass
-    local function driveToField(tr, field)
+    -- forward-declared so driveToField below can use it (defined later)
+    local driveLegKeys
+
+    -- to the NEAREST CORNER of the field (user: start at a corner, not the
+    -- center) — 4 studs inside the edge; arrive within 6 studs of it. Drives
+    -- with REAL keys now: the old glide (PivotTo steps at ~30 studs/s) WHIPPED
+    -- the hitched plow — video showed it bouncing/tumbling the whole transit.
+    -- Glide stays only as the fallback if keys can't move the tractor.
+    local function driveToField(tr, field, seat)
         local okB, cf, sz = pcall(function() return field:GetBoundingBox() end)
         if not (okB and cf) then return false, "no bounds" end
         local cx, cz = cf.Position.X, cf.Position.Z
@@ -476,11 +481,19 @@ local okBuild, errBuild = pcall(function()
             cx + (p0.X >= cx and hx or -hx), 0,  -- nearest corner,
             cz + (p0.Z >= cz and hz or -hz))      -- 4 studs inside
         log(string.format("field corner target: (%.0f, %.0f)", goal.X, goal.Z))
+        local useKeys = driveLegKeys ~= nil
         for pass = 1, 8 do
             if stopping() then return nil end
             local p = tr:GetPivot().Position
             local d = (Vector3.new(p.X, 0, p.Z) - goal).Magnitude
             if d <= 6 then return true, pass end
+            if useKeys then
+                local res = driveLegKeys(tr, seat, goal, 6)
+                if res == nil then return nil end
+                if res == true then return true, pass end
+                useKeys = false
+                log("keys didn't drive to the field — falling back to glide")
+            end
             glideTractor(tr, Vector3.new(goal.X, p.Y, goal.Z))
             task.wait(0.2)
         end
@@ -523,8 +536,6 @@ local okBuild, errBuild = pcall(function()
     -- player input every frame.)
     -- v4 anti-orbit steering (v3 circled forever at row ends: full-speed
     -- turn radius > arrival tolerance → orbit around the goal):
-    --   · goal BEHIND → reverse-assist turnaround (hold S + steer, nose
-    --     swings around in ~1/4 the space) instead of a full-speed loop
     --   · turn strength scales with how far off-heading we are (full turn
     --     past 0.5, 2/3 duty past 0.28, feather otherwise) — no overshoot
     --     oscillation, no wheel chatter
@@ -533,10 +544,14 @@ local okBuild, errBuild = pcall(function()
     --     (plow overlap covers the shortfall; the cell counter is truth)
     -- Forward = low-pass-smoothed travel direction (seat facing only as
     -- the startup fallback) so jitter can't flip the steering.
+    -- v5: NO REVERSE EVER — backing with a trailed implement JACKKNIFES it
+    -- into the tractor (video: plow wedged sideways against the tractor,
+    -- then the tractor could only wander). Turnarounds are wide forward
+    -- arcs at creep speed. Cruise duty cut to 1/2 overall.
     -- Returns true=arrived/accepted, false=keys didn't drive (caller falls
     -- back to the glide), nil=killed.
-    local KEY_W, KEY_A, KEY_D, KEY_S =
-        Enum.KeyCode.W, Enum.KeyCode.A, Enum.KeyCode.D, Enum.KeyCode.S
+    local KEY_W, KEY_A, KEY_D =
+        Enum.KeyCode.W, Enum.KeyCode.A, Enum.KeyCode.D
     local keyHeld = {}
     local function setKey(key, down)
         if keyHeld[key] == down then return end
@@ -544,15 +559,14 @@ local okBuild, errBuild = pcall(function()
         VIM:SendKeyEvent(down, key, false, game)
     end
     local function releaseDriveKeys()
-        setKey(KEY_W, false) setKey(KEY_A, false)
-        setKey(KEY_D, false) setKey(KEY_S, false)
+        setKey(KEY_W, false) setKey(KEY_A, false) setKey(KEY_D, false)
     end
 
-    local function driveLegKeys(tr, seat, goal, tol)
+    driveLegKeys = function(tr, seat, goal, tol)
         if not seat then return false end -- not seated: keys would do nothing
         tol = tol or 7
         local startPos = tr:GetPivot().Position
-        local prevPos, fwd, revTicks = startPos, nil, 0
+        local prevPos, fwd = startPos, nil
         for tick = 1, 350 do -- ~42 s cap per leg (0.12 s ticks)
             if stopping() then releaseDriveKeys() return nil end
             local pos = tr:GetPivot().Position
@@ -576,29 +590,13 @@ local okBuild, errBuild = pcall(function()
             local side = d:Dot(right) -- >0 = goal is off to the right
             local sharp = math.abs(side) > 0.5
             local turnSlot, thrSlot = tick % 3, tick % 3
-
-            if d:Dot(fwd) < -0.35 and dist > 10 then
-                -- goal BEHIND: tight reverse turnaround instead of an orbit
-                -- (in reverse the wheels steer the nose the OTHER way)
-                revTicks += 1
-                if revTicks <= 25 then -- ~3 s of backing max
-                    setKey(KEY_W, false)
-                    setKey(KEY_S, true)
-                    setKey(KEY_D, side <= 0)
-                    setKey(KEY_A, side > 0)
-                    task.wait(0.12)
-                    continue
-                end
-            else
-                revTicks = 0
-            end
-            setKey(KEY_S, false)
+            -- goal BEHIND = wide forward U-turn at creep (never reverse)
             -- proportional steering: hard turn far off-heading, feather near
             local want = side > 0.18 and 1 or (side < -0.18 and -1 or 0)
             local duty = sharp and 3 or (math.abs(side) > 0.28 and 2 or 1)
             setKey(KEY_D, want == 1 and turnSlot < duty)
             setKey(KEY_A, want == -1 and turnSlot < duty)
-            -- throttle: cruise far out, creep otherwise, never fast in turns
+            -- throttle: gentle cruise far out, creep in turns and up close
             local tDuty = (sharp or dist <= 14) and 1 or 2
             setKey(KEY_W, thrSlot < tDuty)
             task.wait(0.12)
@@ -646,13 +644,10 @@ local okBuild, errBuild = pcall(function()
             before and string.format("%d/%d cells already Plowed", before, total)
                 or "cell read unavailable"))
         local realDrive -- nil = not probed yet; true = seat driving; false = glide
-        for r = 1, rows do
+        local function doLeg(goal, tol)
             if stopping() then return nil end
-            local step = -rowSpan / 2 + 5 + (r - 1) * 10 -- row centers (10-stud cells)
-            local dir = (r % 2 == 1) and -1 or 1         -- serpentine
-            local goal = pt(dir * driveHalf, step)
             if realDrive ~= false then
-                local res = driveLegKeys(tr, seat, goal, 7)
+                local res = driveLegKeys(tr, seat, goal, tol or 7)
                 if res == nil then return nil end
                 if realDrive == nil then
                     realDrive = res == true
@@ -665,6 +660,20 @@ local okBuild, errBuild = pcall(function()
             end
             if realDrive == false then glideTractor(tr, goal) end
             task.wait(0.1)
+            return true
+        end
+        -- snake: start on the tractor's OWN end and row, alternate ends each
+        -- row. Every leg is aligned with the field — a short crossover at the
+        -- row end, then the full row drive. (v4 cut diagonals between far
+        -- ends → triangular unplowed gaps, video-confirmed.)
+        local p0 = tr:GetPivot().Position
+        local endSide = ((alongX and p0.X or p0.Z) >= (alongX and c.X or c.Z)) and 1 or -1
+        local rowSide = ((alongX and p0.Z or p0.X) >= (alongX and c.Z or c.X)) and 1 or -1
+        for r = 1, rows do
+            local row = rowSide * (rowSpan / 2 - 5) - rowSide * (r - 1) * 10
+            if not doLeg(pt(endSide * driveHalf, row), 4) then return nil end -- crossover/start
+            if not doLeg(pt(-endSide * driveHalf, row)) then return nil end   -- the row itself
+            endSide = -endSide
         end
         if stopping() then return nil end
         local after, tot2 = countPlowedCells(field)
@@ -825,7 +834,7 @@ local okBuild, errBuild = pcall(function()
             return
         end
         log("driving to field: " .. field.Name .. " (type " .. tostring(ftype) .. ")")
-        local arrived, how = driveToField(tr, field)
+        local arrived, how = driveToField(tr, field, hum.SeatPart)
         if stopping() then return end
         if arrived then
             log("✅ reached the field" .. (type(how) == "number"
