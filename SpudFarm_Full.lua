@@ -207,7 +207,7 @@ local okBuild, errBuild = pcall(function()
     -- preference kept hitching it). The name match wins outright; the
     -- type attribute is only a fallback, and the wrong-tool guards in
     -- runPass still catch a neighbor grab. Returns impl, dist, basis.
-    local TYPE_MODEL = { Cultivator = "KQF3000" }
+    local TYPE_MODEL = { Cultivator = "KQF3000", Planter = "KADL" }
     local function findImplement(typeName, nearPos, tractorModel)
         local folder = equipmentFolder()
         local wantName = TYPE_MODEL[typeName]
@@ -1002,6 +1002,85 @@ local okBuild, errBuild = pcall(function()
         return needPlow, needCult
     end
 
+    -- ▸ SEEDER STEP 1 (dump §27 settled WHERE the seed state lives): the
+    --   seeder (KADL, EquipmentType="Planter") keeps its seed load in
+    --   Configurations — Carrying [StringValue] = seed type ("Wheat"),
+    --   Capacity [IntValue] = CURRENT seeds, MaxCapacity [IntValue] = the
+    --   cap (Farmer's Club "SeederCapacity_*" upgrades raise it). Same
+    --   Capacity/MaxCapacity/Carrying pattern the Trailer and the harvester
+    --   use, and the VehicleHUD capacity bar mirrors it live ("0 / 50" +
+    --   crop name). All of it sits on the ONE KADL instance in
+    --   Objects.Equipment, so it reads the same spawned or in storage.
+    -- Returns count, cap, kind — or nil when unreadable (seedCheck then
+    -- treats it as EMPTY: user's decision).
+    local function seederSeedState(seeder)
+        local ok, count, cap, kind = pcall(function()
+            local conf = seeder:FindFirstChild("Configurations")
+            if not conf then return nil end
+            local c = conf:FindFirstChild("Capacity")
+            if not (c and c:IsA("IntValue")) then return nil end
+            local m = conf:FindFirstChild("MaxCapacity")
+            local k = conf:FindFirstChild("Carrying")
+            return c.Value,
+                (m and m:IsA("IntValue")) and m.Value or nil,
+                (k and k:IsA("StringValue")) and k.Value or nil
+        end)
+        if not ok or count == nil then return nil end
+        return count, cap, kind
+    end
+
+    -- ▸ SEEDER STEP 1 — the seed check (user: "first thing from the seeder:
+    --   we need to know if it has seeds in it or not. if it does stay in
+    --   tractor. if it does not get out of the tractor"). Runs on EVERY
+    --   loop run (user: "check everytime after the cultivating") — right
+    --   after the cultivate pass AND on the idle path, with no field-need
+    --   gate. Read-only: it never hitches/fills/drives (later steps, each
+    --   when asked). Unreadable seed state counts as EMPTY (user's answer)
+    --   → get out. F = ExitEquipment (context-key dump), pressed ONLY while
+    --   seated — on foot the honest log is all it does (F next to the
+    --   tractor would MOUNT it, the opposite of the intent).
+    local function seedCheck(tr, hum)
+        if stopping() then return end
+        log("— seed check —")
+        local seated = hum.SeatPart ~= nil
+        local seeder, _, basis =
+            findImplement("Planter", tr:GetPivot().Position, tr)
+        local count, cap, kind
+        if seeder then count, cap, kind = seederSeedState(seeder) end
+        local exitIntent = seated and "getting out of the tractor"
+            or "already out of the tractor"
+        if seeder and count then
+            local label = string.format("%d%s seeds%s%s", count,
+                cap and ("/" .. cap) or "",
+                kind and kind ~= "" and (" (" .. kind .. ")") or "",
+                seeder:GetAttribute("InStorage") and ", in storage" or "")
+            if count > 0 then
+                log("seeder has " .. label .. (seated
+                    and " — staying in the tractor"
+                    or " — staying put (not in the tractor)"))
+                return
+            end
+            log("seeder is EMPTY: " .. label .. " — " .. exitIntent)
+        elseif not seeder then
+            log("no seeder (Planter/KADL) found — seed state unknown — " ..
+                exitIntent)
+        else
+            log("seed state unreadable (" .. tostring(basis) ..
+                ") — treating as empty — " .. exitIntent)
+        end
+        if not seated then return end
+        pressKey(Enum.KeyCode.F)
+        task.wait(0.8)
+        if stopping() then return end
+        if hum.SeatPart then
+            pressKey(Enum.KeyCode.F) -- context can take a beat
+            task.wait(0.8)
+            if stopping() then return end
+        end
+        log(hum.SeatPart and "⚠ F didn't exit — press F manually"
+            or "✅ out of the tractor")
+    end
+
     -- "actual driving": HOLD REAL KEYS (WASD via VirtualInputManager) while
     -- seated — the game's own vehicle controller reads them through its
     -- normal input pipeline, so the tractor accelerates and swings through
@@ -1327,6 +1406,10 @@ local okBuild, errBuild = pcall(function()
         local needPlow, needCult = probeWork(tr:GetPivot().Position)
         if not needPlow and not needCult then
             log("✅ every field is plowed and cultivated — nothing to do")
+            -- the seed check runs EVERY loop run (user: "everytime") —
+            -- even an idle run reports the seeder's seed load (read-only;
+            -- the F press only ever happens while seated)
+            seedCheck(tr, hum)
             return
         end
         if stopping() then return end
@@ -1569,6 +1652,12 @@ local okBuild, errBuild = pcall(function()
         -- ▸ steps 7-10: the cultivate pass (Plowed -> Cultivated) — usually
         --   the same field the plow pass just finished
         runPass(JOBS[2])
+        if stopping() then return end
+        -- ▸ SEED CHECK (user: "check everytime after the cultivating") —
+        --   has seeds → stay seated; empty/unreadable → F out. Read-only
+        --   step 1: no fill, no hitch, no drive yet (later steps, asked
+        --   for one at a time)
+        seedCheck(tr, hum)
     end
 
     -- ON = spawn the loop on its own thread; OFF = clear the thread id so
