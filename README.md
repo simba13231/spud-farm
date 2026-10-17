@@ -1,5 +1,10 @@
 # 🥔 SPUD FARM — Farming and Friends scripts
 
+> **Status: clean rebuild in progress.** The current build is a *skeleton* — GUI
+> shell + console + 🔄 reload only, no game features. Features are being re-added
+> one at a time and tested in-game. The full previous version is preserved in the
+> git history.
+
 ## Quick start (using the script)
 1. Copy the raw script link:
    `https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua`
