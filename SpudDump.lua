@@ -785,6 +785,48 @@ local ok, err = pcall(function()
     else
         w("  (no Objects.Equipment folder)")
     end
+
+    ------------------------------------------------------------------
+    -- 22. HITCH PROMPT LIVE (run this with the X button showing!)
+    --     reads EXACTLY what SpudFarm_Full.hitchPromptUp() reads, so we
+    --     can confirm the path/class/flag before trusting the creep loop
+    ------------------------------------------------------------------
+    header("HITCH PROMPT LIVE (X visible on screen right now?)")
+    local promptPath = pGui and pGui:FindFirstChild("GuiViews")
+        and pGui.GuiViews:FindFirstChild("HUD")
+        and pGui.GuiViews.HUD:FindFirstChild("PCGP_ContextActions")
+        and pGui.GuiViews.HUD.PCGP_ContextActions:FindFirstChild("Billboards")
+        and pGui.GuiViews.HUD.PCGP_ContextActions.Billboards:FindFirstChild("VehicleHUD")
+    local hitchBill = promptPath and promptPath:FindFirstChild("Hitch")
+    w("  script reads: PlayerGui.GuiViews.HUD.PCGP_ContextActions.Billboards.VehicleHUD.Hitch")
+    if hitchBill then
+        w("    FOUND  class=" .. hitchBill.ClassName
+            .. "  Enabled=" .. tostring(hitchBill.Enabled))
+        w("    (script treats Enabled==true as 'prompt up → press X')")
+    else
+        w("    NOT FOUND — script would fall back to pressing X blind")
+    end
+    -- alternates the game might be using instead (report anything Enabled)
+    local alts = {
+        { "ViewportUI.HitchBillboard", pGui and pGui:FindFirstChild("GuiViews")
+            and pGui.GuiViews.HUD:FindFirstChild("VehicleHUD")
+            and pGui.GuiViews.HUD.VehicleHUD:FindFirstChild("ViewportUI")
+            and pGui.GuiViews.HUD.VehicleHUD.ViewportUI:FindFirstChild("HitchBillboard") },
+        { "Buttons.VehicleHUD.Hitch", promptPath and promptPath.Parent
+            and promptPath.Parent:FindFirstChild("Buttons")
+            and promptPath.Parent.Buttons:FindFirstChild("VehicleHUD")
+            and promptPath.Parent.Buttons.VehicleHUD:FindFirstChild("Hitch") },
+    }
+    for _, a in ipairs(alts) do
+        local inst = a[2]
+        if inst then
+            local okE, e = pcall(function() return inst.Enabled end)
+            w("    alt " .. a[1] .. "  class=" .. inst.ClassName
+                .. "  Enabled=" .. (okE and tostring(e) or "?"))
+        else
+            w("    alt " .. a[1] .. "  NOT FOUND")
+        end
+    end
 end)
 
 w("")
