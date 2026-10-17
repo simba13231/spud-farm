@@ -84,7 +84,7 @@ local okBuild, errBuild = pcall(function()
 
     -- ▸ AUTO-FARM STEP 2: movement (VFly = BodyVelocity fly + snap,
     --   Tween = stepped glide). Nothing else uses this yet.
-    local Move = { Mode = "VFly", Speed = 200 }
+    local Move = { Mode = "Tween", Speed = 200 }
 
     local function moveTo(target)
         local char = LocalPlayer.Character
@@ -275,7 +275,7 @@ local okBuild, errBuild = pcall(function()
         Title = "Movement",
         Values = { "VFly", "Tween" },
         Multi = false,
-        Default = "VFly",
+        Default = "Tween",
         Callback = function(v)
             Move.Mode = v
             log("movement mode: " .. tostring(v))
