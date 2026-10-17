@@ -634,6 +634,51 @@ local okBuild, errBuild = pcall(function()
     --   SHORT axis, step 10 studs along the LONG one, alternating ends each
     --   row. Overshoot both ends slightly so the TRAILING plow still
     --   covers the edge cells.
+    -- ── visual debug: draw the planned path over the field (Drawing API) ──
+    -- thin green lines = every leg of the map, thick bright line = the leg
+    -- being driven right now. pcall-guarded: if the executor has no
+    -- Drawing API the run is unaffected (just no overlay).
+    local dbgLines, dbgConn = {}, nil
+    local function dbgShow(points)
+        if not (Drawing and Drawing.new) then return end
+        pcall(function()
+            for i = 1, #points - 1 do
+                local l = Drawing.new("Line")
+                l.Color = Color3.fromRGB(90, 220, 120)
+                l.Thickness = 2
+                l.Transparency = 0.35
+                l.Visible = true
+                l.From = Vector2.new(0, 0)
+                l.To = Vector2.new(0, 0)
+                dbgLines[i] = l
+            end
+        end)
+        if #dbgLines == 0 then return end
+        dbgConn = game:GetService("RunService").RenderStepped:Connect(function()
+            local cam = workspace.CurrentCamera
+            if not cam then return end
+            for i, l in ipairs(dbgLines) do
+                local a = cam:WorldToViewportPoint(points[i])
+                local b = cam:WorldToViewportPoint(points[i + 1])
+                l.From = Vector2.new(a.X, a.Y)
+                l.To = Vector2.new(b.X, b.Y)
+            end
+        end)
+    end
+    local function dbgLeg(i)
+        for j, l in ipairs(dbgLines) do
+            l.Color = j == i and Color3.fromRGB(255, 220, 60)
+                or Color3.fromRGB(90, 220, 120)
+            l.Thickness = j == i and 3 or 2
+            l.Transparency = j == i and 1 or 0.35
+        end
+    end
+    local function dbgClear()
+        if dbgConn then dbgConn:Disconnect() dbgConn = nil end
+        for _, l in ipairs(dbgLines) do pcall(function() l:Remove() end) end
+        table.clear(dbgLines)
+    end
+
     local function plowTheField(tr, field, seat)
         local okB, cf, sz = pcall(function() return field:GetBoundingBox() end)
         if not (okB and cf) then return false, "no bounds" end
@@ -685,11 +730,21 @@ local okBuild, errBuild = pcall(function()
             map[#map + 1] = { pt(-endSide * driveHalf, row), 7, r }   -- the row drive
             endSide = -endSide
         end
+        -- overlay the whole path at tractor height (field surface) so the
+        -- lines visually sit ON the field, not sunk below it
+        local drawY = tr:GetPivot().Position.Y
+        local pts = { Vector3.new(at.X, drawY, at.Z) }
         for _, leg in ipairs(map) do
-            if not doLeg(at, leg[1], leg[2]) then return nil end
+            pts[#pts + 1] = Vector3.new(leg[1].X, drawY, leg[1].Z)
+        end
+        dbgShow(pts) -- thin green = every leg; bright = the active one
+        for i, leg in ipairs(map) do
+            dbgLeg(i)
+            if not doLeg(at, leg[1], leg[2]) then dbgClear() return nil end
             at = leg[1]
             if leg[3] then log(string.format("row %d/%d done", leg[3], rows)) end
         end
+        dbgClear()
         if stopping() then return nil end
         local after, tot2 = countPlowedCells(field)
         if after then
