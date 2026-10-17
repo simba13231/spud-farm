@@ -1545,6 +1545,231 @@ local ok, err = pcall(function()
     if not ok26 then
         w("NOTE: §26 stopped: " .. string.sub(tostring(err26), 1, 120))
     end
+
+    ------------------------------------------------------------------
+    -- 27. SEEDER SEED STATE — the seeding feature's first question
+    --     (user: "we need to know if it has seeds in it or not"):
+    --     where does the game keep the seeder's seed count? Dumps every
+    --     KADL/Planter model (attributes, Configurations leaves, tree
+    --     with Text/Value/attr probes), seed/fill/empty/count-labeled
+    --     GUI text ANYWHERE, live HUD billboards, and PASSIVELY
+    --     captures the fill remotes when you press V yourself.
+    --     RUN WITH: stand at the seeder (press V if FillSeeder shows),
+    --     then sit in the tractor with the seeder hitched; seed ONE
+    --     cell by hand if you can. Paste output + executor console.
+    ------------------------------------------------------------------
+    local ok27, err27 = pcall(function()
+        header("SEEDER SEED STATE (KADL / Planter deep)")
+        local function pv27(v, depth)
+            depth = depth or 0
+            local t = typeof(v)
+            if t == "table" then
+                local n = 0
+                for _ in pairs(v) do n += 1 end
+                if depth >= 2 then return "table{" .. n .. "}" end
+                local sample, shown = "", 0
+                for k, val in pairs(v) do
+                    shown += 1
+                    if shown > 8 then sample = sample .. "…"; break end
+                    sample = sample .. tostring(k) .. "=" .. pv27(val, depth + 1) .. " "
+                end
+                return "table{" .. n .. "} " .. sample
+            elseif t == "string" then
+                return string.format("string(%d) %q", #v, string.sub(v, 1, 60))
+            end
+            return t .. "(" .. string.sub(tostring(v), 1, 60) .. ")"
+        end
+
+        -- A. seeder models: attributes + Configurations + tree probes
+        local objects27 = workspace:FindFirstChild("Objects")
+        local eqf27 = objects27 and objects27:FindFirstChild("Equipment")
+        local seeders27 = {}
+        for _, d in ipairs(eqf27 and eqf27:GetChildren() or {}) do
+            if d:IsA("Model") and (d.Name == "KADL"
+                or d:GetAttribute("EquipmentType") == "Planter") then
+                seeders27[#seeders27 + 1] = d
+            end
+        end
+        w("seeder models (KADL or EquipmentType=Planter): " .. #seeders27)
+        for _, sm in ipairs(seeders27) do
+            w("")
+            w("── " .. sm:GetFullName() .. "   InStorage=" .. tostring(sm:GetAttribute("InStorage")))
+            for k, v in pairs(sm:GetAttributes()) do
+                w("  attr." .. tostring(k) .. " = " .. pv27(v))
+            end
+            local conf27 = sm:FindFirstChild("Configurations") or sm:FindFirstChild("Configuration")
+            if conf27 then
+                local shownC = 0
+                for _, d in ipairs(conf27:GetDescendants()) do
+                    if shownC >= 40 then w("  … (Configurations capped)"); break end
+                    if d:IsA("ValueBase") then
+                        shownC += 1
+                        local full = d:GetFullName()
+                        local at = full:find("Configurations", 1, true)
+                        w("  conf." .. (at and full:sub(at) or full) .. " = " .. pv27(d.Value))
+                    end
+                end
+            else
+                w("  (no Configurations child)")
+            end
+            local desc27, shownT, hidden27 = sm:GetDescendants(), 0, 0
+            w("  tree (" .. #desc27 .. " descendants; matching lines only):")
+            for _, d in ipairs(desc27) do
+                if shownT >= 150 then w("  … (tree capped)"); break end
+                local line27, keep27 = nil, false
+                local nm27 = d.Name:lower()
+                local seedish = nm27:find("seed", 1, true) or nm27:find("fill", 1, true)
+                    or nm27:find("empty", 1, true) or nm27:find("count", 1, true)
+                    or nm27:find("amount", 1, true) or nm27:find("capacity", 1, true)
+                if d:IsA("ValueBase") then
+                    line27 = "[" .. d.ClassName .. "] " .. d.Name .. "  = " .. pv27(d.Value)
+                    keep27 = true
+                elseif d:IsA("TextLabel") or d:IsA("TextButton") or d:IsA("TextBox") then
+                    line27 = "[" .. d.ClassName .. "] " .. d.Name .. "  Text="
+                        .. string.format("%q", string.sub(tostring(d.Text), 1, 60))
+                        .. "  Visible=" .. tostring(d.Visible)
+                    keep27 = true
+                elseif d:IsA("SurfaceGui") or d:IsA("BillboardGui") then
+                    line27 = "[" .. d.ClassName .. "] " .. d.Name .. "  Enabled=" .. tostring(d.Enabled)
+                    keep27 = true
+                elseif d:IsA("Folder") or d:IsA("Model") then
+                    line27 = "[" .. d.ClassName .. "] " .. d.Name
+                    keep27 = true
+                end
+                local attrs27 = d:GetAttributes()
+                if next(attrs27) ~= nil then
+                    local parts27 = {}
+                    for k, v in pairs(attrs27) do
+                        parts27[#parts27 + 1] = tostring(k) .. "=" .. pv27(v)
+                    end
+                    line27 = (line27 or ("[" .. d.ClassName .. "] " .. d.Name))
+                        .. "  attrs{" .. table.concat(parts27, "; ") .. "}"
+                    keep27 = true
+                end
+                if seedish then
+                    line27 = "[SEEDHIT] " .. (line27 or ("[" .. d.ClassName .. "] " .. d.Name))
+                    keep27 = true
+                end
+                if keep27 then
+                    shownT += 1
+                    w("  " .. line27)
+                else
+                    hidden27 += 1
+                end
+            end
+            w("  (non-matching skipped: " .. hidden27 .. ")")
+        end
+
+        -- B. seed/fill/empty/count text ANYWHERE (PlayerGui + workspace)
+        header("SEED / FILL / EMPTY TEXT ANYWHERE (PlayerGui + workspace)")
+        local pg27 = game:GetService("Players").LocalPlayer:FindFirstChildOfClass("PlayerGui")
+        local hits27 = 0
+        local function scanText27(rt, tag)
+            if not rt then return end
+            for _, d in ipairs(rt:GetDescendants()) do
+                if hits27 >= 70 then return end
+                local nm27 = d.Name:lower()
+                local tx27
+                if d:IsA("TextLabel") or d:IsA("TextButton") or d:IsA("TextBox") then
+                    tx27 = tostring(d.Text)
+                end
+                local ltx27 = tx27 and tx27:lower() or ""
+                local hit27 = nm27:find("seed", 1, true) or ltx27:find("seed", 1, true)
+                    or nm27:find("fill", 1, true) or ltx27:find("fill", 1, true)
+                    or ltx27:find("empty", 1, true)
+                    or (ltx27:find("%d+/%d+") and (nm27:find("label", 1, true)
+                        or nm27:find("count", 1, true) or nm27:find("amount", 1, true)
+                        or nm27:find("state", 1, true) or nm27:find("type", 1, true)))
+                if hit27 then
+                    hits27 += 1
+                    local extra27 = ""
+                    if d:IsA("GuiObject") then
+                        extra27 = "  Visible=" .. tostring(d.Visible)
+                        if d:IsA("Frame") then
+                            extra27 = extra27 .. "  Size=" .. tostring(d.Size) -- fill-bar scale?
+                        end
+                    end
+                    w(string.format("  [%s] %s  Text=%q%s", tag, d:GetFullName(),
+                        string.sub(tx27 or "", 1, 60), extra27))
+                end
+            end
+        end
+        scanText27(pg27, "gui")
+        scanText27(workspace, "ws")
+        w("  hits: " .. hits27)
+
+        -- C. HUD billboards live (context/state mirrors when in range)
+        header("HUD BILLBOARDS (live Enabled + inner text)")
+        local hud27 = pg27 and pg27:FindFirstChild("GuiViews")
+            and pg27.GuiViews:FindFirstChild("HUD")
+        local bil27 = nil
+        if hud27 then
+            bil27 = hud27:FindFirstChild("Billboards")
+            local main27 = hud27:FindFirstChild("MainHUD")
+            bil27 = (main27 and main27:FindFirstChild("Billboards")) or bil27
+        end
+        if not bil27 and pg27 then
+            for _, d in ipairs(pg27:GetDescendants()) do
+                if d.Name == "Billboards" and (d:IsA("Folder") or d:IsA("Model")) then
+                    bil27 = d
+                    break
+                end
+            end
+        end
+        if bil27 then
+            local n27 = 0
+            for _, b in ipairs(bil27:GetChildren()) do
+                if n27 >= 60 then w("  … (capped)"); break end
+                if b:IsA("BillboardGui") then
+                    local bnm = b.Name:lower()
+                    local bkeep = b.Enabled or bnm:find("seed", 1, true)
+                        or bnm:find("fill", 1, true) or bnm:find("vehicle", 1, true)
+                    if bkeep then
+                        n27 += 1
+                        local txt27 = {}
+                        for _, t in ipairs(b:GetDescendants()) do
+                            if t:IsA("TextLabel") and t.Text ~= "" then
+                                txt27[#txt27 + 1] = t.Name .. "=" .. string.sub(t.Text, 1, 40)
+                            end
+                        end
+                        w(string.format("  %s  Enabled=%s  Adornee=%s  text{%s}",
+                            b.Name, tostring(b.Enabled),
+                            b.Adornee and b.Adornee:GetFullName() or "?",
+                            table.concat(txt27, " | ")))
+                    end
+                end
+            end
+            w("  printed: " .. n27 .. " (enabled or seed/fill/vehicle)")
+        else
+            w("  (no Billboards folder found under PlayerGui)")
+        end
+
+        -- D. PASSIVE fill-watch: press V at the seeder manually → the
+        --    args land in the EXECUTOR console as [FILLWATCH …]. Chains
+        --    over §26's namecall hook (each calls the previous one).
+        local okHook27, errHook27 = pcall(function()
+            local old
+            old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+                local nm, meth = self.Name, getnamecallmethod()
+                if (meth == "FireServer" or meth == "InvokeServer")
+                    and (nm:find("Fill", 1, true) or nm:find("Seeder", 1, true)) then
+                    pcall(summarize, "[FILLWATCH " .. nm .. "]", ...)
+                end
+                return old(self, ...)
+            end))
+        end)
+        w(okHook27 and "  fill-watch ON: press V at the seeder → [FILLWATCH …] lines in the EXECUTOR console"
+            or ("  fill-watch FAILED: " .. string.sub(tostring(errHook27), 1, 100)))
+
+        w("")
+        w("DO NOW: (1) stand at the seeder — press V if FillSeeder shows;")
+        w("(2) sit in the tractor with the seeder hitched (VehicleHUD live);")
+        w("(3) seed ONE cell by hand if you can; (4) wait ~3s, stop the dump,")
+        w("paste the output + any [FILLWATCH …] executor-console lines.")
+    end)
+    if not ok27 then
+        w("NOTE: §27 stopped: " .. string.sub(tostring(err27), 1, 120))
+    end
 end)
 
 w("")
