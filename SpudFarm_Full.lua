@@ -515,48 +515,78 @@ local okBuild, errBuild = pcall(function()
         return nil
     end
 
-    -- "actual driving": steer the game's OWN VehicleSeat (Throttle/Steer)
-    -- so the tractor accelerates and turns with real physics — the plow
-    -- trails behind and swings through the turns instead of the CFrame
-    -- snapping of the glide. Probe: if ~1.2 s of throttle moves nothing
-    -- (custom controller ignoring seat input) → false → caller falls back
-    -- to the glide. Returns true=arrived, false=seat unusable, nil=killed.
-    local function driveSeatTo(tr, seat, goal, tol)
-        if not (seat and seat:IsA("VehicleSeat")) then return false end
-        tol = tol or 5
+    -- "actual driving": HOLD REAL KEYS (WASD via VirtualInputManager) while
+    -- seated — the game's own vehicle controller reads them through its
+    -- normal input pipeline, so the tractor accelerates and swings through
+    -- turns with true physics. (Setting seat.Throttle directly was PROVEN
+    -- ignored — test run logged "seat throttle ignored": the seat's control
+    -- script overwrites those properties from player input every frame.)
+    -- Forward direction is measured from actual motion once moving (seat
+    -- facing as the startup fallback). Returns true=arrived,
+    -- false=keys didn't drive (caller falls back to the glide), nil=killed.
+    local KEY_W, KEY_A, KEY_D = Enum.KeyCode.W, Enum.KeyCode.A, Enum.KeyCode.D
+    local keyHeld = {}
+    local function setKey(key, down)
+        if keyHeld[key] == down then return end
+        keyHeld[key] = down
+        VIM:SendKeyEvent(down, key, false, game)
+    end
+    local function releaseDriveKeys()
+        setKey(KEY_W, false) setKey(KEY_A, false) setKey(KEY_D, false)
+    end
+
+    local function driveLegKeys(tr, seat, goal, tol)
+        if not seat then return false end -- not seated: keys would do nothing
+        tol = tol or 7
         local startPos = tr:GetPivot().Position
-        for tick = 1, 500 do -- ~40 s hard cap per leg
-            if stopping() then
-                pcall(function() seat.Throttle, seat.Steer = 0, 0 end)
-                return nil
-            end
+        local prevPos, fwd, pulse = startPos, nil, 0
+        for tick = 1, 400 do -- ~48 s cap per leg (0.12 s ticks)
+            if stopping() then releaseDriveKeys() return nil end
             local pos = tr:GetPivot().Position
             local to = Vector3.new(goal.X - pos.X, 0, goal.Z - pos.Z)
             if to.Magnitude <= tol then break end
-            local look = seat.CFrame.LookVector
-            local fwd = Vector3.new(look.X, 0, look.Z)
-            fwd = fwd.Magnitude > 0.1 and fwd.Unit or Vector3.new(0, 0, -1)
+            -- forward = measured travel direction once moving, else seat facing
+            local flatMove = Vector3.new(pos.X - prevPos.X, 0, pos.Z - prevPos.Z)
+            if flatMove.Magnitude > 0.3 then
+                fwd = flatMove.Unit
+            elseif not fwd then
+                local look = seat.CFrame.LookVector
+                fwd = Vector3.new(look.X, 0, look.Z)
+                fwd = fwd.Magnitude > 0.1 and fwd.Unit or Vector3.new(0, 0, -1)
+            end
+            prevPos = pos
             local right = Vector3.new(-fwd.Z, 0, fwd.X)
-            local d = to.Unit
-            local side = d:Dot(right) -- >0 = goal is off to the right
-            local ahead = d:Dot(fwd)
-            seat.Steer = side > 0.12 and 1 or (side < -0.12 and -1 or 0)
-            -- slow for tight turns and near the goal: no fly-bys
-            seat.Throttle = to.Magnitude < 10 and 0.45
-                or (ahead < -0.3 and 0.35 or 0.9)
-            task.wait(0.08)
-            if tick == 15 then -- ~1.2 s probe: throttle must produce motion
-                local now = tr:GetPivot().Position
-                if (Vector3.new(now.X, 0, now.Z) - Vector3.new(startPos.X, 0, startPos.Z)).Magnitude < 1
-                    and (Vector3.new(goal.X, 0, goal.Z) - Vector3.new(startPos.X, 0, startPos.Z)).Magnitude > tol + 4 then
-                    pcall(function() seat.Throttle, seat.Steer = 0, 0 end)
+            local side = to.Unit:Dot(right) -- >0 = goal is off to the right
+            -- hysteresis: steer only past 0.18 so the wheel doesn't chatter
+            if side > 0.18 then
+                setKey(KEY_D, true) setKey(KEY_A, false)
+            elseif side < -0.18 then
+                setKey(KEY_A, true) setKey(KEY_D, false)
+            else
+                setKey(KEY_A, false) setKey(KEY_D, false)
+            end
+            -- full throttle far out, creeping pulse near the goal (no fly-bys)
+            if to.Magnitude > 12 then
+                setKey(KEY_W, true)
+            else
+                pulse += 1
+                setKey(KEY_W, pulse % 3 ~= 0) -- 2/3 duty ≈ slow creep
+            end
+            task.wait(0.12)
+            if tick == 15 then -- ~1.8 s probe: keys must produce motion
+                local moved = (Vector3.new(pos.X, 0, pos.Z)
+                    - Vector3.new(startPos.X, 0, startPos.Z)).Magnitude
+                if moved < 1 and (Vector3.new(goal.X, 0, goal.Z)
+                    - Vector3.new(startPos.X, 0, startPos.Z)).Magnitude > tol + 4 then
+                    releaseDriveKeys()
                     return false
                 end
             end
         end
-        pcall(function() seat.Throttle, seat.Steer = 0, 0 end)
+        releaseDriveKeys()
         local pos = tr:GetPivot().Position
-        return (Vector3.new(pos.X, 0, pos.Z) - Vector3.new(goal.X, 0, goal.Z)).Magnitude <= tol + 4
+        return (Vector3.new(pos.X, 0, pos.Z)
+            - Vector3.new(goal.X, 0, goal.Z)).Magnitude <= tol + 4
     end
 
     -- ▸ PLOW THE FIELD (dump §26: the field is ONE 50×100 plate of 50
@@ -590,14 +620,14 @@ local okBuild, errBuild = pcall(function()
             local dir = (r % 2 == 1) and -1 or 1         -- serpentine
             local goal = pt(dir * driveHalf, step)
             if realDrive ~= false then
-                local res = driveSeatTo(tr, seat, goal, 5)
+                local res = driveLegKeys(tr, seat, goal, 7)
                 if res == nil then return nil end
                 if realDrive == nil then
                     realDrive = res == true
                     if realDrive then
-                        log("real driving ON (seat throttle — smooth physics)")
+                        log("real driving ON (held WASD — true physics)")
                     else
-                        log("seat throttle ignored — falling back to glide")
+                        log("keys didn't drive the tractor — falling back to glide")
                     end
                 end
             end
