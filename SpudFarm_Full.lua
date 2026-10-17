@@ -890,7 +890,9 @@ local okBuild, errBuild = pcall(function()
         local c = baseCF.Position
         local rx = Vector3.new(baseCF.RightVector.X, 0, baseCF.RightVector.Z).Unit
         local rz = Vector3.new(baseCF.LookVector.X, 0, baseCF.LookVector.Z).Unit
-        local alongX = baseSize.X <= baseSize.Z
+        local alongX = baseSize.X >= baseSize.Z
+        -- rows run along the LONG axis (user: fewer turns = more stable —
+        -- 5 loops instead of 10 square hooks on a 5×10 field)
         local driveDir = alongX and rx or rz   -- unit world dir of the pass axis
         local stepDir  = alongX and rz or rx   -- unit world dir of the row step
         -- +12 run-out past the field ends (user: turn too tight at the row
@@ -925,21 +927,22 @@ local okBuild, errBuild = pcall(function()
             task.wait(0.1)
             return true
         end
-        -- THE MAP (user's plan): precompute the whole snake ONCE — start on
-        -- the tractor's OWN end and row, then per row a short crossover hop
-        -- at the row end + the full row drive, alternating ends. The script
-        -- just FOLLOWS this list; every leg is aligned with the field, no
-        -- diagonals (v4 cut diagonals between far ends → triangular
-        -- unplowed gaps, video-confirmed).
+        -- precompute the whole path ONCE, then just FOLLOW the list
         local at = tr:GetPivot().Position
         local rel0 = at - c -- sides picked along the PLATE's axes, not world
         local endSide = rel0:Dot(driveDir) >= 0 and 1 or -1
         local rowSide = rel0:Dot(stepDir) >= 0 and 1 or -1
+        -- THE MAP: rows along the LONG axis, mow-the-lawn LOOPS at the
+        -- ends (user's plan) — each row ends with a loop entry point
+        -- 8 studs PAST the row end on the next row's line; pure pursuit
+        -- swings wide around it and curls onto the row (no square hooks,
+        -- no diagonals; the old short-axis snake made 10 turns, this
+        -- makes 5).
         local map = {}
         for r = 1, rows do
             local row = rowSide * (rowSpan / 2 - 5) - rowSide * (r - 1) * 10
-            map[#map + 1] = { pt(endSide * driveHalf, row), 4, nil } -- crossover/start
-            map[#map + 1] = { pt(-endSide * driveHalf, row), 7, r }   -- the row drive
+            map[#map + 1] = { pt(endSide * (driveHalf + 8), row), 7, nil } -- loop entry
+            map[#map + 1] = { pt(-endSide * driveHalf, row), 7, r }        -- the row drive
             endSide = -endSide
         end
         dbgShow(tr, map, at) -- glowing bars on the field; bright = active leg
