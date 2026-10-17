@@ -520,6 +520,155 @@ local okBuild, errBuild = pcall(function()
         return false
     end
 
+    -- ▸ step 1: MOUNT the tractor — walk to it if needed, F, verify seated.
+    --   Extracted verbatim from the loop so the seeder-hitch path on an
+    --   idle run reuses the exact same proven code. Returns true=seated.
+    local function mountTractor(char, hum, tr, seat, dist)
+        if hum.SeatPart and not hum.SeatPart:IsDescendantOf(tr) then
+            log("seated in another vehicle — stand up first")
+            return false
+        end
+        if not hum.SeatPart then
+            if dist > 10 then
+                log(string.format("moving to tractor (%.0f studs)…", dist))
+                local reached = moveTo(seat.Position + Vector3.new(0, 3, 0))
+                if stopping() then return false end
+                if not reached then
+                    log("couldn't reach the tractor")
+                    return false
+                end
+                local root = char:FindFirstChild("HumanoidRootPart")
+                dist = root and (seat.Position - root.Position).Magnitude or 0
+            end
+            if stopping() then return false end
+            if dist > 10 then log("still too far after moving") return false end
+            log("pressing F to mount…")
+            pressKey(Enum.KeyCode.F)
+            task.wait(0.7)
+            if stopping() then return false end
+            if not (hum.SeatPart and hum.SeatPart:IsDescendantOf(tr)) then
+                pressKey(Enum.KeyCode.F) -- context can take a moment to register
+                task.wait(0.7)
+            end
+            if stopping() then return false end
+            if hum.SeatPart and hum.SeatPart:IsDescendantOf(tr) then
+                log("✅ mounted " .. tr.Name)
+            else
+                log("F pressed but not seated — game didn't accept the enter")
+                return false
+            end
+        end
+        return true
+    end
+
+    -- ▸ THE PROVEN HITCH SEQUENCE — extracted unchanged from the pass code
+    --   so the seeder hitch (step 2) reuses it verbatim: stale-HUD
+    --   tug-verify → wrong-tool guard (X the neighbor off first) →
+    --   line-up/creep retry loop with X + tug per attempt. Returns
+    --   true = attached (the caller keeps it hitched).
+    local function hitchTool(tr, impl)
+        -- the HUD label alone can be stale (dump-proven: it said "S4204"
+        -- while the hitch points sat 9.5 studs apart) — if it claims a
+        -- hitch, PROVE it with a tug: the tool must follow. Pass → skip
+        -- straight to drive. Fail → treat as unhitched, hitch normally.
+        local didHitch = false
+        local attached = hitchedImplementName()
+        -- a DIFFERENT tool on the hitch (live bug: it hitched the
+        -- KQF3000 seeder) — X it off first; unhitching is proximity-
+        -- gated, so if it stays, only the user can free the hitch
+        if attached and attached ~= impl.Name then
+            log("a different tool is hitched (" .. attached .. ") — unhitching it first")
+            pressKey(Enum.KeyCode.X)
+            task.wait(0.8)
+            if stopping() then return false end
+            attached = hitchedImplementName()
+            if attached and attached ~= impl.Name then
+                log("⚠ " .. attached .. " is still hitched — unhitch it manually (X next to it), then run again")
+                return false
+            end
+            log("hitch is free")
+        end
+        if attached then
+            log("HUD says hitched (" .. attached .. ") — tug-verifying…")
+            local before = impl:GetPivot().Position
+            local pivot = tr:GetPivot()
+            local fwd = Vector3.new(pivot.LookVector.X, 0, pivot.LookVector.Z)
+            if fwd.Magnitude < 0.1 then fwd = Vector3.new(0, 0, -1) end
+            glideTractor(tr, pivot.Position + fwd.Unit * 4)
+            task.wait(0.4)
+            if stopping() then return false end
+            local followed = (impl:GetPivot().Position - before).Magnitude
+            if followed > 2 then
+                log(string.format("✅ tug passed (%.1f studs) — attached, skipping hitch", followed))
+                didHitch = true
+            else
+                log(string.format("label stale — the tool didn't follow (%.1f studs) — hitching first", followed))
+            end
+        end
+
+        if not didHitch then
+            -- user's plan: physical line-up of the hitch PARTS (fallback:
+            -- align+creep), then the game's Hitch prompt gates the X press.
+            -- Retry until the tug-test passes.
+            local attempt, forceCreep = 0, false
+            while not stopping() do
+                attempt += 1
+                if not (impl and impl:IsDescendantOf(workspace)) then
+                    log("the tool disappeared (despawned?) — stopping retries")
+                    return false
+                end
+                local backOff = math.min((attempt - 1) * 1.5, 6) -- widen stance on retries
+                local lined = false
+                if not forceCreep then
+                    lined = lineUpHitch(tr, impl, true) -- empty tractor: arc down onto the tool
+                end
+                if stopping() then return false end
+                if not lined then
+                    alignToPlow(tr, impl, backOff)
+                end
+                if stopping() then return false end
+                local crept = creepUntilPrompt(tr, 20, 1) -- up to 20 studs forward
+                if stopping() then return false end
+                if not crept then
+                    log(string.format("attempt %d: hitch prompt never showed within 20 studs — re-aligning", attempt))
+                    if lined then
+                        -- parts found but prompt still dead: line-up pose is
+                        -- wrong for the game → stop trusting it, creep from now
+                        forceCreep = true
+                        log("line-up pose didn't satisfy the game — falling back to creep alignment")
+                    end
+                    task.wait(0.4)
+                else
+                    log(string.format("attempt %d: hitch prompt shows — pressing X", attempt))
+                    local hooked, moved = attemptHitch(tr, impl)
+                    if stopping() then return false end
+                    if hooked then
+                        log(string.format("✅ hitched %s (attempt %d)", impl.Name, attempt))
+                        didHitch = true
+                        break
+                    end
+                    -- X may have grabbed a NEIGHBOR instead (live bug:
+                    -- the KQF3000 seeder): the tool we lined up on
+                    -- didn't follow, but if the HUD now names some
+                    -- other tool, THAT one got grabbed — take it off
+                    -- again before retrying
+                    local got = hitchedImplementName()
+                    if got and got ~= impl.Name then
+                        log(string.format("⚠ X grabbed the wrong tool (HUD: %s, wanted %s) — unhitching",
+                            got, impl.Name))
+                        pressKey(Enum.KeyCode.X)
+                        task.wait(0.8)
+                    else
+                        log(string.format("attempt %d: X pressed but the tool didn't follow (%.1f studs) — retrying",
+                            attempt, moved))
+                    end
+                end
+            end
+            if not didHitch then return false end -- killed (toggle off)
+        end
+        return true
+    end
+
     -- dump §24: fields live in Objects.Fields — Configurations.Owner marks
     -- whose each is; Configurations.FieldType says WHAT kind (the game
     -- has 2 kinds of farm land — crop "Field" is one). v2 (user: "does
@@ -1034,13 +1183,14 @@ local okBuild, errBuild = pcall(function()
     --   tractor. if it does not get out of the tractor"). Runs on EVERY
     --   loop run (user: "check everytime after the cultivating") — right
     --   after the cultivate pass AND on the idle path, with no field-need
-    --   gate. Read-only: it never hitches/fills/drives (later steps, each
-    --   when asked). Unreadable seed state counts as EMPTY (user's answer)
-    --   → get out. F = ExitEquipment (context-key dump), pressed ONLY while
-    --   seated — on foot the honest log is all it does (F next to the
-    --   tractor would MOUNT it, the opposite of the intent).
+    --   gate. Returns true=FULL (the caller then hitches the seeder —
+    --   step 2); false=empty/unreadable (the step-1 dismount runs). The
+    --   check itself stays read-only — no fill/drive/seeding yet. F =
+    --   ExitEquipment (context-key dump), pressed ONLY while seated — on
+    --   foot the honest log is all it does (F next to the tractor would
+    --   MOUNT it, the opposite of the intent).
     local function seedCheck(tr, hum)
-        if stopping() then return end
+        if stopping() then return false end
         log("— seed check —")
         local seated = hum.SeatPart ~= nil
         local seeder, _, basis =
@@ -1055,10 +1205,8 @@ local okBuild, errBuild = pcall(function()
                 kind and kind ~= "" and (" (" .. kind .. ")") or "",
                 seeder:GetAttribute("InStorage") and ", in storage" or "")
             if count > 0 then
-                log("seeder has " .. label .. (seated
-                    and " — staying in the tractor"
-                    or " — staying put (not in the tractor)"))
-                return
+                log("seeder has " .. label .. " — going to hitch it")
+                return true
             end
             log("seeder is EMPTY: " .. label .. " — " .. exitIntent)
         elseif not seeder then
@@ -1068,17 +1216,44 @@ local okBuild, errBuild = pcall(function()
             log("seed state unreadable (" .. tostring(basis) ..
                 ") — treating as empty — " .. exitIntent)
         end
-        if not seated then return end
+        if not seated then return false end
         pressKey(Enum.KeyCode.F)
         task.wait(0.8)
-        if stopping() then return end
+        if stopping() then return false end
         if hum.SeatPart then
             pressKey(Enum.KeyCode.F) -- context can take a beat
             task.wait(0.8)
-            if stopping() then return end
+            if stopping() then return false end
         end
         log(hum.SeatPart and "⚠ F didn't exit — press F manually"
             or "✅ out of the tractor")
+        return false
+    end
+
+    -- ▸ SEEDER STEP 2 (user: "ok, now if the seeder is full make the
+    --   tractor go hitch to the seeder"): the seed check said FULL → the
+    --   tractor goes and hitches the KADL with the SAME proven sequence
+    --   every pass uses (hitchTool — it also tug-verifies an ALREADY
+    --   hitched seeder and Xes a different tool off first). The seeder
+    --   STAYS hitched when done — that's the point (the seeding pass is
+    --   a later step, asked for one at a time). No fill, no drive.
+    local function seedHitchStep(tr)
+        if stopping() then return end
+        local seeder, sdist, basis =
+            findImplement("Planter", tr:GetPivot().Position, tr)
+        if not seeder then
+            log("seed hitch: the seeder vanished between check and hitch — skipping")
+            return
+        end
+        if seeder:GetAttribute("InStorage") then
+            log(seeder.Name .. " (the seeder) is IN STORAGE — pull it out of the Equipment Manager first")
+            return
+        end
+        log(string.format("hitching the seeder: %s (%.0f studs, by %s)",
+            seeder.Name, sdist or 0, basis or "?"))
+        if hitchTool(tr, seeder) then
+            log("✅ seeder hitched — staying hitched")
+        end
     end
 
     -- "actual driving": HOLD REAL KEYS (WASD via VirtualInputManager) while
@@ -1405,50 +1580,24 @@ local okBuild, errBuild = pcall(function()
         --   = work to try).
         local needPlow, needCult = probeWork(tr:GetPivot().Position)
         if not needPlow and not needCult then
-            log("✅ every field is plowed and cultivated — nothing to do")
-            -- the seed check runs EVERY loop run (user: "everytime") —
-            -- even an idle run reports the seeder's seed load (read-only;
-            -- the F press only ever happens while seated)
-            seedCheck(tr, hum)
+            -- idle for plow/cult — but a FULL seeder is still work
+            -- (user: full → the tractor hitches it): mount and do that,
+            -- nothing else
+            if not seedCheck(tr, hum) then
+                if stopping() then return end
+                log("✅ every field is plowed and cultivated — nothing to do")
+                return
+            end
+            if stopping() then return end
+            if not mountTractor(char, hum, tr, seat, dist) then return end
+            logEquipment()
+            seedHitchStep(tr)
             return
         end
         if stopping() then return end
 
         -- ▸ step 1: mount (skipped when already in the tractor)
-        if hum.SeatPart and not hum.SeatPart:IsDescendantOf(tr) then
-            log("seated in another vehicle — stand up first")
-            return
-        end
-        if not hum.SeatPart then
-            if dist > 10 then
-                log(string.format("moving to tractor (%.0f studs)…", dist))
-                local reached = moveTo(seat.Position + Vector3.new(0, 3, 0))
-                if stopping() then return end
-                if not reached then
-                    log("couldn't reach the tractor")
-                    return
-                end
-                local root = char:FindFirstChild("HumanoidRootPart")
-                dist = root and (seat.Position - root.Position).Magnitude or 0
-            end
-            if stopping() then return end
-            if dist > 10 then log("still too far after moving") return end
-            log("pressing F to mount…")
-            pressKey(Enum.KeyCode.F)
-            task.wait(0.7)
-            if stopping() then return end
-            if not (hum.SeatPart and hum.SeatPart:IsDescendantOf(tr)) then
-                pressKey(Enum.KeyCode.F) -- context can take a moment to register
-                task.wait(0.7)
-            end
-            if stopping() then return end
-            if hum.SeatPart and hum.SeatPart:IsDescendantOf(tr) then
-                log("✅ mounted " .. tr.Name)
-            else
-                log("F pressed but not seated — game didn't accept the enter")
-                return
-            end
-        end
+        if not mountTractor(char, hum, tr, seat, dist) then return end
 
         logEquipment() -- always show the names so we can confirm the pick
 
@@ -1495,105 +1644,10 @@ local okBuild, errBuild = pcall(function()
             log(string.format("hitch target: %s (%.0f studs, by %s)",
                 impl.Name, idist or 0, basis or "?"))
 
-            -- the HUD label alone can be stale (dump-proven: it said "S4204"
-            -- while the hitch points sat 9.5 studs apart) — if it claims a
-            -- hitch, PROVE it with a tug: the tool must follow. Pass → skip
-            -- straight to drive. Fail → treat as unhitched, hitch normally.
-            local didHitch = false
-            local attached = hitchedImplementName()
-            -- a DIFFERENT tool on the hitch (live bug: it hitched the
-            -- KQF3000 seeder) — X it off first; unhitching is proximity-
-            -- gated, so if it stays, only the user can free the hitch
-            if attached and attached ~= impl.Name then
-                log("a different tool is hitched (" .. attached .. ") — unhitching it first")
-                pressKey(Enum.KeyCode.X)
-                task.wait(0.8)
-                if stopping() then return false end
-                attached = hitchedImplementName()
-                if attached and attached ~= impl.Name then
-                    log("⚠ " .. attached .. " is still hitched — unhitch it manually (X next to it), then run again")
-                    return false
-                end
-                log("hitch is free")
-            end
-            if attached then
-                log("HUD says hitched (" .. attached .. ") — tug-verifying…")
-                local before = impl:GetPivot().Position
-                local pivot = tr:GetPivot()
-                local fwd = Vector3.new(pivot.LookVector.X, 0, pivot.LookVector.Z)
-                if fwd.Magnitude < 0.1 then fwd = Vector3.new(0, 0, -1) end
-                glideTractor(tr, pivot.Position + fwd.Unit * 4)
-                task.wait(0.4)
-                if stopping() then return false end
-                local followed = (impl:GetPivot().Position - before).Magnitude
-                if followed > 2 then
-                    log(string.format("✅ tug passed (%.1f studs) — attached, skipping hitch", followed))
-                    didHitch = true
-                else
-                    log(string.format("label stale — the tool didn't follow (%.1f studs) — hitching first", followed))
-                end
-            end
-
-            if not didHitch then
-                -- user's plan: physical line-up of the hitch PARTS (fallback:
-                -- align+creep), then the game's Hitch prompt gates the X press.
-                -- Retry until the tug-test passes.
-                local attempt, forceCreep = 0, false
-                while not stopping() do
-                    attempt += 1
-                    if not (impl and impl:IsDescendantOf(workspace)) then
-                        log("the tool disappeared (despawned?) — stopping retries")
-                        return false
-                    end
-                    local backOff = math.min((attempt - 1) * 1.5, 6) -- widen stance on retries
-                    local lined = false
-                    if not forceCreep then
-                        lined = lineUpHitch(tr, impl, true) -- empty tractor: arc down onto the tool
-                    end
-                    if stopping() then return false end
-                    if not lined then
-                        alignToPlow(tr, impl, backOff)
-                    end
-                    if stopping() then return false end
-                    local crept = creepUntilPrompt(tr, 20, 1) -- up to 20 studs forward
-                    if stopping() then return false end
-                    if not crept then
-                        log(string.format("attempt %d: hitch prompt never showed within 20 studs — re-aligning", attempt))
-                        if lined then
-                            -- parts found but prompt still dead: line-up pose is
-                            -- wrong for the game → stop trusting it, creep from now
-                            forceCreep = true
-                            log("line-up pose didn't satisfy the game — falling back to creep alignment")
-                        end
-                        task.wait(0.4)
-                    else
-                        log(string.format("attempt %d: hitch prompt shows — pressing X", attempt))
-                        local hooked, moved = attemptHitch(tr, impl)
-                        if stopping() then return false end
-                        if hooked then
-                            log(string.format("✅ hitched %s (attempt %d)", impl.Name, attempt))
-                            didHitch = true
-                            break
-                        end
-                        -- X may have grabbed a NEIGHBOR instead (live bug:
-                        -- the KQF3000 seeder): the tool we lined up on
-                        -- didn't follow, but if the HUD now names some
-                        -- other tool, THAT one got grabbed — take it off
-                        -- again before retrying
-                        local got = hitchedImplementName()
-                        if got and got ~= impl.Name then
-                            log(string.format("⚠ X grabbed the wrong tool (HUD: %s, wanted %s) — unhitching",
-                                got, impl.Name))
-                            pressKey(Enum.KeyCode.X)
-                            task.wait(0.8)
-                        else
-                            log(string.format("attempt %d: X pressed but the tool didn't follow (%.1f studs) — retrying",
-                                attempt, moved))
-                        end
-                    end
-                end
-                if not didHitch then return false end -- killed (toggle off)
-            end
+            -- the proven hitch sequence (stale-HUD tug-verify, wrong-tool
+            -- guard, line-up/creep retries) — extracted as hitchTool so
+            -- the seeder hitch (step 2) reuses the exact same code
+            if not hitchTool(tr, impl) then return false end
 
             -- ▸ the tour: every field, in order — skip the finished ones,
             --   sweep the rest; the tool stays hitched across the whole
@@ -1653,11 +1707,14 @@ local okBuild, errBuild = pcall(function()
         --   the same field the plow pass just finished
         runPass(JOBS[2])
         if stopping() then return end
-        -- ▸ SEED CHECK (user: "check everytime after the cultivating") —
-        --   has seeds → stay seated; empty/unreadable → F out. Read-only
-        --   step 1: no fill, no hitch, no drive yet (later steps, asked
-        --   for one at a time)
-        seedCheck(tr, hum)
+        -- ▸ SEED CHECK (user: "check everytime after the cultivating") +
+        --   SEEDER STEP 2 (user: "if the seeder is full make the tractor
+        --   go hitch to the seeder") — full → hitch it AND STAY hitched
+        --   (the seeding pass is a later step, one at a time); empty/
+        --   unreadable → F out (step 1)
+        if seedCheck(tr, hum) then
+            seedHitchStep(tr)
+        end
     end
 
     -- ON = spawn the loop on its own thread; OFF = clear the thread id so
