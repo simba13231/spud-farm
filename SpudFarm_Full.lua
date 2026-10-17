@@ -519,12 +519,24 @@ local okBuild, errBuild = pcall(function()
     -- seated — the game's own vehicle controller reads them through its
     -- normal input pipeline, so the tractor accelerates and swings through
     -- turns with true physics. (Setting seat.Throttle directly was PROVEN
-    -- ignored — test run logged "seat throttle ignored": the seat's control
-    -- script overwrites those properties from player input every frame.)
-    -- Forward direction is measured from actual motion once moving (seat
-    -- facing as the startup fallback). Returns true=arrived,
-    -- false=keys didn't drive (caller falls back to the glide), nil=killed.
-    local KEY_W, KEY_A, KEY_D = Enum.KeyCode.W, Enum.KeyCode.A, Enum.KeyCode.D
+    -- ignored: the seat's control script overwrites those properties from
+    -- player input every frame.)
+    -- v4 anti-orbit steering (v3 circled forever at row ends: full-speed
+    -- turn radius > arrival tolerance → orbit around the goal):
+    --   · goal BEHIND → reverse-assist turnaround (hold S + steer, nose
+    --     swings around in ~1/4 the space) instead of a full-speed loop
+    --   · turn strength scales with how far off-heading we are (full turn
+    --     past 0.5, 2/3 duty past 0.28, feather otherwise) — no overshoot
+    --     oscillation, no wheel chatter
+    --   · throttle duty cut to a creep while turning and near the goal
+    --   · close-enough acceptance: within 16 studs after ~15 s = done
+    --     (plow overlap covers the shortfall; the cell counter is truth)
+    -- Forward = low-pass-smoothed travel direction (seat facing only as
+    -- the startup fallback) so jitter can't flip the steering.
+    -- Returns true=arrived/accepted, false=keys didn't drive (caller falls
+    -- back to the glide), nil=killed.
+    local KEY_W, KEY_A, KEY_D, KEY_S =
+        Enum.KeyCode.W, Enum.KeyCode.A, Enum.KeyCode.D, Enum.KeyCode.S
     local keyHeld = {}
     local function setKey(key, down)
         if keyHeld[key] == down then return end
@@ -532,61 +544,81 @@ local okBuild, errBuild = pcall(function()
         VIM:SendKeyEvent(down, key, false, game)
     end
     local function releaseDriveKeys()
-        setKey(KEY_W, false) setKey(KEY_A, false) setKey(KEY_D, false)
+        setKey(KEY_W, false) setKey(KEY_A, false)
+        setKey(KEY_D, false) setKey(KEY_S, false)
     end
 
     local function driveLegKeys(tr, seat, goal, tol)
         if not seat then return false end -- not seated: keys would do nothing
         tol = tol or 7
         local startPos = tr:GetPivot().Position
-        local prevPos, fwd, pulse = startPos, nil, 0
-        for tick = 1, 400 do -- ~48 s cap per leg (0.12 s ticks)
+        local prevPos, fwd, revTicks = startPos, nil, 0
+        for tick = 1, 350 do -- ~42 s cap per leg (0.12 s ticks)
             if stopping() then releaseDriveKeys() return nil end
             local pos = tr:GetPivot().Position
             local to = Vector3.new(goal.X - pos.X, 0, goal.Z - pos.Z)
-            if to.Magnitude <= tol then break end
-            -- forward = measured travel direction once moving, else seat facing
-            local flatMove = Vector3.new(pos.X - prevPos.X, 0, pos.Z - prevPos.Z)
-            if flatMove.Magnitude > 0.3 then
-                fwd = flatMove.Unit
-            elseif not fwd then
+            local dist = to.Magnitude
+            if dist <= tol then break end
+            -- smoothed travel direction (low-pass: jitter can't flip steering)
+            local move = Vector3.new(pos.X - prevPos.X, 0, pos.Z - prevPos.Z)
+            if move.Magnitude > 0.5 then
+                local m = move.Unit
+                fwd = fwd and (fwd * 0.7 + m * 0.3).Unit or m
+            end
+            prevPos = pos
+            if not fwd then
                 local look = seat.CFrame.LookVector
                 fwd = Vector3.new(look.X, 0, look.Z)
                 fwd = fwd.Magnitude > 0.1 and fwd.Unit or Vector3.new(0, 0, -1)
             end
-            prevPos = pos
             local right = Vector3.new(-fwd.Z, 0, fwd.X)
-            local side = to.Unit:Dot(right) -- >0 = goal is off to the right
-            -- hysteresis: steer only past 0.18 so the wheel doesn't chatter
-            if side > 0.18 then
-                setKey(KEY_D, true) setKey(KEY_A, false)
-            elseif side < -0.18 then
-                setKey(KEY_A, true) setKey(KEY_D, false)
+            local d = to.Unit
+            local side = d:Dot(right) -- >0 = goal is off to the right
+            local sharp = math.abs(side) > 0.5
+            local turnSlot, thrSlot = tick % 3, tick % 3
+
+            if d:Dot(fwd) < -0.35 and dist > 10 then
+                -- goal BEHIND: tight reverse turnaround instead of an orbit
+                -- (in reverse the wheels steer the nose the OTHER way)
+                revTicks += 1
+                if revTicks <= 25 then -- ~3 s of backing max
+                    setKey(KEY_W, false)
+                    setKey(KEY_S, true)
+                    setKey(KEY_D, side <= 0)
+                    setKey(KEY_A, side > 0)
+                    task.wait(0.12)
+                    continue
+                end
             else
-                setKey(KEY_A, false) setKey(KEY_D, false)
+                revTicks = 0
             end
-            -- full throttle far out, creeping pulse near the goal (no fly-bys)
-            if to.Magnitude > 12 then
-                setKey(KEY_W, true)
-            else
-                pulse += 1
-                setKey(KEY_W, pulse % 3 ~= 0) -- 2/3 duty ≈ slow creep
-            end
+            setKey(KEY_S, false)
+            -- proportional steering: hard turn far off-heading, feather near
+            local want = side > 0.18 and 1 or (side < -0.18 and -1 or 0)
+            local duty = sharp and 3 or (math.abs(side) > 0.28 and 2 or 1)
+            setKey(KEY_D, want == 1 and turnSlot < duty)
+            setKey(KEY_A, want == -1 and turnSlot < duty)
+            -- throttle: cruise far out, creep otherwise, never fast in turns
+            local tDuty = (sharp or dist <= 14) and 1 or 2
+            setKey(KEY_W, thrSlot < tDuty)
             task.wait(0.12)
+
             if tick == 15 then -- ~1.8 s probe: keys must produce motion
                 local moved = (Vector3.new(pos.X, 0, pos.Z)
                     - Vector3.new(startPos.X, 0, startPos.Z)).Magnitude
-                if moved < 1 and (Vector3.new(goal.X, 0, goal.Z)
-                    - Vector3.new(startPos.X, 0, startPos.Z)).Magnitude > tol + 4 then
+                if moved < 1 and dist > tol + 4 then
                     releaseDriveKeys()
                     return false
                 end
+            elseif tick == 125 and dist < 16 then -- ~15 s: close enough
+                if dist > 10 then
+                    log(string.format("row end ~%.0f studs short — accepting (plow overlap covers it)", dist))
+                end
+                break
             end
         end
         releaseDriveKeys()
-        local pos = tr:GetPivot().Position
-        return (Vector3.new(pos.X, 0, pos.Z)
-            - Vector3.new(goal.X, 0, goal.Z)).Magnitude <= tol + 4
+        return true -- arrived, accepted close-enough, or hit the time cap
     end
 
     -- ▸ PLOW THE FIELD (dump §26: the field is ONE 50×100 plate of 50
