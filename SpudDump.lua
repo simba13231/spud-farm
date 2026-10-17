@@ -855,6 +855,137 @@ local ok, err = pcall(function()
     end
     if found == 0 then w("  (no parts with 'hitch' in the name!)") end
     w("  total hitch parts: " .. found)
+
+    ------------------------------------------------------------------
+    -- 24. FIELD + GOTO LOCATIONS (drive-to-field step)
+    --     where the field is / what cells it holds / the game's own
+    --     named waypoints we could drive toward
+    ------------------------------------------------------------------
+    header("FIELD + GOTO LOCATIONS (drive-to-field research)")
+    local markers = Workspace:FindFirstChild("Markers")
+    local gLoc = markers and markers:FindFirstChild("GotoLocations")
+    if gLoc then
+        w("  Markers.GotoLocations children:")
+        if #gLoc:GetChildren() == 0 then w("    (empty)") end
+        for _, d in ipairs(gLoc:GetChildren()) do
+            local pos
+            if d:IsA("BasePart") then
+                pos = d.Position
+            elseif d:IsA("Model") then
+                pos = d:GetPivot().Position
+            elseif d:IsA("Attachment") then
+                pos = d.WorldPosition
+            elseif d:IsA("Folder") then
+                local p = d:FindFirstChildWhichIsA("BasePart", true)
+                pos = p and p.Position
+            end
+            w(string.format("    · %s [%s]%s", d.Name, d.ClassName,
+                pos and string.format("  pos=(%.0f, %.0f, %.0f)", pos.X, pos.Y, pos.Z) or ""))
+        end
+    else
+        w("  Markers/GotoLocations NOT FOUND")
+    end
+
+    local objects = Workspace:FindFirstChild("Objects")
+    local fields = objects and objects:FindFirstChild("Fields")
+    if not fields then
+        w("  Objects.Fields NOT FOUND")
+    else
+        w("  Objects.Fields children:")
+        for _, f in ipairs(fields:GetChildren()) do
+            w("    - " .. f.Name .. " [" .. f.ClassName .. "]")
+            if f:IsA("Model") then
+                local okB, cf, sz = pcall(function() return f:GetBoundingBox() end)
+                if okB and cf then
+                    w(string.format("      bounds pos=(%.0f, %.0f, %.0f) size=(%.0f, %.0f, %.0f)",
+                        cf.Position.X, cf.Position.Y, cf.Position.Z,
+                        sz.X, sz.Y, sz.Z))
+                end
+                local okP, pv = pcall(function() return f:GetPivot() end)
+                if okP and pv then
+                    w(string.format("      pivot pos=(%.0f, %.0f, %.0f) look=(%.2f, %.2f, %.2f)",
+                        pv.Position.X, pv.Position.Y, pv.Position.Z,
+                        pv.LookVector.X, pv.LookVector.Y, pv.LookVector.Z))
+                end
+            end
+            local attrs = f:GetAttributes()
+            local ak = {}
+            for k in pairs(attrs) do ak[#ak + 1] = k end
+            table.sort(ak)
+            for _, k in ipairs(ak) do w("      attr." .. k .. " = " .. tostring(attrs[k])) end
+            local cfg = f:FindFirstChild("Configurations")
+            if cfg then
+                for _, v in ipairs(cfg:GetDescendants()) do
+                    local okV, val = pcall(function()
+                        return v:IsA("ValueBase") and v.Value or v.ClassName
+                    end)
+                    w("      cfg." .. v.Name .. " = " .. (okV and tostring(val) or "?"))
+                end
+            end
+            local seen = {}
+            for _, k in ipairs(f:GetChildren()) do
+                if not seen[k.Name] then seen[k.Name] = 0 end
+                seen[k.Name] += 1
+            end
+            local names = {}
+            for n, c in pairs(seen) do
+                names[#names + 1] = n .. (c > 1 and (" ×" .. c) or "")
+            end
+            table.sort(names)
+            local show = {}
+            for i, n in ipairs(names) do
+                if i > 20 then
+                    show[#show + 1] = "… +" .. (#names - 20) .. " more"
+                    break
+                end
+                show[#show + 1] = n
+            end
+            w("      child names: " .. table.concat(show, ", "))
+        end
+        w("  field models: " .. #fields:GetChildren())
+    end
+
+    -- FieldTile parts anywhere (cells for the future plow step)
+    w("  FieldTile parts (workspace-wide):")
+    local tiles, shown, union = 0, 0, {}
+    for _, d in ipairs(desc) do
+        if d:IsA("BasePart") and d.Name:find("FieldTile", 1, true) then
+            tiles += 1
+            for k, v in pairs(d:GetAttributes()) do union[k] = v end
+            if shown < 8 then
+                shown += 1
+                w(string.format("    · %s  pos=(%.0f, %.0f, %.0f)",
+                    d.Name, d.Position.X, d.Position.Y, d.Position.Z))
+            end
+        end
+    end
+    w("  total FieldTile parts: " .. tiles)
+    local uk = {}
+    for k in pairs(union) do uk[#uk + 1] = k end
+    table.sort(uk)
+    for _, k in ipairs(uk) do
+        w("    tile attr union: " .. k .. " = " .. tostring(union[k]))
+    end
+
+    -- my plot as the frame of reference (drive FROM here)
+    local plots = Workspace:FindFirstChild("Plots")
+    local plot = plots and plots:FindFirstChild("1")
+    if plot then
+        w("  my plot 1:")
+        local cfv = plot:FindFirstChild("CFrame")
+        if cfv and cfv:IsA("CFrameValue") then
+            local v = cfv.Value
+            w(string.format("    CFrameValue pos=(%.0f, %.0f, %.0f)",
+                v.Position.X, v.Position.Y, v.Position.Z))
+        end
+        local fp = plot:FindFirstChild("FrontPlot")
+        if fp and fp:IsA("BasePart") then
+            w(string.format("    FrontPlot pos=(%.0f, %.0f, %.0f)",
+                fp.Position.X, fp.Position.Y, fp.Position.Z))
+        end
+    else
+        w("  my plot 1 NOT FOUND")
+    end
 end)
 
 w("")
