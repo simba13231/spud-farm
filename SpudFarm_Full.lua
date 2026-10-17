@@ -445,57 +445,28 @@ local okBuild, errBuild = pcall(function()
         return moved > 2.5, moved
     end
 
-    -- ▸ step 6 (user request): after the sweep, PARK the plow at the FRONT
-    --   of my plot — tween there (glideTractor) and press X once, the same
-    --   proven toggle used to hitch. Verified by a tug: the plow must NOT
-    --   follow. (Option 2, despawning via the equipment manager, would need
-    --   a remote we've never confirmed — avoided.)
-    local function dropPlowAtPlotFront(tr, plow, field)
-        -- my plot = owner match, else the nearest plot to my field
-        local plots = workspace:FindFirstChild("Plots")
-        local best, bestDist
-        for _, d in ipairs(plots and plots:GetChildren() or {}) do
-            if d:IsA("Model") then
-                local cfg = d:FindFirstChild("Configurations")
-                local owner = cfg and cfg:FindFirstChild("Owner")
-                local dist = (d:GetPivot().Position - field:GetPivot().Position).Magnitude
-                if owner and owner.Value == LocalPlayer then
-                    best = d
-                    break
-                end
-                if not bestDist or dist < bestDist then best, bestDist = d, dist end
-            end
-        end
-        if not best then
-            log("parking the plow: no plot found — leaving it hitched")
-            return false
-        end
-        local front = best:FindFirstChild("FrontPlot")
-        local target
-        if front and (front:IsA("BasePart") or front:IsA("Model")) then
-            target = front:GetPivot().Position
-        end
-        if not target then
-            target = best:GetPivot().Position
-            log("parking the plow: no FrontPlot marker — using the plot center")
-        end
-        log(string.format("parking the plow: tweening to the plot front (%.0f studs)",
-            (tr:GetPivot().Position - target).Magnitude))
+    -- ▸ step 6 (user request v2): after the sweep, UNHITCH the tool WHERE
+    --   IT CAME FROM — tween back to the exact spot it was found at
+    --   (origin captured at hitch time), then press X — the same proven
+    --   toggle used to hitch, tug-verified. (v1 parked at the plot front;
+    --   the equipment-manager despawn was rejected: unconfirmed remote.)
+    local function dropPlowAtOrigin(tr, plow, originPos)
+        log(string.format("parking the plow: tweening back to where it came from (%.0f studs)",
+            (tr:GetPivot().Position - originPos).Magnitude))
         for pass = 1, 20 do -- glideTractor covers ~60 studs per call
             if stopping() then return false end
             local p = tr:GetPivot().Position
-            if (Vector3.new(p.X, 0, p.Z) - Vector3.new(target.X, 0, target.Z)).Magnitude <= 6 then
+            if (Vector3.new(p.X, 0, p.Z) - Vector3.new(originPos.X, 0, originPos.Z)).Magnitude <= 5 then
                 break
             end
-            glideTractor(tr, Vector3.new(target.X, p.Y, target.Z))
+            glideTractor(tr, Vector3.new(originPos.X, p.Y, originPos.Z))
             task.wait(0.2)
         end
         if stopping() then return false end
-        -- X-unhitch is PROXIMITY-gated like hitching (first attempt failed
-        -- with the plow still trailing/whipping ~10 studs behind after the
-        -- tween): line up ON the plow's hitch — the exact pose the game
-        -- accepts — let it settle, THEN press X. Prove with a tug:
-        -- attached = plow follows, parked = plow stays put.
+        -- X-unhitch is PROXIMITY-gated like hitching: line up ON the
+        -- plow's hitch — the exact pose the game accepts — let it settle,
+        -- THEN press X. Prove with a tug: attached = plow follows,
+        -- parked = plow stays put.
         for attempt = 1, 3 do
             local lined = lineUpHitch(tr, plow)
             if not lined then log("park: hitch line-up parts missing — pressing X anyway") end
@@ -513,13 +484,13 @@ local okBuild, errBuild = pcall(function()
             if stopping() then return false end
             local followed = (plow:GetPivot().Position - before).Magnitude
             if followed <= 2 then
-                log(string.format("✅ plow parked at the plot front (X, attempt %d — plow stayed put)", attempt))
+                log(string.format("✅ tool parked where it came from (X, attempt %d — stayed put)", attempt))
                 return true
             end
-            log(string.format("unhitch attempt %d: plow still follows (%.1f studs) — re-lining up, X again",
+            log(string.format("unhitch attempt %d: still follows (%.1f studs) — re-lining up, X again",
                 attempt, followed))
         end
-        log("⚠ plow still attached after 3 presses — unhitch manually with X")
+        log("⚠ still attached after 3 presses — unhitch manually with X")
         return false
     end
 
@@ -1072,6 +1043,10 @@ local okBuild, errBuild = pcall(function()
             log("pull it out of the Equipment Manager in-game first, then run again")
             return
         end
+        -- remember WHERE the tool was found: after the sweep it gets
+        -- unhitched back at THIS spot (user: "unhitch the tools where
+        -- they came from")
+        local plowOrigin = plow:GetPivot().Position
         log("hitch target: " .. plow.Name .. string.format(" (%.0f studs)", pdist or 0))
 
         -- the HUD label alone can be stale (dump-proven: it said "S4204"
@@ -1171,10 +1146,11 @@ local okBuild, errBuild = pcall(function()
             log("plow pass aborted (" .. tostring(why) .. ")")
         end
 
-        -- ▸ step 6: park the plow at the plot front (only after a COMPLETED
-        --   sweep with the plow still attached — aborted runs leave it be)
+        -- ▸ step 6: unhitch the tool WHERE IT CAME FROM (only after a
+        --   COMPLETED sweep with the plow still attached — aborted runs
+        --   leave it hitched)
         if plowed and plow and plow:IsDescendantOf(workspace) then
-            dropPlowAtPlotFront(tr, plow, field)
+            dropPlowAtOrigin(tr, plow, plowOrigin)
         end
     end
 
