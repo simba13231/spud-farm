@@ -466,20 +466,36 @@ local okBuild, errBuild = pcall(function()
     -- forward-declared so driveToField below can use it (defined later)
     local driveLegKeys
 
+    -- the field's REAL frame: the plate's CFrame + Size. A rotated plate's
+    -- axis-aligned bounding box is bigger than the field AND at the wrong
+    -- angle (the snake then cuts across the ridges — user screenshot
+    -- confirmed: bars ran perpendicular to the plowed rows). AABB is only
+    -- the last-resort fallback.
+    local function fieldFrame(field)
+        local plate = field:FindFirstChild("Plate")
+        if not (plate and plate:IsA("BasePart")) then plate = field.PrimaryPart end
+        if plate and plate:IsA("BasePart") then return plate.CFrame, plate.Size end
+        local okB, cf, sz = pcall(function() return field:GetBoundingBox() end)
+        if okB and cf then return cf, sz end
+        return nil
+    end
+
     -- to the NEAREST CORNER of the field (user: start at a corner, not the
     -- center) — 4 studs inside the edge; arrive within 6 studs of it. Drives
     -- with REAL keys now: the old glide (PivotTo steps at ~30 studs/s) WHIPPED
     -- the hitched plow — video showed it bouncing/tumbling the whole transit.
     -- Glide stays only as the fallback if keys can't move the tractor.
     local function driveToField(tr, field, seat)
-        local okB, cf, sz = pcall(function() return field:GetBoundingBox() end)
-        if not (okB and cf) then return false, "no bounds" end
-        local cx, cz = cf.Position.X, cf.Position.Z
-        local hx, hz = math.max(sz.X / 2 - 4, 2), math.max(sz.Z / 2 - 4, 2)
-        local p0 = tr:GetPivot().Position
-        local goal = Vector3.new(
-            cx + (p0.X >= cx and hx or -hx), 0,  -- nearest corner,
-            cz + (p0.Z >= cz and hz or -hz))      -- 4 studs inside
+        local baseCF, baseSize = fieldFrame(field)
+        if not baseCF then return false, "no bounds" end
+        local c = baseCF.Position
+        local rx = Vector3.new(baseCF.RightVector.X, 0, baseCF.RightVector.Z).Unit
+        local rz = Vector3.new(baseCF.LookVector.X, 0, baseCF.LookVector.Z).Unit
+        local p0 = tr:GetPivot().Position - c
+        -- nearest corner along the plate's OWN axes, 4 studs inside
+        local goal = c
+            + rx * math.max(baseSize.X / 2 - 4, 2) * (p0:Dot(rx) >= 0 and 1 or -1)
+            + rz * math.max(baseSize.Z / 2 - 4, 2) * (p0:Dot(rz) >= 0 and 1 or -1)
         log(string.format("field corner target: (%.0f, %.0f)", goal.X, goal.Z))
         local useKeys = driveLegKeys ~= nil
         for pass = 1, 8 do
@@ -680,16 +696,19 @@ local okBuild, errBuild = pcall(function()
     end
 
     local function plowTheField(tr, field, seat)
-        local okB, cf, sz = pcall(function() return field:GetBoundingBox() end)
-        if not (okB and cf) then return false, "no bounds" end
-        local c = cf.Position
-        local alongX = sz.X <= sz.Z
-        local driveHalf = (alongX and sz.X or sz.Z) / 2 + 6 -- +6: plow trails
-        local rowSpan   = (alongX and sz.Z or sz.X)
+        local baseCF, baseSize = fieldFrame(field)
+        if not baseCF then return false, "no bounds" end
+        local c = baseCF.Position
+        local rx = Vector3.new(baseCF.RightVector.X, 0, baseCF.RightVector.Z).Unit
+        local rz = Vector3.new(baseCF.LookVector.X, 0, baseCF.LookVector.Z).Unit
+        local alongX = baseSize.X <= baseSize.Z
+        local driveDir = alongX and rx or rz   -- unit world dir of the pass axis
+        local stepDir  = alongX and rz or rx   -- unit world dir of the row step
+        local driveHalf = (alongX and baseSize.X or baseSize.Z) / 2 + 6 -- +6: plow trails
+        local rowSpan   = (alongX and baseSize.Z or baseSize.X)
         local rows = math.max(math.floor(rowSpan / 10 + 0.5), 1)
-        local function pt(along, step)
-            if alongX then return Vector3.new(c.X + along, 0, c.Z + step) end
-            return Vector3.new(c.X + step, 0, c.Z + along)
+        local function pt(along, step) -- field-local (along, step) → world
+            return c + driveDir * along + stepDir * step
         end
         local before, total = countPlowedCells(field)
         log(string.format("plowing: %d rows × %d studs  (%s)", rows, driveHalf * 2,
@@ -721,8 +740,9 @@ local okBuild, errBuild = pcall(function()
         -- diagonals (v4 cut diagonals between far ends → triangular
         -- unplowed gaps, video-confirmed).
         local at = tr:GetPivot().Position
-        local endSide = ((alongX and at.X or at.Z) >= (alongX and c.X or c.Z)) and 1 or -1
-        local rowSide = ((alongX and at.Z or at.X) >= (alongX and c.Z or c.X)) and 1 or -1
+        local rel0 = at - c -- sides picked along the PLATE's axes, not world
+        local endSide = rel0:Dot(driveDir) >= 0 and 1 or -1
+        local rowSide = rel0:Dot(stepDir) >= 0 and 1 or -1
         local map = {}
         for r = 1, rows do
             local row = rowSide * (rowSpan / 2 - 5) - rowSide * (r - 1) * 10
