@@ -186,15 +186,31 @@ local okBuild, errBuild = pcall(function()
     end
 
     -- dump-confirmed: every equipment model carries an EquipmentType
-    -- attribute (Tractor/Plow/Planter/Cultivator/Harvester/Truck/Transport).
-    -- The plow = the one with EquipmentType "Plow" (S4204 for this user, but
-    -- match by TYPE so it survives selling/buying different models).
-    local function findPlow(nearPos, tractorModel)
+    -- attribute (Tractor/Plow/Planter/Cultivator/Harvester/Truck/Transport)
+    -- and cells move through Stage strings "Empty" -> "Plowed" ->
+    -- "Cultivated" -> ... — each transition fired by the game's OWN client
+    -- when the matching implement passes over the cell (user-confirmed:
+    -- the cultivator is auto on drive-over, same as the plow). Per-stage
+    -- remotes exist (EVTPlowFieldCell / EVTCultivateFieldCell) — the game
+    -- fires them itself; we never spoof.
+    local JOBS = {
+        { typeName = "Plow",       stage = "Empty",  verb = "plow",
+          past = "plowed",    prog = "plowing",    remote = "EVTPlowFieldCell" },
+        { typeName = "Cultivator", stage = "Plowed", verb = "cultivate",
+          past = "cultivated", prog = "cultivating", remote = "EVTCultivateFieldCell" },
+    }
+
+    -- the implement of a given TYPE (S4204 for this user's plow, KADL for
+    -- the cultivator) — match by TYPE so it survives selling/buying
+    -- different models; the KADL name is a belt-and-braces fallback in
+    -- case the attribute casing ever differs.
+    local function findImplement(typeName, nearPos, tractorModel)
         local folder = equipmentFolder()
         local best, bestDist
         for _, d in ipairs(folder and folder:GetChildren() or {}) do
             if d:IsA("Model") and d ~= tractorModel
-                and d:GetAttribute("EquipmentType") == "Plow" then
+                and (d:GetAttribute("EquipmentType") == typeName
+                    or (typeName == "Cultivator" and d.Name == "KADL")) then
                 local dist = (d:GetPivot().Position - nearPos).Magnitude
                 if not bestDist or dist < bestDist then
                     best, bestDist = d, dist
@@ -445,14 +461,13 @@ local okBuild, errBuild = pcall(function()
         return moved > 2.5, moved
     end
 
-    -- ▸ step 6 (user request v2): after the sweep, UNHITCH the tool WHERE
-    --   IT CAME FROM — tween back to the exact spot it was found at
-    --   (origin captured at hitch time), then press X — the same proven
-    --   toggle used to hitch, tug-verified. (v1 parked at the plot front;
-    --   the equipment-manager despawn was rejected: unconfirmed remote.)
-    local function dropPlowAtOrigin(tr, plow, originPos)
-        log(string.format("parking the plow: tweening back to where it came from (%.0f studs)",
-            (tr:GetPivot().Position - originPos).Magnitude))
+    -- ▸ after a sweep, UNHITCH the tool WHERE IT CAME FROM — tween back to
+    --   the exact spot it was found at (origin captured at hitch time),
+    --   then press X — the same proven toggle used to hitch, tug-verified.
+    --   Works for any implement (plow, cultivator, ...) by name.
+    local function dropImplementAtOrigin(tr, impl, originPos)
+        log(string.format("parking %s: tweening back to where it came from (%.0f studs)",
+            impl.Name, (tr:GetPivot().Position - originPos).Magnitude))
         for pass = 1, 20 do -- glideTractor covers ~60 studs per call
             if stopping() then return false end
             local p = tr:GetPivot().Position
@@ -464,25 +479,25 @@ local okBuild, errBuild = pcall(function()
         end
         if stopping() then return false end
         -- X-unhitch is PROXIMITY-gated like hitching: line up ON the
-        -- plow's hitch — the exact pose the game accepts — let it settle,
-        -- THEN press X. Prove with a tug: attached = plow follows,
-        -- parked = plow stays put.
+        -- tool's hitch — the exact pose the game accepts — let it settle,
+        -- THEN press X. Prove with a tug: attached = the tool follows,
+        -- parked = it stays put.
         for attempt = 1, 3 do
-            local lined = lineUpHitch(tr, plow)
+            local lined = lineUpHitch(tr, impl)
             if not lined then log("park: hitch line-up parts missing — pressing X anyway") end
-            task.wait(1) -- let the plow stop swinging after the move
+            task.wait(1) -- let the tool stop swinging after the move
             if stopping() then return false end
             pressKey(Enum.KeyCode.X)
             task.wait(0.7)
             if stopping() then return false end
-            local before = plow:GetPivot().Position
+            local before = impl:GetPivot().Position
             local pivot = tr:GetPivot()
             local fwd = Vector3.new(pivot.LookVector.X, 0, pivot.LookVector.Z)
             if fwd.Magnitude < 0.1 then fwd = Vector3.new(0, 0, -1) end
             glideTractor(tr, pivot.Position + fwd.Unit * 6)
             task.wait(0.6)
             if stopping() then return false end
-            local followed = (plow:GetPivot().Position - before).Magnitude
+            local followed = (impl:GetPivot().Position - before).Magnitude
             if followed <= 2 then
                 log(string.format("✅ tool parked where it came from (X, attempt %d — stayed put)", attempt))
                 return true
@@ -675,11 +690,12 @@ local okBuild, errBuild = pcall(function()
     end
 
     -- honest per-cell read via the game's OWN FieldHelper module (dump §26:
-    -- require() works even though Source is blocked) — returns how many
-    -- cells currently have Stage == "Plowed", out of the field's total,
-    -- and how many are NON-Empty (plowed/seeded/growing = "done").
-    local function countPlowedCells(field)
-        local ok, plowed, total, touched = pcall(function()
+    -- require() works even though Source is blocked) — returns a table of
+    -- per-Stage counts plus .total, e.g. { Empty = 50, total = 50 } on a
+    -- fresh field, { Plowed = 50, total = 50 } after the plow pass, then
+    -- { Cultivated = 50, total = 50 } after the cultivator.
+    local function countStages(field)
+        local ok, stages = pcall(function()
             local mods = game:GetService("ReplicatedStorage"):FindFirstChild("Modules")
             local F = mods and mods:FindFirstChild("FieldHelper")
             assert(F, "FieldHelper missing")
@@ -687,41 +703,54 @@ local okBuild, errBuild = pcall(function()
             assert(type(F.GetCells) == "function", "GetCells missing")
             local cells = F.GetCells(field)
             assert(type(cells) == "table", "GetCells returned no table")
-            local pl, tot, done = 0, 0, 0
+            local st = { total = 0 }
             for _, cell in pairs(cells) do
-                tot += 1
                 if type(cell) == "table" then
-                    if cell.Stage == "Plowed" then pl += 1 end
-                    if cell.Stage ~= "Empty" then done += 1 end
+                    st.total += 1
+                    local s = tostring(cell.Stage or "?")
+                    st[s] = (st[s] or 0) + 1
                 end
             end
-            return pl, tot, done
+            return st
         end)
-        if ok then return plowed, total, touched end
+        if ok then return stages end
         return nil
     end
 
-    -- WHICH field to plow: the nearest of mine with bare ("Empty") cells
-    -- left; every field's state is logged. Nothing left anywhere → nil,
-    -- "all done". A failed count read never disqualifies a field (it stays
-    -- eligible — never skip on unknown).
-    local function pickFieldToPlow(nearPos)
+    -- scan every field of mine ONCE (nearest-first) and say what work is
+    -- left: any bare cells (the PLOW's job) and any Plowed cells (the
+    -- CULTIVATOR's job). Every field's real state is logged. A failed
+    -- count read never disqualifies a field (unknown = work to try).
+    local function probeWork(nearPos)
         local crops = findMyFields(nearPos)
-        if #crops == 0 then return nil, "none" end
-        local pick
+        if #crops == 0 then return false, false end
+        local needPlow, needCult = false, false
         for _, m in ipairs(crops) do
-            local plowedN, totalN, doneN = countPlowedCells(m.d)
-            if plowedN and totalN and totalN > 0 then
-                log(string.format("%s: %d/%d cells non-Empty", m.d.Name, doneN, totalN))
-                if doneN < totalN and not pick then
-                    pick = m -- nearest unfinished field
-                end
+            local st = countStages(m.d)
+            if st and st.total > 0 then
+                local bare, plowedN = st.Empty or 0, st.Plowed or 0
+                log(string.format("%s: %d bare, %d plowed, %d total cells",
+                    m.d.Name, bare, plowedN, st.total))
+                if bare > 0 then needPlow = true end
+                if plowedN > 0 then needCult = true end
             else
-                log(m.d.Name .. ": cell count unavailable — treating as needing plow")
-                if not pick then pick = m end
+                log(m.d.Name .. ": cell count unavailable — treating as needing work")
+                needPlow, needCult = true, true
             end
         end
-        if pick then return pick.d, pick.typeName end
+        return needPlow, needCult
+    end
+
+    -- which field a pass works on: the nearest of mine with cells still at
+    -- the job's stage (bare for the plow, Plowed for the cultivator).
+    local function pickFieldNeeding(nearPos, stage)
+        local crops = findMyFields(nearPos)
+        for _, m in ipairs(crops) do
+            local st = countStages(m.d)
+            if not st or st.total == 0 or (st[stage] or 0) > 0 then
+                return m.d, m.typeName -- unknown counts stay eligible
+            end
+        end
         return nil, "all done"
     end
 
@@ -884,7 +913,7 @@ local okBuild, errBuild = pcall(function()
         table.clear(dbgParts)
     end
 
-    local function plowTheField(tr, field, seat)
+    local function sweepField(tr, field, seat, job)
         local baseCF, baseSize = fieldFrame(field)
         if not baseCF then return false, "no bounds" end
         local c = baseCF.Position
@@ -909,9 +938,10 @@ local okBuild, errBuild = pcall(function()
         local function pt(along, step) -- field-local (along, step) → world
             return c + driveDir * along + stepDir * step
         end
-        local before, total = countPlowedCells(field)
-        log(string.format("plowing: %d-ring spiral, outside-in  (%s)", rings,
-            before and string.format("%d/%d cells already Plowed", before, total)
+        local st0 = countStages(field)
+        local need0 = st0 and (st0[job.stage] or 0) or nil
+        log(string.format("%s: %d-ring spiral, outside-in  (%s)", job.verb, rings,
+            st0 and string.format("%d/%d cells still need %s", need0, st0.total, job.prog)
                 or "cell read unavailable"))
         local realDrive -- nil = not probed yet; true = seat driving; false = glide
         local function doLeg(from, goal, tol)
@@ -966,15 +996,17 @@ local okBuild, errBuild = pcall(function()
         end
         dbgClear()
         if stopping() then return nil end
-        local after, tot2 = countPlowedCells(field)
-        if after then
-            log(string.format("sweep done: %d/%d cells Plowed", after, tot2))
-            if tot2 > 0 and after >= tot2 then
-                log("✅ the whole field is plowed")
-            elseif before and after <= before then
-                log("cell count did NOT change — drive-over isn't plowing (next: the plow remote)")
+        local st1 = countStages(field)
+        if st1 then
+            local need1 = st1[job.stage] or 0
+            log(string.format("sweep done: %d/%d cells still need %s", need1, st1.total, job.prog))
+            if st1.total > 0 and need1 == 0 then
+                log("✅ the whole field is " .. job.past)
+            elseif need0 and need1 >= need0 then
+                log(string.format("cell count did NOT change — drive-over isn't %s (dump: %s would be next)",
+                    job.prog, job.remote))
             else
-                log("some cells left — run the loop again (plow may be narrower than one cell)")
+                log("some cells left — run the loop again (tool may be narrower than one cell)")
             end
         else
             log("sweep done — cell read unavailable, check the field visually")
@@ -992,18 +1024,14 @@ local okBuild, errBuild = pcall(function()
         local tr, dist, seat = findTractor()
         if not tr then log("tractor (ZM80) not found") return end
 
-        -- ▸ step 0: pick WHICH field needs plowing (ALL of mine are scanned,
-        --   including fields placed on my plots) — the nearest with bare
-        --   cells left. Every field's state is logged; when none is left,
-        --   the whole run is skipped before mount/hitch. Failed counts
-        --   never skip (unknown = proceed).
-        local field, ftype = pickFieldToPlow(tr:GetPivot().Position)
-        if not field then
-            if ftype == "all done" then
-                log("✅ plowing already done on every field — skipping the plow run")
-            else
-                log("no field of yours anywhere (Objects.Fields or your plots) — nothing to do")
-            end
+        -- ▸ step 0: what work is left? (ALL of my fields are scanned —
+        --   including fields placed on my plots — and each field's real
+        --   state is logged). Checked BEFORE mount so an idle run never
+        --   even walks to the tractor. Failed counts never skip (unknown
+        --   = work to try).
+        local needPlow, needCult = probeWork(tr:GetPivot().Position)
+        if not needPlow and not needCult then
+            log("✅ every field is plowed and cultivated — nothing to do")
             return
         end
         if stopping() then return end
@@ -1044,129 +1072,151 @@ local okBuild, errBuild = pcall(function()
             end
         end
 
-        -- ▸ step 3: hitch the plow (or PROVE it's already hitched)
         logEquipment() -- always show the names so we can confirm the pick
-        local tractorPos = tr:GetPivot().Position
-        local plow, pdist = findPlow(tractorPos, tr)
 
-        if not plow then
-            log("no equipment with EquipmentType=Plow found — see list above")
-            return
-        end
-        if plow:GetAttribute("InStorage") then
-            log(plow.Name .. " (the plow) is IN STORAGE — can't hitch it")
-            log("pull it out of the Equipment Manager in-game first, then run again")
-            return
-        end
-        -- remember WHERE the tool was found: after the sweep it gets
-        -- unhitched back at THIS spot (user: "unhitch the tools where
-        -- they came from")
-        local plowOrigin = plow:GetPivot().Position
-        log("hitch target: " .. plow.Name .. string.format(" (%.0f studs)", pdist or 0))
-
-        -- the HUD label alone can be stale (dump-proven: it said "S4204"
-        -- while the hitch points sat 9.5 studs apart) — if it claims a
-        -- hitch, PROVE it with a tug: plow must follow. Pass → skip
-        -- straight to drive. Fail → treat as unhitched, hitch normally.
-        local didHitch = false
-        local attached = hitchedImplementName()
-        if attached then
-            log("HUD says hitched (" .. attached .. ") — tug-verifying…")
-            local before = plow:GetPivot().Position
-            local pivot = tr:GetPivot()
-            local fwd = Vector3.new(pivot.LookVector.X, 0, pivot.LookVector.Z)
-            if fwd.Magnitude < 0.1 then fwd = Vector3.new(0, 0, -1) end
-            glideTractor(tr, pivot.Position + fwd.Unit * 4)
-            task.wait(0.4)
-            if stopping() then return end
-            local followed = (plow:GetPivot().Position - before).Magnitude
-            if followed > 2 then
-                log(string.format("✅ tug passed (%.1f studs) — plow is attached, skipping hitch", followed))
-                didHitch = true
-            else
-                log(string.format("label stale — plow didn't follow (%.1f studs) — hitching first", followed))
+        -- ONE implement pass: the nearest field still at the job's stage,
+        -- hitch THAT job's implement (tug-verified, origin remembered),
+        -- drive there, spiral sweep, then unhitch the tool WHERE IT CAME
+        -- FROM. Used twice below: the plow (bare -> Plowed), then the
+        -- cultivator (Plowed -> Cultivated) — same proven machinery.
+        local function runPass(job)
+            local field, ftype = pickFieldNeeding(tr:GetPivot().Position, job.stage)
+            if not field then
+                log("no field left needing " .. job.verb .. " — pass skipped")
+                return false
             end
-        end
+            log(string.format("%s pass: %s (nearest with %s cells)",
+                job.verb, field.Name, job.stage))
+            local impl, idist = findImplement(job.typeName, tr:GetPivot().Position, tr)
+            if not impl then
+                log("no equipment with EquipmentType=" .. job.typeName .. " found — see list above")
+                return false
+            end
+            if impl:GetAttribute("InStorage") then
+                log(impl.Name .. " (the " .. job.verb .. ") is IN STORAGE — can't hitch it")
+                log("pull it out of the Equipment Manager in-game first, then run again")
+                return false
+            end
+            -- remember WHERE the tool was found: after the sweep it gets
+            -- unhitched back at THIS spot (user: "unhitch the tools where
+            -- they came from")
+            local origin = impl:GetPivot().Position
+            log("hitch target: " .. impl.Name .. string.format(" (%.0f studs)", idist or 0))
 
-        if not didHitch then
-            -- user's plan: physical line-up of the hitch PARTS (fallback:
-            -- align+creep), then the game's Hitch prompt gates the X press.
-            -- Retry until the tug-test passes.
-            local attempt, forceCreep = 0, false
-            while not stopping() do
-                attempt += 1
-                if not (plow and plow:IsDescendantOf(workspace)) then
-                    log("plow disappeared (despawned?) — stopping retries")
-                    return
-                end
-                local backOff = math.min((attempt - 1) * 1.5, 6) -- widen stance on retries
-                local lined = false
-                if not forceCreep then
-                    lined = lineUpHitch(tr, plow, true) -- empty tractor: arc down onto the tool
-                end
-                if stopping() then return end
-                if not lined then
-                    alignToPlow(tr, plow, backOff)
-                end
-                if stopping() then return end
-                local crept = creepUntilPrompt(tr, 20, 1) -- up to 20 studs forward
-                if stopping() then return end
-                if not crept then
-                    log(string.format("attempt %d: hitch prompt never showed within 20 studs — re-aligning", attempt))
-                    if lined then
-                        -- parts found but prompt still dead: line-up pose is
-                        -- wrong for the game → stop trusting it, creep from now
-                        forceCreep = true
-                        log("line-up pose didn't satisfy the game — falling back to creep alignment")
-                    end
-                    task.wait(0.4)
+            -- the HUD label alone can be stale (dump-proven: it said "S4204"
+            -- while the hitch points sat 9.5 studs apart) — if it claims a
+            -- hitch, PROVE it with a tug: the tool must follow. Pass → skip
+            -- straight to drive. Fail → treat as unhitched, hitch normally.
+            local didHitch = false
+            local attached = hitchedImplementName()
+            if attached then
+                log("HUD says hitched (" .. attached .. ") — tug-verifying…")
+                local before = impl:GetPivot().Position
+                local pivot = tr:GetPivot()
+                local fwd = Vector3.new(pivot.LookVector.X, 0, pivot.LookVector.Z)
+                if fwd.Magnitude < 0.1 then fwd = Vector3.new(0, 0, -1) end
+                glideTractor(tr, pivot.Position + fwd.Unit * 4)
+                task.wait(0.4)
+                if stopping() then return false end
+                local followed = (impl:GetPivot().Position - before).Magnitude
+                if followed > 2 then
+                    log(string.format("✅ tug passed (%.1f studs) — attached, skipping hitch", followed))
+                    didHitch = true
                 else
-                    log(string.format("attempt %d: hitch prompt shows — pressing X", attempt))
-                    local hooked, moved = attemptHitch(tr, plow)
-                    if stopping() then return end
-                    if hooked then
-                        log(string.format("✅ hitched the plow (attempt %d)", attempt))
-                        didHitch = true
-                        break
-                    end
-                    log(string.format("attempt %d: X pressed but plow didn't follow (%.1f studs) — retrying",
-                        attempt, moved))
+                    log(string.format("label stale — the tool didn't follow (%.1f studs) — hitching first", followed))
                 end
             end
-            if not didHitch then return end -- killed (toggle off) or dead-ended
+
+            if not didHitch then
+                -- user's plan: physical line-up of the hitch PARTS (fallback:
+                -- align+creep), then the game's Hitch prompt gates the X press.
+                -- Retry until the tug-test passes.
+                local attempt, forceCreep = 0, false
+                while not stopping() do
+                    attempt += 1
+                    if not (impl and impl:IsDescendantOf(workspace)) then
+                        log("the tool disappeared (despawned?) — stopping retries")
+                        return false
+                    end
+                    local backOff = math.min((attempt - 1) * 1.5, 6) -- widen stance on retries
+                    local lined = false
+                    if not forceCreep then
+                        lined = lineUpHitch(tr, impl, true) -- empty tractor: arc down onto the tool
+                    end
+                    if stopping() then return false end
+                    if not lined then
+                        alignToPlow(tr, impl, backOff)
+                    end
+                    if stopping() then return false end
+                    local crept = creepUntilPrompt(tr, 20, 1) -- up to 20 studs forward
+                    if stopping() then return false end
+                    if not crept then
+                        log(string.format("attempt %d: hitch prompt never showed within 20 studs — re-aligning", attempt))
+                        if lined then
+                            -- parts found but prompt still dead: line-up pose is
+                            -- wrong for the game → stop trusting it, creep from now
+                            forceCreep = true
+                            log("line-up pose didn't satisfy the game — falling back to creep alignment")
+                        end
+                        task.wait(0.4)
+                    else
+                        log(string.format("attempt %d: hitch prompt shows — pressing X", attempt))
+                        local hooked, moved = attemptHitch(tr, impl)
+                        if stopping() then return false end
+                        if hooked then
+                            log(string.format("✅ hitched %s (attempt %d)", impl.Name, attempt))
+                            didHitch = true
+                            break
+                        end
+                        log(string.format("attempt %d: X pressed but the tool didn't follow (%.1f studs) — retrying",
+                            attempt, moved))
+                    end
+                end
+                if not didHitch then return false end -- killed (toggle off)
+            end
+
+            -- drive to the field (picked just above)
+            log("driving to field: " .. field.Name .. " (type " .. tostring(ftype) .. ")")
+            local arrived, how = driveToField(tr, field, hum.SeatPart, impl)
+            if stopping() then return false end
+            if arrived then
+                log("✅ reached the field" .. (type(how) == "number"
+                    and string.format(" (pass %d)", how) or ""))
+            else
+                log("couldn't reach the field (" .. tostring(how) .. ")")
+                return false
+            end
+            -- honest end-state: did the tool come along?
+            local tH, pH = findHitchPart(tr), findHitchPart(impl)
+            if tH and pH then
+                log(string.format("hitch gap at arrival: %.1f studs", (tH.Position - pH.Position).Magnitude))
+            end
+
+            -- the spiral sweep — the game stages cells over as the tool
+            -- passes over them (user-confirmed: same for plow and cultivator)
+            local swept, why = sweepField(tr, field, hum.SeatPart, job)
+            if stopping() then return false end
+            if not swept then
+                log(job.verb .. " pass aborted (" .. tostring(why) .. ")")
+                return false
+            end
+
+            -- unhitch the tool WHERE IT CAME FROM (only after a COMPLETED
+            -- sweep with it still attached — aborted passes leave it be)
+            if impl:IsDescendantOf(workspace) then
+                dropImplementAtOrigin(tr, impl, origin)
+            end
+            return true
         end
 
-        -- ▸ step 4: drive to the field (field picked back in step 0)
-        log("driving to field: " .. field.Name .. " (type " .. tostring(ftype) .. ")")
-        local arrived, how = driveToField(tr, field, hum.SeatPart, plow)
-        if stopping() then return end
-        if arrived then
-            log("✅ reached the field" .. (type(how) == "number"
-                and string.format(" (pass %d)", how) or ""))
-        else
-            log("couldn't reach the field (" .. tostring(how) .. ")")
-            return
+        -- ▸ steps 3-6: the plow pass (bare cells -> Plowed)
+        if needPlow then
+            runPass(JOBS[1])
+            if stopping() then return end
         end
-        -- honest end-state: did the plow come along?
-        local tH, pH = findHitchPart(tr), findHitchPart(plow)
-        if tH and pH then
-            log(string.format("hitch gap at arrival: %.1f studs", (tH.Position - pH.Position).Magnitude))
-        end
-
-        -- ▸ step 5: plow the field — serpentine sweep of every cell
-        --   (the game's client plows cells the implement passes over)
-        local plowed, why = plowTheField(tr, field, hum.SeatPart)
-        if stopping() then return end
-        if not plowed then
-            log("plow pass aborted (" .. tostring(why) .. ")")
-        end
-
-        -- ▸ step 6: unhitch the tool WHERE IT CAME FROM (only after a
-        --   COMPLETED sweep with the plow still attached — aborted runs
-        --   leave it hitched)
-        if plowed and plow and plow:IsDescendantOf(workspace) then
-            dropPlowAtOrigin(tr, plow, plowOrigin)
-        end
+        -- ▸ steps 7-10: the cultivate pass (Plowed -> Cultivated) — usually
+        --   the same field the plow pass just finished
+        runPass(JOBS[2])
     end
 
     -- ON = spawn the loop on its own thread; OFF = clear the thread id so
