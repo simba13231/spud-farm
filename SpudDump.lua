@@ -1271,6 +1271,280 @@ local ok, err = pcall(function()
     watch("EventEventDataUpdated")
     watch("EventConfigChanged")
     watch("EVTUpdateCropGrowthConfig")
+
+    ------------------------------------------------------------------
+    -- 26. CELL ENUMERATION — call FieldHelper's own API to list EVERY
+    --     cultivatable cell (encoded id + world position + stage), plus
+    --     a PASSIVE capture of what the client sends on the cell-action
+    --     remotes (log-only; the original call always passes through)
+    ------------------------------------------------------------------
+    local ok26, err26 = pcall(function()
+        header("CELL ENUMERATION (FieldHelper API)")
+        local function pv(v, depth)
+            depth = depth or 0
+            local t = typeof(v)
+            if t == "table" then
+                local n = 0
+                for _ in pairs(v) do n += 1 end
+                if depth >= 2 then return "table{" .. n .. "}" end
+                local sample, shown = "", 0
+                for k, val in pairs(v) do
+                    shown += 1
+                    if shown > 8 then sample = sample .. "…"; break end
+                    sample = sample .. tostring(k) .. "=" .. pv(val, depth + 1) .. " "
+                end
+                return "table{" .. n .. "} " .. sample
+            elseif t == "string" then
+                return string.format("string(%d) %q", #v, string.sub(v, 1, 50))
+            end
+            return t .. "(" .. string.sub(tostring(v), 1, 50) .. ")"
+        end
+        local function tryCall(label, fn, variants)
+            if type(fn) ~= "function" then
+                w("  " .. label .. ": not a function (" .. pv(fn) .. ")")
+                return nil
+            end
+            local errs = {}
+            for i, args in ipairs(variants) do
+                local pack = table.pack(pcall(fn, table.unpack(args)))
+                if pack[1] then
+                    local parts = {}
+                    for j = 2, pack.n do parts[#parts + 1] = pv(pack[j]) end
+                    w(string.format("  %s [args#%d] → %s", label, #args,
+                        table.concat(parts, ", ")))
+                    return pack
+                end
+                errs[#errs + 1] = "#" .. i .. ":" .. string.sub(tostring(pack[2]), 1, 45)
+            end
+            w("  " .. label .. " FAILED all variants (" .. table.concat(errs, " | ") .. ")")
+            return nil
+        end
+
+        local okFH, F = pcall(require, RS:FindFirstChild("FieldHelper", true))
+        if not (okFH and type(F) == "table") then
+            w("  require FieldHelper FAILED: " .. pv(F))
+            return
+        end
+
+        -- A. full export list (last dump capped at 40 → 7 keys were hidden)
+        local keys = {}
+        for k in pairs(F) do keys[#keys + 1] = tostring(k) end
+        table.sort(keys)
+        w("  FieldHelper keys (" .. #keys .. "): " .. table.concat(keys, ", "))
+
+        -- B. constants: the cell-state vocabulary
+        for _, cname in ipairs({ "CELL_STAGES", "STAGE_MASK", "SEED_TYPE" }) do
+            local t = F[cname]
+            if type(t) == "table" then
+                local parts = {}
+                for k, v in pairs(t) do
+                    parts[#parts + 1] = tostring(k) .. "=" .. tostring(v)
+                end
+                table.sort(parts)
+                w("  " .. cname .. " {" .. #parts .. "}:")
+                local line = ""
+                for _, p in ipairs(parts) do
+                    if #line + #p > 150 then w("     " .. line); line = "" end
+                    line = line .. p .. "  "
+                end
+                if #line > 0 then w("     " .. line) end
+            else
+                w("  " .. cname .. " = " .. pv(t))
+            end
+        end
+
+        local fieldM = fModel
+        w("  field: " .. (fieldM and fieldM.Name or "NOT FOUND"))
+        if not fieldM then return end
+
+        -- C. geometry + cell API (arg lists unknown → try variants)
+        local minP = Vector3.new(-1106, 166, -640)
+        local maxP = Vector3.new(-1056, 166, -540)
+        tryCall("GetFieldSize", F.GetFieldSize, { { fieldM }, {} })
+        tryCall("GetFieldTileSize", F.GetFieldTileSize, { {}, { fieldM } })
+        tryCall("CountFieldTiles", F.CountFieldTiles, { { fieldM }, {} })
+        tryCall("DefaultCell", F.DefaultCell, { {}, { fieldM } })
+        tryCall("IsField", F.IsField, { { fieldM }, { fieldM.PrimaryPart } })
+        tryCall("GetCells", F.GetCells, { { fieldM }, {} })
+        tryCall("ProbeCells", F.ProbeCells, { { fieldM }, {} })
+
+        -- world corner probes → which cell sits at each corner (orientation)
+        local corners = {
+            { "SW(-X,-Z)", minP + Vector3.new(1, 0, 1) },
+            { "SE(+X,-Z)", Vector3.new(maxP.X - 1, 166, minP.Z + 1) },
+            { "NW(-X,+Z)", Vector3.new(minP.X + 1, 166, maxP.Z - 1) },
+            { "NE(+X,+Z)", maxP - Vector3.new(1, 0, 1) },
+        }
+        local cornerCells = {}
+        for _, cn in ipairs(corners) do
+            local pack = tryCall("GetCellClosestTo " .. cn[1],
+                F.GetCellClosestTo,
+                { { fieldM, cn[2] }, { cn[2] }, { cn[2], fieldM } })
+            if pack then cornerCells[cn[1]] = pack[2] end
+        end
+
+        -- iterator: closure-style OR (table, idx)-style — try both states
+        local cellList = {}
+        local function iterDump(label, fn)
+            if type(fn) ~= "function" then
+                w("  " .. label .. " not a function: " .. pv(fn))
+                return
+            end
+            for _, combo in ipairs({ { nil, nil }, { fieldM, nil } }) do
+                local okIt, res = pcall(function()
+                    local c = 0
+                    for a, b, cc in fn, combo[1], combo[2] do
+                        c += 1
+                        if c <= 60 then
+                            w(string.format("  %s cell#%d: %s | %s | %s",
+                                label, c, pv(a), pv(b), pv(cc)))
+                        end
+                        if c == 1 then cellList[#cellList + 1] = a end
+                        if c >= 500 then w("  " .. label .. ": HARD CAP 500"); break end
+                    end
+                    return c
+                end)
+                if okIt then
+                    w(string.format("  %s total (state=%s): %s cells", label,
+                        combo[1] and "field" or "nil", tostring(res)))
+                    if tonumber(res) and tonumber(res) > 0 then return end
+                else
+                    w("  " .. label .. " (state=" .. (combo[1] and "field" or "nil")
+                        .. ") FAILED: " .. string.sub(tostring(res), 1, 80))
+                end
+            end
+        end
+        iterDump("IterFieldCells(field)", select(2, pcall(F.IterFieldCells, fieldM)))
+        local okIF, iterF = pcall(F.IterField, fieldM)
+        iterDump("IterField(field)", okIF and iterF or nil)
+
+        -- world CFrame for EVERY enumerated cell (find a working signature)
+        if #cellList > 0 then
+            local cands = {
+                function(cell) return fieldM, cell end,
+                function(cell) return cell end,
+                function(cell) return cell, fieldM end,
+            }
+            local build, testCf
+            for _, b in ipairs(cands) do
+                local okCf, cf = pcall(F.GetCellCFrame, b(cellList[1]))
+                if okCf and typeof(cf) == "CFrame" then build = b; testCf = cf; break end
+            end
+            if build then
+                w(string.format("  GetCellCFrame cell#1 → (%.1f, %.1f, %.1f)",
+                    testCf.Position.X, testCf.Position.Y, testCf.Position.Z))
+                for i, cell in ipairs(cellList) do
+                    local okCf, cf = pcall(F.GetCellCFrame, build(cell))
+                    if okCf and typeof(cf) == "CFrame" then
+                        w(string.format("  cell#%d world=(%.1f, %.1f, %.1f)",
+                            i, cf.Position.X, cf.Position.Y, cf.Position.Z))
+                    end
+                end
+            else
+                w("  GetCellCFrame: no arg pattern returned a CFrame")
+            end
+        end
+
+        -- D. decode the REAL CropAesthetics ids (the game's own cell ids)
+        local ca = Workspace:FindFirstChild("GameplayVisuals")
+            and Workspace.GameplayVisuals:FindFirstChild("CropAesthetics")
+        local ids = {}
+        if ca then
+            for _, d in ipairs(ca:GetChildren()) do
+                local num = tonumber(d.Name:match("(%d+)$"))
+                if num then ids[#ids + 1] = num end
+            end
+            table.sort(ids)
+        end
+        w("  CropAesthetics ids (" .. #ids .. "): " .. table.concat(ids, ", "))
+        local idSet = {}
+        for _, id in ipairs(ids) do idSet[id] = true end
+        for _, id in ipairs(ids) do
+            tryCall("DecodeCoordinate(" .. id .. ")", F.DecodeCoordinate, { { id } })
+        end
+
+        -- E. encode sweeps: which (axis1×axis2, base) reproduces the ids
+        local function enc(a, b)
+            local okE, id = pcall(F.EncodeCoordinate, a, b)
+            if okE and type(id) == "number" then return id end
+            okE, id = pcall(F.EncodeCoordinate, fieldM, a, b)
+            if okE and type(id) == "number" then return id end
+            return nil
+        end
+        w(string.format("  encode samples: (0,0)=%s (1,0)=%s (0,1)=%s (1,1)=%s",
+            tostring(enc(0, 0)), tostring(enc(1, 0)),
+            tostring(enc(0, 1)), tostring(enc(1, 1))))
+        local sweeps = {
+            { "axis1=0..4, axis2=0..9 (0-based)", 0, 4, 0, 9 },
+            { "axis1=1..5, axis2=1..10 (1-based)", 1, 5, 1, 10 },
+            { "axis1=0..9, axis2=0..4 (swapped 0)", 0, 9, 0, 4 },
+            { "axis1=1..10, axis2=1..5 (swapped 1)", 1, 10, 1, 5 },
+        }
+        local best, bestHits = 0, -1
+        for i, s in ipairs(sweeps) do
+            local hits, total = 0, 0
+            for a = s[2], s[3] do
+                for b = s[4], s[5] do
+                    total += 1
+                    local id = enc(a, b)
+                    if id and idSet[id] then hits += 1 end
+                end
+            end
+            w(string.format("  sweep %s → %d/%d match CropAesthetics",
+                s[1], hits, total))
+            if hits > bestHits then best, bestHits = i, hits end
+        end
+
+        -- F. the computed grid: EVERY cultivatable cell, world position
+        --    (field 50×100 → 5 cols along X × 10 rows along Z, 10×10 studs)
+        local mapFn
+        if best == 1 then mapFn = function(c, r) return enc(c - 1, r - 1) end
+        elseif best == 2 then mapFn = function(c, r) return enc(c, r) end
+        elseif best == 3 then mapFn = function(c, r) return enc(r - 1, c - 1) end
+        elseif best == 4 then mapFn = function(c, r) return enc(r, c) end
+        else mapFn = function() return nil end end
+        w("  computed grid (5 cols(X) × 10 rows(Z), 10×10 studs, ids via best sweep):")
+        for r = 1, 10 do
+            local parts = {}
+            for c = 1, 5 do
+                parts[#parts + 1] = string.format("id=%s @(%.0f,%.0f)",
+                    tostring(mapFn(c, r) or "?"), -1111 + c * 10, -645 + r * 10)
+            end
+            w(string.format("     Z=%d : %s", -645 + r * 10, table.concat(parts, "  ")))
+        end
+
+        -- G. crop growth config (durations per crop/stage)
+        local okG, CG = pcall(require, RS:FindFirstChild("CropGrowthConfigClient", true))
+        if okG and type(CG) == "table" then
+            tryCall("CropGrowthConfigClient.GetConfig()", CG.GetConfig, { {} })
+        else
+            w("  require CropGrowthConfigClient FAILED: " .. pv(CG))
+        end
+
+        -- H. PASSIVE outgoing capture: the game's own client fires these
+        --    remotes when YOU plow/seed/harvest a cell. Do ONE of those
+        --    manually → [CELLACTION …] lines land in the executor console.
+        --    Log-only; the original call always passes through (pcall).
+        local okHook, hookErr = pcall(function()
+            local old
+            old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+                local nm = self.Name
+                local meth = getnamecallmethod()
+                if (meth == "FireServer" or meth == "InvokeServer")
+                    and (nm == "EVTPlowFieldCell" or nm == "EVTCultivateFieldCell"
+                        or nm == "FNCSeedFieldCell" or nm == "FNCHarvestFieldCell") then
+                    pcall(summarize, "[CELLACTION " .. nm .. "]", ...)
+                end
+                return old(self, ...)
+            end))
+        end)
+        w(okHook and ("  outgoing-capture ON: plow/seed/harvest ONE cell manually"
+                .. " → [CELLACTION …] in the EXECUTOR console")
+            or ("  outgoing-capture FAILED: " .. string.sub(tostring(hookErr), 1, 100)))
+    end)
+    if not ok26 then
+        w("NOTE: §26 stopped: " .. string.sub(tostring(err26), 1, 120))
+    end
 end)
 
 w("")
