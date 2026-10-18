@@ -1,49 +1,24 @@
 --------------------------------------------------------------------
--- SpudCapture — RESPAWN REMOTE ARGS (§29) with its own DEBUG GUI
--- v6: A/B RUN — hooks OFF (CAPTURE_HOOKS = false). v5's screenshot
--- proved the menu opens with ZERO cards while the namecall hook runs
--- (video without the script: 7 cards) → the hook is isolated as the
--- suspect (likely InvokeServer returns dying through the hook chain,
--- e.g. FNCGetEquipmentCarryInfo — already caught once, 0 args).
--- THIS RUN = window + pill + card counter ONLY. REJOIN FIRST (older
--- runs' hooks persist until rejoin). Result decides the next fix:
--- cards back → capture via a hook-free/safer method; still empty →
--- look elsewhere.
--- v5: COLLAPSE-TO-PILL + MENU CARD COUNTER.
---   * user report: "it makes the tractor and tools in the ui go away
---     and i dont see them" — v4 spawned 440×300 DEAD CENTRE at
---     DisplayOrder 9999, exactly on top of the Equipment Manager's
---     card grid. v5 STARTS COLLAPSED as a small pill (bottom-left);
---     nothing covers the menu. Tap the pill to expand, "–" to
---     collapse, ✕ to close. The pill shows the live line count.
---   * SELF-DIAGNOSTIC: when GarageMenu opens the script COUNTS the
---     cards itself and flashes "MENU: N CARDS" (green) / "MENU: 0
---     CARDS" (red) on pill + status chip + console. N>0 = cards were
---     only being COVERED before; N=0 = menu really empty (then the
---     hook is the suspect, not the window).
--- v4 fixes stay: window lives in gethui()/CoreGui (games sweep
--- unknown PlayerGui ScreenGuis), 2s alive/vanished watchdog,
--- pcall'd build with console-only fallback, boot line first.
+-- SpudCapture — RESPAWN REMOTE ARGS (§29 v7, HOOK-FREE)
+--
+-- v6 A/B RESULT (user: "it wroks now"): with NO namecall hook the
+-- Equipment Manager's card list works again → the hook was proven
+-- guilty (it killed InvokeServer data returns the cards depend on).
+-- v7 therefore installs NO hook at all. Instead it uses the hook-free
+-- path: when you expand a card, the Spawn button's OWN click handler
+-- connections are read (getconnections) and the handler's UPVALUES
+-- are printed (debug.getupvalues) — the game's module-scope remote
+-- reference (FNCRespawnEquipment) and selected-vehicle state live in
+-- there. Read-only; cannot affect game data.
 --
 -- RUN: loadstring(game:HttpGet("…/SpudCapture.lua"))()
--- Then: collapse (–) → your video's 3 clicks (menu → ZM80 card →
--- Spawn) → expand → COPY → paste it back.
--- Changes NO game state — it only watches.
+-- FLOW: open the Equipment Manager → click the ZM80 card (expand) →
+-- the pill flashes "SPAWN: n handler(s) read" → expand the pill →
+-- press COPY → paste it back. Rejoin NOT required (no hooks).
 --------------------------------------------------------------------
 
-print("[SpudCapture] boot v6 — building capture window")
+print("[SpudCapture] boot v7 — hook-free capture")
 
--- ▸ A/B SWITCH: with the namecall hook ON, the Equipment Manager's
---   card list went EMPTY (v5 screenshot — menu open, zero cards; the
---   video without the script showed 7). Prime suspect: InvokeServer
---   returns (data loads like FNCGetEquipmentCarryInfo) dying as they
---   yield through the hook chain. THIS RUN: hooks OFF — window + pill
---   + card counter only. REJOIN BEFORE TESTING (older runs' hooks
---   persist until rejoin and would pollute the test).
-local CAPTURE_HOOKS = false
-
-_G.SpudCaptureSeq = (_G.SpudCaptureSeq or 0) + 1
-local mySeq = _G.SpudCaptureSeq
 local lines = _G.SpudCaptureLog or {}
 _G.SpudCaptureLog = lines
 
@@ -56,6 +31,19 @@ local function mk(class, props, parent)
     o.Parent = parent
     return o
 end
+
+-- ▸ CAPABILITIES (printed first — decides if the read is possible) --
+local hasGetConn = pcall(function()
+    assert(type(getconnections) == "function", "no getconnections")
+end)
+local hasDebug = pcall(function()
+    assert(type(debug) == "table"
+        and (type(debug.getupvalues) == "function"
+            or type(debug.getupvalue) == "function"), "no debug upvalues")
+end)
+print("[SpudCapture] getconnections: " .. (hasGetConn and "yes"
+    or "NO — handler read unavailable"))
+print("[SpudCapture] debug upvalues: " .. (hasDebug and "yes" or "NO"))
 
 -- ▸ WHERE THE WINDOW LIVES: gethui() → CoreGui → PlayerGui fallback
 local holder, holderName
@@ -95,11 +83,10 @@ local okBuild, errBuild = pcall(function()
         DisplayOrder = 9999,
     }, holder)
 
-    -- the pill: small, bottom-left, always out of the menu's way
     pill = mk("TextButton", {
         AnchorPoint = Vector2.new(0, 1),
         Position = UDim2.new(0, 14, 1, -48),
-        Size = UDim2.fromOffset(190, 32),
+        Size = UDim2.fromOffset(210, 32),
         BackgroundColor3 = Color3.fromRGB(31, 31, 31),
         BorderSizePixel = 0,
         Text = "SPAWN CAPTURE (0)",
@@ -219,7 +206,7 @@ local okBuild, errBuild = pcall(function()
 
     refresh = function()
         logLabel.Text = table.concat(lines, "\n")
-        if pill.Visible and flashTok == 0 then -- never clobber a MENU: N CARDS flash
+        if pill.Visible and flashTok == 0 then -- never clobber a flash
             pill.Text = "SPAWN CAPTURE (" .. #lines .. ")"
         end
     end
@@ -227,7 +214,7 @@ local okBuild, errBuild = pcall(function()
     pill.MouseButton1Click:Connect(function() setExpanded(true) end)
     collapseBtn.MouseButton1Click:Connect(function() setExpanded(false) end)
     closeBtn.MouseButton1Click:Connect(function()
-        gui:Destroy() -- the console [SPAWNWATCH …] backup keeps working
+        gui:Destroy() -- lines stay in _G, console backup unaffected
     end)
 
     copyBtn.MouseButton1Click:Connect(function()
@@ -272,12 +259,11 @@ local okBuild, errBuild = pcall(function()
 end)
 if not okBuild then
     warn("[SpudCapture] ✘ WINDOW BUILD FAILED: " .. tostring(errBuild))
-    warn("[SpudCapture] falling back to CONSOLE-ONLY — watch [SPAWNWATCH …] lines")
+    warn("[SpudCapture] falling back to CONSOLE-ONLY — watch [SPAWNBTN …] lines")
 end
 
 task.delay(2, function()
-    if not pill and not status then return end -- build failed: console-only
-    local gui = pill and pill.Parent or (status and status:FindFirstAncestorWhichIsA("ScreenGui"))
+    local gui = pill and pill.Parent
     if not gui then return end
     if not gui.Parent then
         warn("[SpudCapture] ✘ window VANISHED after 2s — something destroyed it")
@@ -290,7 +276,7 @@ local function refreshSafe()
     if refresh then pcall(refresh) end
 end
 
--- ▸ STATUS FLASH (also answers the "cards gone" question) ----------
+-- ▸ STATUS FLASH --------------------------------------------------
 flashTok = 0
 local function restoreBase()
     if pill then
@@ -320,105 +306,126 @@ local function flash(msg, good)
     end)
 end
 
--- ▸ ARG PRINTER (dump §28's summarize, returns the string) ---------
-local function summarizeArgs(...)
-    local parts = {}
-    for i, v in ipairs({...}) do
-        local t = typeof(v)
-        local s
-        if t == "table" then
-            local n = 0
-            for _ in pairs(v) do n += 1 end
-            s = "table{" .. n .. "}: "
-            local shown = 0
-            for k, val in pairs(v) do
-                shown += 1
-                if shown > 8 then s = s .. "…"; break end
-                s = s .. tostring(k) .. "=" .. tostring(val) .. " "
-            end
-        elseif t == "string" then
-            s = string.format("string(%d) %q", #v, string.sub(v, 1, 200))
-        elseif t == "Instance" then
-            s = "Instance " .. v:GetFullName()
-        else
-            s = t .. "=" .. tostring(v)
-        end
-        parts[#parts + 1] = "[" .. i .. "] " .. s
-    end
-    return table.concat(parts, "  ")
-end
-
-local KEYS = { "respawn", "spawn", "store", "equip", "garage",
-    "manager", "select", "hitch" }
-local MODELS = { "ZM80", "KADL", "KQF3000", "SRC6", "R150", "S4204", "Trailer" }
-
-local function interesting(nm, ...)
-    local nml = nm:lower()
-    for _, k in ipairs(KEYS) do
-        if nml:find(k, 1, true) then return true end
-    end
-    for _, a in ipairs({...}) do
-        if type(a) == "string" then
-            for _, m in ipairs(MODELS) do
-                if a:find(m, 1, true) then return true end
-            end
-        end
-    end
-    return false
-end
-
-local function addLine(method, nm, ...)
-    if mySeq ~= _G.SpudCaptureSeq then return end -- an older run's hook stays silent
-    local s = string.format("#%d [SPAWNWATCH %s %s] %s",
-        #lines + 1, method, nm, summarizeArgs(...))
-    lines[#lines + 1] = s
-    warn(s) -- console backup, in case the window is closed
+local function pushLine(text)
+    lines[#lines + 1] = text
+    warn(text) -- console backup too
     refreshSafe()
 end
 
-local hookMsg
-if CAPTURE_HOOKS then
-    local okHook, errHook = pcall(function()
-        local oldHook
-        oldHook = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
-            local nm, meth = tostring(self.Name), getnamecallmethod()
-            if (meth == "FireServer" or meth == "InvokeServer")
-                and interesting(nm, ...) then
-                pcall(addLine, meth, nm, ...)
-            end
-            return oldHook(self, ...)
-        end))
-    end)
-    baseText = okHook and "CAPTURE ON" or "HOOK FAILED"
-    baseColor = okHook and Color3.fromRGB(60, 200, 110)
-        or Color3.fromRGB(240, 80, 80)
-    hookMsg = okHook and "capture: ✔ ON — collapse (–) → 3 clicks → expand → COPY"
-        or ("capture: ✘ hook FAILED: " .. tostring(errHook))
-    if not okHook then
-        warn("[SPAWNWATCH] hook FAILED: " .. tostring(errHook))
+-- ▸ VALUE DESCRIPTOR (upvalue printer, depth-capped) ---------------
+local function desc(v, depth)
+    depth = depth or 0
+    local t = typeof(v)
+    if t == "Instance" then
+        local okN, full = pcall(function() return v:GetFullName() end)
+        return "Instance " .. (okN and full or tostring(v.Name))
+    elseif t == "table" then
+        if depth >= 2 then return "table{…}" end
+        local n = 0
+        for _ in pairs(v) do n += 1 end
+        local parts, shown = {}, 0
+        for k, val in pairs(v) do
+            shown += 1
+            if shown > 8 then parts[#parts + 1] = "…"; break end
+            parts[#parts + 1] = tostring(k) .. "=" .. desc(val, depth + 1)
+        end
+        return "table{" .. n .. "}: " .. table.concat(parts, ", ")
+    elseif t == "string" then
+        return string.format("string(%d) %q", #v, string.sub(v, 1, 140))
+    else
+        return t .. "=" .. tostring(v)
     end
-else
-    baseText = "HOOKS OFF (A/B)"
-    baseColor = Color3.fromRGB(240, 170, 60)
-    hookMsg = "capture: ○ OFF on purpose (A/B run) — window + card counter only"
-    warn("[SpudCapture] hooks DISABLED (A/B) — nothing will be captured;"
-        .. " open the Equipment Manager and check the CARD LIST")
 end
-restoreBase()
 
--- ▸ MENU CARD COUNTER — when the Equipment Manager opens, count the
---   cards: N>0 = they were only being COVERED before; N=0 = the menu
---   is really empty (then the hook, not the window, is the suspect)
+local function readUpvalues(fn)
+    local out = {}
+    local okT, res = pcall(function() return debug.getupvalues(fn) end)
+    if okT and type(res) == "table" and res[1] then
+        for i, u in ipairs(res) do
+            out[i] = { name = u.name or ("?" .. i), value = u.value }
+        end
+        return out
+    end
+    pcall(function()
+        for i = 1, 64 do
+            local nm, val = debug.getupvalue(fn, i)
+            if not nm then break end
+            out[#out + 1] = { name = nm, value = val }
+        end
+    end)
+    return out
+end
+
+-- ▸ THE SPAWN BUTTON READER — no hooks, pure reads -----------------
+local spawnAnalyzed = false
+local function analyzeSpawn(btn)
+    if spawnAnalyzed then return end
+    spawnAnalyzed = true
+    local okN, full = pcall(function() return btn:GetFullName() end)
+    pushLine("[SPAWNBTN] Spawn button: " .. (okN and full or btn.Name))
+
+    if not hasGetConn then
+        pushLine("[SPAWNBTN] getconnections NOT available — handlers unreadable")
+        flash("SPAWN: no getconnections", false)
+        return
+    end
+
+    local events = { "Activated", "MouseButton1Click", "MouseButton1Down", "InputBegan" }
+    local fns = {} -- fn -> { event names }
+    for _, ev in ipairs(events) do
+        local okC, conns = pcall(function() return getconnections(btn[ev]) end)
+        if okC and conns then
+            for _, c in ipairs(conns) do
+                local f = c.Function
+                if f then
+                    fns[f] = fns[f] or {}
+                    table.insert(fns[f], ev)
+                end
+            end
+        end
+    end
+
+    if next(fns) == nil then
+        pushLine("[SPAWNBTN] no connections on the button itself (handler may live on a parent)")
+        flash("SPAWN: 0 connections", false)
+        return
+    end
+
+    local nFn = 0
+    for f, evs in pairs(fns) do
+        nFn += 1
+        pushLine("[SPAWNBTN] handler " .. tostring(f) .. " on " .. table.concat(evs, "+"))
+        if hasDebug then
+            local uvs = readUpvalues(f)
+            if #uvs == 0 then
+                pushLine("[SPAWNBTN]   (handler has no upvalues)")
+            end
+            for i, u in ipairs(uvs) do
+                pushLine(string.format("[SPAWNBTN]   [%d] %s = %s",
+                    i, u.name, desc(u.value)))
+            end
+        else
+            pushLine("[SPAWNBTN]   debug.getupvalues NOT available — captures unreadable")
+        end
+    end
+    flash("SPAWN: " .. nFn .. " handler(s) read", true)
+end
+
+-- ▸ MENU WATCHER: card count flash + Spawn-button reader -----------
 local okWatch, errWatch = pcall(function()
     local pg = Players.LocalPlayer:WaitForChild("PlayerGui")
     local gv = pg:WaitForChild("GuiViews", 5)
     local menus = gv and gv:WaitForChild("Menus", 5)
     local menu = menus and menus:FindFirstChild("GarageMenu")
     assert(menu, "GarageMenu not found under GuiViews.Menus")
-    local function countCards()
+
+    local function cardsRoot()
         local bg = menu:FindFirstChild("Background")
         local content = bg and bg:FindFirstChild("Content")
-        local cards = content and content:FindFirstChild("Cards")
+        return content and content:FindFirstChild("Cards")
+    end
+    local function countCards()
+        local cards = cardsRoot()
         if not cards then return nil end
         local n = 0
         for _, d in ipairs(cards:GetDescendants()) do
@@ -428,27 +435,51 @@ local okWatch, errWatch = pcall(function()
         end
         return n
     end
+
     menu:GetPropertyChangedSignal("Enabled"):Connect(function()
         if not menu.Enabled then return end
         local n = countCards()
-        warn("[SPAWNWATCH] GarageMenu opened — "
+        warn("[SPAWNBTN] GarageMenu opened — "
             .. (n and (n .. " cards") or "card count FAILED"))
         if n then
             flash("MENU: " .. n .. " CARDS", n > 0)
         else
             flash("MENU: ? CARDS", false)
         end
+        -- poll for the expanded card's Spawn button while the menu is open
+        task.spawn(function()
+            while menu.Enabled do
+                local cards = cardsRoot()
+                local exp = cards and cards:FindFirstChild("ExpandedCard")
+                local expC = exp and exp:FindFirstChild("Content")
+                local actions = expC and expC:FindFirstChild("Actions")
+                local spawnBtn = actions and actions:FindFirstChild("Spawn")
+                if spawnBtn and spawnBtn:IsA("GuiButton") then
+                    analyzeSpawn(spawnBtn)
+                end
+                if spawnAnalyzed then break end
+                task.wait(0.4)
+            end
+        end)
     end)
 end)
 if not okWatch then
     warn("[SpudCapture] menu watcher FAILED: " .. tostring(errWatch))
 end
 
-print("══════ SPAWN ARGS CAPTURE (§29 v6) ══════")
-print("holder:  " .. holderName)
-print(okBuild and "window:  ✔ PILL bottom-left (tap to expand)"
-    or "window:  ✘ FAILED (error above)")
-print(okWatch and "watcher: ✔ GarageMenu card counter ON"
-    or ("watcher: ✘ " .. tostring(errWatch)))
-print(hookMsg)
+baseText = "READY (hook-free)"
+baseColor = Color3.fromRGB(60, 200, 110)
+restoreBase()
+
+print("══════ SPAWN ARGS CAPTURE (§29 v7) ══════")
+print("holder:       " .. holderName)
+print("capabilities: getconnections=" .. (hasGetConn and "yes" or "NO")
+    .. "  debug.upvalues=" .. (hasDebug and "yes" or "NO"))
+print(okBuild and "window:       ✔ PILL bottom-left (tap to expand)"
+    or "window:       ✘ FAILED (error above)")
+print(okWatch and "watcher:      ✔ card counter + Spawn-button reader ON"
+    or ("watcher:      ✘ " .. tostring(errWatch)))
+print("NO namecall hook is installed — cards stay intact.")
+print("FLOW: open manager → click the ZM80 card → pill flashes"
+    .. " \"SPAWN: n handler(s) read\" → expand → COPY → paste back")
 print("══════════════════════════════════════")
