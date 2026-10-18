@@ -298,21 +298,57 @@ local okBuild, errBuild = pcall(function()
         return btn.Name
     end
 
+    -- ▸ REAL CLICKS (user test: ":Activate() didn't open the manager" —
+    --   the game doesn't act on the Activated event alone; a player's
+    --   click fires the WHOLE pipeline: InputBegan → MouseButton1Down/
+    --   Up/Click → Activated). So every manager button is now clicked
+    --   FOR REAL: a mouse down+up at the button's on-screen centre
+    --   through VirtualInputManager (the same engine that already
+    --   proven-drives the WASD keys). clickEffect() fires the real
+    --   click, polls for the button's VISIBLE effect, and only falls
+    --   back to :Activate() when the click didn't take — so exactly
+    --   one effective action ever lands (never a double-toggle).
+    local function realClick(btn)
+        local p = btn.AbsolutePosition + btn.AbsoluteSize / 2
+        VIM:SendMouseButtonEvent(p.X, p.Y, 0, true, game, 1)
+        task.wait(0.05)
+        VIM:SendMouseButtonEvent(p.X, p.Y, 0, false, game, 1)
+    end
+
+    local function clickEffect(btn, effect)
+        if effect and effect() then return true end -- already there
+        local ok, err = pcall(realClick, btn)
+        if not ok then
+            log("real click failed on '" .. btn.Name .. "': " .. tostring(err))
+        end
+        for _ = 1, 8 do -- ~2 s for the effect to show
+            if stopping() then return false end
+            if effect and effect() then return true end
+            task.wait(0.25)
+        end
+        pcall(function() btn:Activate() end) -- fallback: Activated-only
+        for _ = 1, 8 do
+            if stopping() then return false end
+            if effect and effect() then return true end
+            task.wait(0.25)
+        end
+        return false
+    end
+
     -- close the manager the way dump §28 saw it close: the menu-level
     -- ExitButton, falling back to the Garage toggle button
     local function closeManager(menu, garageBtn)
         if not menu or not menu.Enabled then return end
         local bg = menu:FindFirstChild("Background")
         local exitBtn = bg and bg:FindFirstChild("ExitButton")
+        local closed = function() return not menu.Enabled end
         if exitBtn and exitBtn:IsA("GuiButton") then
-            pcall(function() exitBtn:Activate() end)
-            task.wait(0.3)
+            clickEffect(exitBtn, closed)
         end
         if menu.Enabled and garageBtn then
-            pcall(function() garageBtn:Activate() end)
-            task.wait(0.3)
+            clickEffect(garageBtn, closed)
         end
-        if menu.Enabled then
+        if menu.Enabled and not stopping() then
             log("couldn't close the Equipment Manager — it's left open on screen")
         end
     end
@@ -348,15 +384,11 @@ local okBuild, errBuild = pcall(function()
                 log("equipment manager: the MenuSelection.Garage button wasn't found")
                 return false
             end
-            -- open it the way a player does
+            -- open it the way a player does: a REAL mouse click on the
+            -- menu button, judged by the menu actually appearing
             if not menu.Enabled then
-                pcall(function() garageBtn:Activate() end)
-                for _ = 1, 6 do -- ~3 s to open
-                    if menu.Enabled or stopping() then break end
-                    task.wait(0.5)
-                end
-                if not menu.Enabled then
-                    log("equipment manager: the menu button didn't open GarageMenu")
+                if not clickEffect(garageBtn, function() return menu.Enabled end) then
+                    log("equipment manager: the menu button didn't open GarageMenu (real click + :Activate() both tried)")
                     return false
                 end
                 task.wait(0.4) -- let the card list populate
@@ -400,21 +432,26 @@ local okBuild, errBuild = pcall(function()
                 closeManager(menu, garageBtn)
                 return false
             end
-            -- click the card → fills the ExpandedCard for THIS vehicle
-            pcall(function() card:Activate() end)
-            task.wait(0.6)
+            -- click the card (REAL click, judged by the ExpandedCard
+            -- naming THIS vehicle) — fills the card's detail view
             local expanded = cards:FindFirstChild("ExpandedCard")
             local expContent = expanded and expanded:FindFirstChild("Content")
             local info = expContent and expContent:FindFirstChild("Info")
             local expName = info and info:FindFirstChild("EquipmentName")
-            if expName and expName:IsA("TextLabel") then
+            local function expandedShows()
+                if not (expName and expName:IsA("TextLabel")) then return false end
                 local t = expName.Text:gsub("^%s+", ""):gsub("%s+$", "")
-                if t:sub(1, #vehicleName) ~= vehicleName then
-                    log(string.format("equipment manager: the card opened '%s', not %s — clicking nothing",
-                        t:match("[^\n<]+") or t, vehicleName))
-                    closeManager(menu, garageBtn)
-                    return false
-                end
+                return t:sub(1, #vehicleName) == vehicleName
+            end
+            clickEffect(card, expandedShows)
+            if not expandedShows() then
+                -- log what the detail view DOES name, so a structure
+                -- surprise is diagnosable from the Console alone
+                local t = expName and expName:IsA("TextLabel") and expName.Text or ""
+                log(string.format("equipment manager: clicking the %s card didn't open its detail view (it shows '%s') — clicking nothing",
+                    vehicleName, t:match("[^\n<]+") or (t ~= "" and t or "nothing")))
+                closeManager(menu, garageBtn)
+                return false
             end
             local actions = expContent and expContent:FindFirstChild("Actions")
             local spawnBtn = actions and actions:FindFirstChild("Spawn")
@@ -433,7 +470,13 @@ local okBuild, errBuild = pcall(function()
                 return false
             end
             log(string.format("equipment manager: clicking 'Spawn' to respawn %s", vehicleName))
-            pcall(function() spawnBtn:Activate() end)
+            -- a REAL click (the caller's ~15 s re-find poll is the effect
+            -- check — it either comes back or the honest abort fires)
+            local clicked, cerr = pcall(realClick, spawnBtn)
+            if not clicked then
+                log("real click failed on 'Spawn': " .. tostring(cerr))
+                pcall(function() spawnBtn:Activate() end)
+            end
             task.wait(1) -- let the game process the respawn
             closeManager(menu, garageBtn)
             return true
