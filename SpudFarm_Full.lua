@@ -335,6 +335,20 @@ local okBuild, errBuild = pcall(function()
         return false
     end
 
+    -- the Cards list SCROLLS (user's video: the expanded card grows
+    -- DOWNWARD and its buttons sit half-clipped below the viewport until
+    -- the list scrolls), and a real click at a CLIPPED button's centre
+    -- hits nothing. ScrollIntoView + verify the target's centre is
+    -- inside the visible list before any click.
+    local function ensureVisible(frame, obj)
+        pcall(function() obj:ScrollIntoView() end)
+        task.wait(0.3)
+        local op = obj.AbsolutePosition + obj.AbsoluteSize / 2
+        local fp, fs = frame.AbsolutePosition, frame.AbsoluteSize
+        return op.X >= fp.X and op.X <= fp.X + fs.X
+            and op.Y >= fp.Y and op.Y <= fp.Y + fs.Y
+    end
+
     -- close the manager the way dump §28 saw it close: the menu-level
     -- ExitButton, falling back to the Garage toggle button
     local function closeManager(menu, garageBtn)
@@ -360,8 +374,15 @@ local okBuild, errBuild = pcall(function()
     --     └ Content.Info.EquipmentName           names the selected vehicle
     --     └ Content.Actions.Spawn                TextButton "Spawn"
     --   Background.ExitButton                    closes the menu
-    -- Flow: open → click this vehicle's card → verify the expanded card
-    -- really shows it → click Spawn → close.
+    -- user's video of the manual respawn: exactly THREE clicks —
+    --   1) the Equipment Manager menu button (cards populate ~1-2 s
+    --      AFTER opening — the menu starts EMPTY)
+    --   2) the vehicle's card (expands INLINE, buttons can sit clipped
+    --      below the scroll viewport until scrolled into view)
+    --   3) the card's "Spawn" → toast "Equipment respawned in front of
+    --      your plot."
+    -- Flow: open → card (poll until the list populates) → verify the
+    -- expanded card really shows it → Spawn (scrolled into view) → close.
     local function respawnViaManager(vehicleName)
         local ok, res = pcall(function()
             local pg = LocalPlayer:FindFirstChild("PlayerGui")
@@ -404,19 +425,28 @@ local okBuild, errBuild = pcall(function()
             end
             -- this vehicle's card: an ImageButton whose EquipmentName text
             -- STARTS with the model name ("ZM80\n#9" → ZM80), so "Trailer"
-            -- can never match a card that merely mentions it
-            local card
-            for _, d in ipairs(cards:GetDescendants()) do
-                if d:IsA("ImageButton") then
-                    local nm = d:FindFirstChild("EquipmentName")
-                    if nm and nm:IsA("TextLabel") then
-                        local t = nm.Text:gsub("^%s+", ""):gsub("%s+$", "")
-                        if t:sub(1, #vehicleName) == vehicleName then
-                            card = d
-                            break
+            -- can never match a card that merely mentions it. The video
+            -- showed the menu opens EMPTY and the cards land ~1-2 s
+            -- later — so poll for this card instead of searching once.
+            local function findCard()
+                for _, d in ipairs(cards:GetDescendants()) do
+                    if d:IsA("ImageButton") then
+                        local nm = d:FindFirstChild("EquipmentName")
+                        if nm and nm:IsA("TextLabel") then
+                            local t = nm.Text:gsub("^%s+", ""):gsub("%s+$", "")
+                            if t:sub(1, #vehicleName) == vehicleName then
+                                return d
+                            end
                         end
                     end
                 end
+            end
+            local card
+            for _ = 1, 20 do -- ~5 s for the card list to populate
+                if stopping() then break end
+                card = findCard()
+                if card then break end
+                task.wait(0.25)
             end
             if not card then
                 -- log the cards the menu DOES show (honest diagnosing)
@@ -433,7 +463,15 @@ local okBuild, errBuild = pcall(function()
                 return false
             end
             -- click the card (REAL click, judged by the ExpandedCard
-            -- naming THIS vehicle) — fills the card's detail view
+            -- naming THIS vehicle) — fills the card's detail view. The
+            -- video showed cards can sit clipped below the scroll
+            -- viewport — scroll it into view first, else a click at its
+            -- centre hits nothing.
+            if not ensureVisible(cards, card) then
+                log("equipment manager: the " .. vehicleName .. " card is outside the visible list even after scrolling — clicking nothing")
+                closeManager(menu, garageBtn)
+                return false
+            end
             local expanded = cards:FindFirstChild("ExpandedCard")
             local expContent = expanded and expanded:FindFirstChild("Content")
             local info = expContent and expContent:FindFirstChild("Info")
@@ -466,6 +504,16 @@ local okBuild, errBuild = pcall(function()
                 end
                 log("equipment manager: the " .. vehicleName .. " card has no Spawn button. its actions: "
                     .. (#shown > 0 and table.concat(shown, " · ") or "none"))
+                closeManager(menu, garageBtn)
+                return false
+            end
+            -- THE VIDEO'S KEY STEP: the expanded card grows downward, so
+            -- Spawn sits half-clipped below the Cards viewport until the
+            -- list scrolls — a real click at a clipped centre hits
+            -- nothing. ScrollIntoView + verify it's inside the visible
+            -- list, THEN click.
+            if not ensureVisible(cards, spawnBtn) then
+                log(string.format("equipment manager: the Spawn button of %s is outside the visible list even after scrolling — clicking nothing", vehicleName))
                 closeManager(menu, garageBtn)
                 return false
             end
