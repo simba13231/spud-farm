@@ -11,13 +11,20 @@
 -- reference (FNCRespawnEquipment) and selected-vehicle state live in
 -- there. Read-only; cannot affect game data.
 --
+-- v7.1: the Spawn button is found RECURSIVELY under Background.Content
+-- (the dump's full path showed it nested — Cards.1.ExpandedCard… — so
+-- the v7 direct-child lookup found nothing and the user got an empty
+-- buffer: "nothing yet even tho i spawned the vehicle"); polls start
+-- even if the menu was already open; an "armed" line proves the buffer
+-- works; poll ticks are pcall'd so one error can't kill the loop.
+--
 -- RUN: loadstring(game:HttpGet("…/SpudCapture.lua"))()
 -- FLOW: open the Equipment Manager → click the ZM80 card (expand) →
 -- the pill flashes "SPAWN: n handler(s) read" → expand the pill →
 -- press COPY → paste it back. Rejoin NOT required (no hooks).
 --------------------------------------------------------------------
 
-print("[SpudCapture] boot v7 — hook-free capture")
+print("[SpudCapture] boot v7.1 — hook-free capture (recursive Spawn find)")
 
 local lines = _G.SpudCaptureLog or {}
 _G.SpudCaptureLog = lines
@@ -436,42 +443,66 @@ local okWatch, errWatch = pcall(function()
         return n
     end
 
-    menu:GetPropertyChangedSignal("Enabled"):Connect(function()
-        if not menu.Enabled then return end
+    local function startPoll()
         local n = countCards()
-        warn("[SPAWNBTN] GarageMenu opened — "
+        warn("[SPAWNBTN] GarageMenu open — "
             .. (n and (n .. " cards") or "card count FAILED"))
         if n then
             flash("MENU: " .. n .. " CARDS", n > 0)
         else
             flash("MENU: ? CARDS", false)
         end
-        -- poll for the expanded card's Spawn button while the menu is open
         task.spawn(function()
             while menu.Enabled do
-                local cards = cardsRoot()
-                local exp = cards and cards:FindFirstChild("ExpandedCard")
-                local expC = exp and exp:FindFirstChild("Content")
-                local actions = expC and expC:FindFirstChild("Actions")
-                local spawnBtn = actions and actions:FindFirstChild("Spawn")
-                if spawnBtn and spawnBtn:IsA("GuiButton") then
-                    analyzeSpawn(spawnBtn)
+                local okT, errT = pcall(function()
+                    local bg = menu:FindFirstChild("Background")
+                    local content = bg and bg:FindFirstChild("Content")
+                    if not content then return end
+                    -- RECURSIVE: the dump's full path showed the expanded
+                    -- card NESTED (Cards.1.ExpandedCard…) — find Spawn
+                    -- anywhere under Content, by name OR by its text
+                    local spawnBtn = content:FindFirstChild("Spawn", true)
+                    if not (spawnBtn and spawnBtn:IsA("GuiButton")) then
+                        spawnBtn = nil
+                        for _, d in ipairs(content:GetDescendants()) do
+                            if d:IsA("GuiButton")
+                                and (d.Name == "Spawn"
+                                    or (d:IsA("TextButton") and d.Text == "Spawn")) then
+                                spawnBtn = d
+                                break
+                            end
+                        end
+                    end
+                    if spawnBtn then
+                        analyzeSpawn(spawnBtn)
+                    end
+                end)
+                if not okT then
+                    pushLine("[SPAWNBTN] poll error: " .. tostring(errT))
+                    break
                 end
                 if spawnAnalyzed then break end
                 task.wait(0.4)
             end
         end)
+    end
+    menu:GetPropertyChangedSignal("Enabled"):Connect(function()
+        if menu.Enabled then startPoll() end
     end)
+    if menu.Enabled then startPoll() end -- menu was already open at start
 end)
 if not okWatch then
     warn("[SpudCapture] menu watcher FAILED: " .. tostring(errWatch))
 end
 
+-- the buffer is never empty: proves lines work at a glance
+pushLine("[SPAWNBTN] armed — open the Equipment Manager, click the ZM80 card (its Spawn button gets read into this list)")
+
 baseText = "READY (hook-free)"
 baseColor = Color3.fromRGB(60, 200, 110)
 restoreBase()
 
-print("══════ SPAWN ARGS CAPTURE (§29 v7) ══════")
+print("══════ SPAWN ARGS CAPTURE (§29 v7.1) ══════")
 print("holder:       " .. holderName)
 print("capabilities: getconnections=" .. (hasGetConn and "yes" or "NO")
     .. "  debug.upvalues=" .. (hasDebug and "yes" or "NO"))
