@@ -24,7 +24,7 @@
 -- press COPY → paste it back. Rejoin NOT required (no hooks).
 --------------------------------------------------------------------
 
-print("[SpudCapture] boot v7.1 — hook-free capture (recursive Spawn find)")
+print("[SpudCapture] boot v7.2 — hook-free capture (upvalue reader crash fixed)")
 
 local lines = _G.SpudCaptureLog or {}
 _G.SpudCaptureLog = lines
@@ -346,20 +346,43 @@ end
 
 local function readUpvalues(fn)
     local out = {}
-    local okT, res = pcall(function() return debug.getupvalues(fn) end)
-    if okT and type(res) == "table" and res[1] then
-        for i, u in ipairs(res) do
-            out[i] = { name = u.name or ("?" .. i), value = u.value }
-        end
-        return out
-    end
+    -- PRIMARY: debug.getupvalue(fn, i) → name, value (standard Lua shape;
+    -- each step pcall'd so impls that error past the last index don't die)
     pcall(function()
-        for i = 1, 64 do
-            local nm, val = debug.getupvalue(fn, i)
-            if not nm then break end
-            out[#out + 1] = { name = nm, value = val }
+        if type(debug.getupvalue) == "function" then
+            for i = 1, 64 do
+                local okI, nm, val = pcall(debug.getupvalue, fn, i)
+                if not okI then break end
+                if type(nm) ~= "string" then break end -- nil = exhausted
+                out[#out + 1] = { name = nm, value = val }
+            end
         end
     end)
+    if #out > 0 then return out end
+    -- SECONDARY: debug.getupvalues(fn) — SHAPE-AGNOSTIC. Delta can return
+    -- raw VALUES in the array rather than {name,value} tables → guard by
+    -- typeof instead of indexing a possible number/string ("index number
+    -- with 'name'" crash). Handles {name,value}, array-form, and bare values.
+    local okT, res = pcall(function() return debug.getupvalues(fn) end)
+    if okT and type(res) == "table" then
+        for i, u in ipairs(res) do
+            local nm, val
+            if type(u) == "table" then
+                if u.name ~= nil or u.value ~= nil then
+                    nm, val = u.name, u.value
+                elseif u.Name ~= nil or u.Value ~= nil then
+                    nm, val = u.Name, u.Value
+                elseif u[1] ~= nil then
+                    nm, val = tostring(u[1]), u[2]
+                else
+                    nm, val = "?" .. i, u
+                end
+            else
+                nm, val = "?" .. i, u
+            end
+            out[i] = { name = tostring(nm), value = val }
+        end
+    end
     return out
 end
 
@@ -502,7 +525,7 @@ baseText = "READY (hook-free)"
 baseColor = Color3.fromRGB(60, 200, 110)
 restoreBase()
 
-print("══════ SPAWN ARGS CAPTURE (§29 v7.1) ══════")
+print("══════ SPAWN ARGS CAPTURE (§29 v7.2) ══════")
 print("holder:       " .. holderName)
 print("capabilities: getconnections=" .. (hasGetConn and "yes" or "NO")
     .. "  debug.upvalues=" .. (hasDebug and "yes" or "NO"))
