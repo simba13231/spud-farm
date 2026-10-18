@@ -1,5 +1,14 @@
 --------------------------------------------------------------------
 -- SpudCapture — RESPAWN REMOTE ARGS (§29) with its own DEBUG GUI
+-- v6: A/B RUN — hooks OFF (CAPTURE_HOOKS = false). v5's screenshot
+-- proved the menu opens with ZERO cards while the namecall hook runs
+-- (video without the script: 7 cards) → the hook is isolated as the
+-- suspect (likely InvokeServer returns dying through the hook chain,
+-- e.g. FNCGetEquipmentCarryInfo — already caught once, 0 args).
+-- THIS RUN = window + pill + card counter ONLY. REJOIN FIRST (older
+-- runs' hooks persist until rejoin). Result decides the next fix:
+-- cards back → capture via a hook-free/safer method; still empty →
+-- look elsewhere.
 -- v5: COLLAPSE-TO-PILL + MENU CARD COUNTER.
 --   * user report: "it makes the tractor and tools in the ui go away
 --     and i dont see them" — v4 spawned 440×300 DEAD CENTRE at
@@ -22,7 +31,16 @@
 -- Changes NO game state — it only watches.
 --------------------------------------------------------------------
 
-print("[SpudCapture] boot v5 — building capture window")
+print("[SpudCapture] boot v6 — building capture window")
+
+-- ▸ A/B SWITCH: with the namecall hook ON, the Equipment Manager's
+--   card list went EMPTY (v5 screenshot — menu open, zero cards; the
+--   video without the script showed 7). Prime suspect: InvokeServer
+--   returns (data loads like FNCGetEquipmentCarryInfo) dying as they
+--   yield through the hook chain. THIS RUN: hooks OFF — window + pill
+--   + card counter only. REJOIN BEFORE TESTING (older runs' hooks
+--   persist until rejoin and would pollute the test).
+local CAPTURE_HOOKS = false
 
 _G.SpudCaptureSeq = (_G.SpudCaptureSeq or 0) + 1
 local mySeq = _G.SpudCaptureSeq
@@ -67,7 +85,7 @@ pcall(function()
     end
 end)
 
-local status, pill, refresh, hookOK
+local status, pill, refresh, baseText, baseColor, flashTok
 
 -- ▸ THE WINDOW — starts COLLAPSED (pill) so it never covers the menu
 local okBuild, errBuild = pcall(function()
@@ -201,7 +219,7 @@ local okBuild, errBuild = pcall(function()
 
     refresh = function()
         logLabel.Text = table.concat(lines, "\n")
-        if pill.Visible then
+        if pill.Visible and flashTok == 0 then -- never clobber a MENU: N CARDS flash
             pill.Text = "SPAWN CAPTURE (" .. #lines .. ")"
         end
     end
@@ -273,16 +291,15 @@ local function refreshSafe()
 end
 
 -- ▸ STATUS FLASH (also answers the "cards gone" question) ----------
-local flashTok = 0
+flashTok = 0
 local function restoreBase()
     if pill then
         pill.Text = "SPAWN CAPTURE (" .. #lines .. ")"
         pill.TextColor3 = Color3.fromRGB(255, 255, 255)
     end
     if status then
-        status.Text = hookOK and "CAPTURE ON" or "HOOK FAILED"
-        status.TextColor3 = hookOK and Color3.fromRGB(60, 200, 110)
-            or Color3.fromRGB(240, 80, 80)
+        status.Text = baseText or "starting…"
+        status.TextColor3 = baseColor or Color3.fromRGB(160, 160, 160)
     end
 end
 local function flash(msg, good)
@@ -359,22 +376,35 @@ local function addLine(method, nm, ...)
     refreshSafe()
 end
 
-local okHook, errHook = pcall(function()
-    local oldHook
-    oldHook = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
-        local nm, meth = tostring(self.Name), getnamecallmethod()
-        if (meth == "FireServer" or meth == "InvokeServer")
-            and interesting(nm, ...) then
-            pcall(addLine, meth, nm, ...)
-        end
-        return oldHook(self, ...)
-    end))
-end)
-hookOK = okHook
-restoreBase()
-if not okHook then
-    warn("[SPAWNWATCH] hook FAILED: " .. tostring(errHook))
+local hookMsg
+if CAPTURE_HOOKS then
+    local okHook, errHook = pcall(function()
+        local oldHook
+        oldHook = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+            local nm, meth = tostring(self.Name), getnamecallmethod()
+            if (meth == "FireServer" or meth == "InvokeServer")
+                and interesting(nm, ...) then
+                pcall(addLine, meth, nm, ...)
+            end
+            return oldHook(self, ...)
+        end))
+    end)
+    baseText = okHook and "CAPTURE ON" or "HOOK FAILED"
+    baseColor = okHook and Color3.fromRGB(60, 200, 110)
+        or Color3.fromRGB(240, 80, 80)
+    hookMsg = okHook and "capture: ✔ ON — collapse (–) → 3 clicks → expand → COPY"
+        or ("capture: ✘ hook FAILED: " .. tostring(errHook))
+    if not okHook then
+        warn("[SPAWNWATCH] hook FAILED: " .. tostring(errHook))
+    end
+else
+    baseText = "HOOKS OFF (A/B)"
+    baseColor = Color3.fromRGB(240, 170, 60)
+    hookMsg = "capture: ○ OFF on purpose (A/B run) — window + card counter only"
+    warn("[SpudCapture] hooks DISABLED (A/B) — nothing will be captured;"
+        .. " open the Equipment Manager and check the CARD LIST")
 end
+restoreBase()
 
 -- ▸ MENU CARD COUNTER — when the Equipment Manager opens, count the
 --   cards: N>0 = they were only being COVERED before; N=0 = the menu
@@ -414,12 +444,11 @@ if not okWatch then
     warn("[SpudCapture] menu watcher FAILED: " .. tostring(errWatch))
 end
 
-print("══════ SPAWN ARGS CAPTURE (§29 v5) ══════")
+print("══════ SPAWN ARGS CAPTURE (§29 v6) ══════")
 print("holder:  " .. holderName)
 print(okBuild and "window:  ✔ PILL bottom-left (tap to expand)"
     or "window:  ✘ FAILED (error above)")
 print(okWatch and "watcher: ✔ GarageMenu card counter ON"
     or ("watcher: ✘ " .. tostring(errWatch)))
-print(okHook and "capture: ✔ ON — collapse (–) → 3 clicks → expand → COPY"
-    or ("capture: ✘ hook FAILED: " .. tostring(errHook)))
+print(hookMsg)
 print("══════════════════════════════════════")
