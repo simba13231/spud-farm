@@ -1770,6 +1770,208 @@ local ok, err = pcall(function()
     if not ok27 then
         w("NOTE: §27 stopped: " .. string.sub(tostring(err27), 1, 120))
     end
+
+    ------------------------------------------------------------------
+    -- 28. EQUIPMENT MANAGER — the far-vehicle respawn's data (user:
+    --     "let me dump it for you"). The blind build (5080472) clicks
+    --     by NAME; this dump shows the REAL structure: the
+    --     MenuSelection.Garage button (class + what's inside — can
+    --     :Activate() even work?), the GarageMenu tree CLOSED and
+    --     OPEN (the dump clicks the menu button itself, waits for the
+    --     cards to populate, prints the full tree, then closes it),
+    --     every respawn/garage-ish text ANYWHERE in PlayerGui, the
+    --     respawn REMOTES, and a PASSIVE [MGRWATCH] namecall hook that
+    --     captures the exact remote + args if you click things by hand
+    --     AFTER the dump. RUN WITH: just run it — opening + closing a
+    --     menu changes no game state; optionally, afterwards open the
+    --     manager yourself and click Respawn once to feed [MGRWATCH].
+    ------------------------------------------------------------------
+    local ok28, err28 = pcall(function()
+        header("EQUIPMENT MANAGER (GarageMenu structure)")
+        local pg28 = game:GetService("Players").LocalPlayer:FindFirstChildOfClass("PlayerGui")
+        local gv28 = pg28 and pg28:FindFirstChild("GuiViews")
+        local menus28 = gv28 and gv28:FindFirstChild("Menus")
+        local menu28 = menus28 and menus28:FindFirstChild("GarageMenu")
+        local hud28 = gv28 and gv28:FindFirstChild("HUD")
+        local main28 = hud28 and hud28:FindFirstChild("MainHUD")
+        local sel28 = main28 and main28:FindFirstChild("MenuSelection")
+        local garage28 = sel28 and sel28:FindFirstChild("Garage")
+
+        -- the menu-opening button: what class is Garage, and is it
+        -- actually clickable (:Activate() needs a GuiButton somewhere)
+        if garage28 then
+            w(string.format("  menu button: %s (%s)  Visible=%s", garage28:GetFullName(),
+                garage28.ClassName,
+                garage28:IsA("GuiObject") and tostring(garage28.Visible) or "n/a"))
+            for _, d in ipairs(garage28:GetDescendants()) do
+                w(string.format("    · %s (%s)%s", d.Name, d.ClassName,
+                    (d:IsA("TextButton") or d:IsA("TextLabel")) and ("  Text=" .. string.sub(d.Text, 1, 40)) or ""))
+            end
+            local inner28
+            for _, d in ipairs(garage28:GetDescendants()) do
+                if d:IsA("GuiButton") then inner28 = d break end
+            end
+            w(garage28:IsA("GuiButton") and "    -> IS a GuiButton: :Activate() will work"
+                or (inner28 and ("    -> first inner GuiButton: " .. inner28:GetFullName())
+                    or "    -> NO GuiButton anywhere inside (open-by-click would fail!)"))
+        else
+            w("  menu button: MenuSelection.Garage NOT FOUND")
+        end
+        local menuNames28 = {}
+        for _, m in ipairs(menus28 and menus28:GetChildren() or {}) do
+            menuNames28[#menuNames28 + 1] = string.format("%s[%s] Enabled=%s",
+                m.Name, m.ClassName, tostring(m.Enabled))
+        end
+        w("  GuiViews.Menus children: " .. (#menuNames28 > 0
+            and table.concat(menuNames28, ", ") or "(none / no GuiViews.Menus)"))
+
+        -- tree printer: indent = depth, plus class/text/visibility
+        local function tree28(node, cap)
+            local n = 0
+            local function rec(inst, depth)
+                if n >= cap then return end
+                n += 1
+                local extra = ""
+                if inst:IsA("GuiObject") then
+                    extra = string.format("  Vis=%s%s", tostring(inst.Visible),
+                        inst:IsA("GuiButton") and (" Enabled=" .. tostring(inst.Enabled)) or "")
+                end
+                local txt = ""
+                if (inst:IsA("TextLabel") or inst:IsA("TextButton") or inst:IsA("TextBox"))
+                    and inst.Text ~= "" then
+                    txt = "  Text=" .. string.sub(inst.Text, 1, 48)
+                end
+                w(string.format("  %s%s [%s]%s%s", string.rep("  ", depth), inst.Name,
+                    inst.ClassName, txt, extra))
+                for _, d in ipairs(inst:GetChildren()) do
+                    rec(d, depth + 1)
+                end
+            end
+            rec(node, 0)
+            if n >= cap then w("  … (capped at " .. cap .. " entries)") end
+            return n
+        end
+
+        if menu28 then
+            w(string.format("  GarageMenu: Enabled=%s — CLOSED tree:", tostring(menu28.Enabled)))
+            tree28(menu28, 150)
+        else
+            w("  GuiViews.Menus.GarageMenu NOT FOUND")
+        end
+
+        -- open it the way the script does, dump the POPULATED tree, close
+        local garageBtn28
+        if garage28 then
+            if garage28:IsA("GuiButton") then
+                garageBtn28 = garage28
+            else
+                for _, d in ipairs(garage28:GetDescendants()) do
+                    if d:IsA("GuiButton") then garageBtn28 = d break end
+                end
+            end
+        end
+        if menu28 and garageBtn28 then
+            w("  … clicking the menu button to OPEN the manager (menu open/close only — no game state changes)")
+            pcall(function() garageBtn28:Activate() end)
+            for _ = 1, 6 do
+                if menu28.Enabled then break end
+                task.wait(0.5)
+            end
+            w("  GarageMenu.Enabled after the click: " .. tostring(menu28.Enabled))
+            if menu28.Enabled then
+                task.wait(1) -- let the card list populate
+                w("  OPEN / populated tree:")
+                tree28(menu28, 400)
+                local closed28 = false
+                for _, d in ipairs(menu28:GetDescendants()) do
+                    if d:IsA("GuiButton") then
+                        local nm28 = d.Name:lower()
+                        local tx28 = d:IsA("TextButton") and d.Text:lower():gsub("%s+", "") or ""
+                        if nm28:find("close", 1, true) or tx28 == "x" or tx28 == "✕" or tx28 == "×" then
+                            w("  closing via: " .. d:GetFullName())
+                            pcall(function() d:Activate() end)
+                            task.wait(0.4)
+                            closed28 = not menu28.Enabled
+                            if closed28 then break end
+                        end
+                    end
+                end
+                if not closed28 then
+                    pcall(function() garageBtn28:Activate() end)
+                    task.wait(0.4)
+                    w("  closed via the menu toggle: " .. tostring(not menu28.Enabled))
+                end
+            end
+        elseif not menu28 then
+            w("  (no GarageMenu — nothing to open/dump)")
+        else
+            w("  (no clickable Garage button — can't open it programmatically)")
+        end
+
+        -- every respawn/garage-ish node ANYWHERE in PlayerGui
+        header("RESPAWN-ISH UI ANYWHERE (PlayerGui name/text hunt)")
+        local hits28 = 0
+        for _, d in ipairs(pg28 and pg28:GetDescendants() or {}) do
+            if hits28 >= 60 then break end
+            local nm28 = d.Name:lower()
+            local tx28
+            if d:IsA("TextLabel") or d:IsA("TextButton") or d:IsA("TextBox") then
+                tx28 = tostring(d.Text):lower()
+            end
+            local hit28 = nm28:find("respawn", 1, true) or (tx28 and tx28:find("respawn", 1, true))
+                or nm28:find("garage", 1, true) or (tx28 and tx28:find("equipment manager", 1, true))
+            if hit28 then
+                hits28 += 1
+                w(string.format("  [%d] %s (%s)%s%s", hits28, d:GetFullName(), d.ClassName,
+                    (tx28 and tx28 ~= "") and ("  Text=" .. string.sub(tx28, 1, 40)) or "",
+                    d:IsA("GuiButton") and ("  Enabled=" .. tostring(d.Enabled)) or ""))
+            end
+        end
+        w("  hits: " .. hits28)
+
+        -- the respawn/spawn/store remotes themselves
+        header("RESPAWN REMOTES (ReplicatedStorage name hunt)")
+        local rcount28 = 0
+        for _, d in ipairs(game:GetService("ReplicatedStorage"):GetDescendants()) do
+            if rcount28 >= 40 then break end
+            if (d:IsA("RemoteFunction") or d:IsA("RemoteEvent")) then
+                local nm28 = d.Name:lower()
+                if nm28:find("respawn", 1, true) or nm28:find("spawn", 1, true)
+                    or nm28:find("store", 1, true) then
+                    rcount28 += 1
+                    w(string.format("  - %s (%s)", d:GetFullName(), d.ClassName))
+                end
+            end
+        end
+        w("  found: " .. rcount28)
+
+        -- passive namecall watch (chains §27's hook): after the dump,
+        -- open the manager BY HAND and click Respawn once — the exact
+        -- remote + args land in the EXECUTOR console as [MGRWATCH …]
+        local okHook28, errHook28 = pcall(function()
+            local old
+            old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+                local nm, meth = self.Name, getnamecallmethod()
+                if (meth == "FireServer" or meth == "InvokeServer")
+                    and (nm:find("Respawn", 1, true) or nm:find("Spawn", 1, true)
+                        or nm:find("Store", 1, true) or nm:find("Equipment", 1, true)) then
+                    pcall(summarize, "[MGRWATCH " .. nm .. "]", ...)
+                end
+                return old(self, ...)
+            end))
+        end)
+        w(okHook28 and "  mgr-watch ON: after the dump, open the manager and click Respawn once → [MGRWATCH …] lines in the EXECUTOR console"
+            or ("  mgr-watch FAILED: " .. string.sub(tostring(errHook28), 1, 100)))
+
+        w("")
+        w("DO NOW: wait for the dump to finish (it opens + closes the manager")
+        w("itself); then optionally open the Equipment Manager, click Respawn")
+        w("on a vehicle ONCE, and paste the whole dump output + any")
+        w("[MGRWATCH …] executor-console lines.")
+    end)
+    if not ok28 then
+        w("NOTE: §28 stopped: " .. string.sub(tostring(err28), 1, 120))
+    end
 end)
 
 w("")
