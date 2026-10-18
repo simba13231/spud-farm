@@ -1,8 +1,12 @@
 --------------------------------------------------------------------
 -- SpudCapture — RESPAWN REMOTE ARGS (§29) with its own DEBUG GUI
--- v3: DIAGNOSED BUILD — prints a boot line FIRST, wraps the whole
--- window build in pcall (on failure it prints the exact error and
--- keeps capturing console-only), then confirms "window up".
+-- v4: PARENT FIX — the window now lives in gethui()/CoreGui like
+-- every executor UI library (the farming script's Fluent window is
+-- there too), because games may SWEEP unknown ScreenGuis out of
+-- PlayerGui — the classic "built but never shows" trap. v3's
+-- diagnostics stay (boot line first, pcall'd build, exact-error
+-- report, console-only fallback) + a 2s watchdog reports if anything
+-- destroys the window anyway.
 --
 -- WHY: the menu flow (open manager -> card -> Spawn) takes ~8-10 s of
 -- mouse work. The game must be firing a REMOTE to do the respawn
@@ -14,13 +18,9 @@
 --   1) open the Equipment Manager  2) click the ZM80 card
 --   3) click Spawn            -> press COPY -> paste it back.
 -- Changes NO game state — it only watches.
---
--- RE-RUN SAFE: buffer lives in _G (survives re-execution), a seq
--- token makes older hooks go silent (no double-logging), and an old
--- window of the same name is destroyed on start.
 --------------------------------------------------------------------
 
-print("[SpudCapture] boot v3 — building capture window")
+print("[SpudCapture] boot v4 — building capture window")
 
 _G.SpudCaptureSeq = (_G.SpudCaptureSeq or 0) + 1
 local mySeq = _G.SpudCaptureSeq
@@ -37,20 +37,47 @@ local function mk(class, props, parent)
     return o
 end
 
-local status, refresh
+-- ▸ WHERE THE WINDOW LIVES: gethui() (hidden, game can't see it) →
+--   CoreGui (games can't sweep it) → PlayerGui only as last resort
+local holder, holderName
+pcall(function()
+    if type(gethui) == "function" then holder = gethui() end
+end)
+if holder then
+    holderName = "gethui()"
+else
+    local okCG, cg = pcall(function() return game:GetService("CoreGui") end)
+    if okCG and cg then
+        holder, holderName = cg, "CoreGui"
+    else
+        holder = Players.LocalPlayer:WaitForChild("PlayerGui")
+        holderName = "PlayerGui (FALLBACK — sweep risk)"
+    end
+end
+print("[SpudCapture] holder: " .. holderName)
+
+-- kill any window from an earlier run, wherever it lives
+pcall(function()
+    local pg = Players.LocalPlayer:FindFirstChild("PlayerGui")
+    for _, container in ipairs({ holder, pg, game:GetService("CoreGui") }) do
+        if container then
+            local prior = container:FindFirstChild("SpudCaptureGui")
+            if prior then prior:Destroy() end
+        end
+    end
+end)
+
+local status, refresh, guiRef
 
 -- ▸ THE WINDOW — built inside pcall so ANY failure is reported and
 --   degrades to console-only capture instead of dying silently ------
 local okBuild, errBuild = pcall(function()
-    local pg = Players.LocalPlayer:WaitForChild("PlayerGui")
-    local prior = pg:FindFirstChild("SpudCaptureGui")
-    if prior then prior:Destroy() end
-
     local gui = mk("ScreenGui", {
         Name = "SpudCaptureGui",
         ResetOnSpawn = false,
         DisplayOrder = 9999,
-    }, pg)
+    }, holder)
+    guiRef = gui
 
     local frame = mk("Frame", {
         AnchorPoint = Vector2.new(0.5, 0.5),
@@ -185,13 +212,24 @@ local okBuild, errBuild = pcall(function()
     end)
 
     refresh()
-    print("[SpudCapture] ✔ window up: PlayerGui.SpudCaptureGui"
+    print("[SpudCapture] ✔ window up under " .. holderName
         .. " (440×300, centre screen, drag by title)")
 end)
 if not okBuild then
     warn("[SpudCapture] ✘ WINDOW BUILD FAILED: " .. tostring(errBuild))
     warn("[SpudCapture] falling back to CONSOLE-ONLY — watch [SPAWNWATCH …] lines")
 end
+
+-- watchdog: did anything destroy it after the fact?
+task.delay(2, function()
+    if not guiRef then return end
+    if not guiRef.Parent then
+        warn("[SpudCapture] ✘ window VANISHED after 2s — something destroyed"
+            .. " it (game sweeping " .. holderName .. "?)")
+    else
+        print("[SpudCapture] ✔ window still alive under " .. holderName .. " (+2s)")
+    end
+end)
 
 local function refreshSafe()
     if refresh then pcall(refresh) end
@@ -276,8 +314,8 @@ if not okHook then
     warn("[SPAWNWATCH] hook FAILED: " .. tostring(errHook))
 end
 
-print("══════ SPAWN ARGS CAPTURE (§29 v3) ══════")
-print("boot:   [SpudCapture] boot v3 line above = you have the NEW file")
+print("══════ SPAWN ARGS CAPTURE (§29 v4) ══════")
+print("holder:  " .. holderName)
 print(okBuild and "window: ✔ built" or "window: ✘ FAILED (error above)")
 print(okHook and "capture: ✔ ON — 3 clicks once (menu → ZM80 card →"
     .. " Spawn), then press COPY" or ("capture: ✘ hook FAILED: "
