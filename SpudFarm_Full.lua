@@ -445,6 +445,53 @@ local okBuild, errBuild = pcall(function()
         return res and true or false
     end
 
+    -- ▸ SAFETY FOR EVERY TOOL (user: "make it do that for every tool
+    --   now"): the exact rule the tractor gate uses, applied to each
+    --   implement — farther than RESPAWN_RANGE (or sitting IN STORAGE,
+    --   which is the map-edge void = always far anyway) = respawn it
+    --   through the Equipment Manager instead of aborting or driving the
+    --   whole map to it. ONE attempt; the respawn may REBUILD the model,
+    --   so the tool is re-found by the same type-pick and polled for
+    --   ~15 s. Returns the (fresh) impl, dist, basis — or nil, with an
+    --   honest log either way. Nothing respawns while it's near.
+    local function ensureToolNearby(tr, typeName, verb)
+        if stopping() then return nil end
+        local impl, dist, basis =
+            findImplement(typeName, tr:GetPivot().Position, tr)
+        if not impl then
+            log("no equipment with EquipmentType=" .. typeName .. " found — see list above")
+            return nil
+        end
+        local stored = impl:GetAttribute("InStorage")
+        if not stored and (not dist or dist <= RESPAWN_RANGE) then
+            return impl, dist, basis -- close enough — nothing to do
+        end
+        log(string.format("%s (the %s) is %s — respawning it via the Equipment Manager",
+            impl.Name, verb,
+            stored and "IN STORAGE"
+                or string.format("%.0f studs away (>%d)", dist, RESPAWN_RANGE)))
+        respawnViaManager(impl.Name)
+        for _ = 1, 30 do -- ~15 s for the respawn to land
+            if stopping() then return nil end
+            local impl2, dist2, basis2 =
+                findImplement(typeName, tr:GetPivot().Position, tr)
+            if impl2 and not impl2:GetAttribute("InStorage")
+                and dist2 and dist2 <= RESPAWN_RANGE then
+                log(string.format("✅ %s respawned — %.0f studs away now",
+                    impl2.Name, dist2))
+                return impl2, dist2, basis2
+            end
+            task.wait(0.5)
+        end
+        local impl2, dist2 = findImplement(typeName, tr:GetPivot().Position, tr)
+        log(string.format("respawn didn't bring the %s back (%s) — skipping this pass",
+            verb,
+            impl2 and (impl2:GetAttribute("InStorage") and "still in storage"
+                or string.format("still %.0f studs away", dist2 or 0))
+                or "it's gone"))
+        return nil
+    end
+
     -- VFly-style vehicle glide: ease-out CFrame steps facing the direction
     -- of travel — same feel as VFly player movement. NO physics objects
     -- (BodyVelocity made the solver fight the seat → lag + rubber-banding).
@@ -1414,16 +1461,11 @@ local okBuild, errBuild = pcall(function()
     --   a later step, asked for one at a time). No fill, no drive.
     local function seedHitchStep(tr)
         if stopping() then return end
-        local seeder, sdist, basis =
-            findImplement("Planter", tr:GetPivot().Position, tr)
-        if not seeder then
-            log("seed hitch: the seeder vanished between check and hitch — skipping")
-            return
-        end
-        if seeder:GetAttribute("InStorage") then
-            log(seeder.Name .. " (the seeder) is IN STORAGE — pull it out of the Equipment Manager first")
-            return
-        end
+        -- safety for every tool (same rule as the tractor gate): the
+        -- seeder in storage or far away gets respawned via the Equipment
+        -- Manager, then the fresh model is hitched
+        local seeder, sdist, basis = ensureToolNearby(tr, "Planter", "seeder")
+        if not seeder then return end
         log(string.format("hitching the seeder: %s (%.0f studs, by %s)",
             seeder.Name, sdist or 0, basis or "?"))
         if hitchTool(tr, seeder) then
@@ -1896,16 +1938,12 @@ local okBuild, errBuild = pcall(function()
                 log("no field needs " .. job.verb .. " — pass skipped")
                 return false
             end
-            local impl, idist, basis = findImplement(job.typeName, tr:GetPivot().Position, tr)
-            if not impl then
-                log("no equipment with EquipmentType=" .. job.typeName .. " found — see list above")
-                return false
-            end
-            if impl:GetAttribute("InStorage") then
-                log(impl.Name .. " (the " .. job.verb .. ") is IN STORAGE — can't hitch it")
-                log("pull it out of the Equipment Manager in-game first, then run again")
-                return false
-            end
+            -- safety for every tool: in storage or >1000 studs away =
+            -- respawn it via the Equipment Manager (same rule as the
+            -- tractor gate), then re-find the fresh model
+            local impl, idist, basis =
+                ensureToolNearby(tr, job.typeName, job.verb)
+            if not impl then return false end
             -- remember WHERE the tool was found: after the sweep it gets
             -- unhitched back at THIS spot (user: "unhitch the tools where
             -- they came from")
