@@ -24,7 +24,7 @@
 -- press COPY → paste it back. Rejoin NOT required (no hooks).
 --------------------------------------------------------------------
 
-print("[SpudCapture] boot v7.3 — hook-free capture (ancestor handlers + deep upvalue walk + GC remote sweep)")
+print("[SpudCapture] boot v7.4 — hook-free capture (gcSweep nil-call fixed + FireServer wrapper sweep)")
 
 local lines = _G.SpudCaptureLog or {}
 _G.SpudCaptureLog = lines
@@ -410,6 +410,10 @@ local function deepRead(fn, tag, seen, level)
     end
 end
 
+-- ▸ GC SWEEP (stub — real body defined after analyzeSpawn; forward
+-- declared so analyzeSpawn's call resolves without a nil-value error)
+function gcSweep() end
+
 -- ▸ THE SPAWN BUTTON READER — no hooks, pure reads -----------------
 local spawnAnalyzed = false
 local function analyzeSpawn(btn)
@@ -469,7 +473,8 @@ end
 -- ▸ GC SWEEP: hunt the respawn remote(s) by name across every live object.
 -- This is the guaranteed path if the button handler is a shallow wrapper
 -- that only holds a sound module + timestamp (as v7.2 observed).
-local function gcSweep()
+-- (forward-declared above analyzeSpawn so its call resolves)
+function gcSweep()
     if not hasGetGc then
         pushLine("[SWEEP] getgc NOT available")
         return
@@ -511,6 +516,48 @@ local function gcSweep()
             local okF, full = pcall(function() return r:GetFullName() end)
             pushLine("[SWEEP]   " .. tostring(r.ClassName) .. " "
                 .. (okF and full or r.Name))
+        end
+    end
+    -- SECOND PASS: the remote rarely sits directly in GC. The button
+    -- handler held a table{18} whose FireServer/InvokeServer are the
+    -- remote wrappers (the ".3 [4]" table from v7.3). Dump every table
+    -- exposing FireServer/InvokeServer along with its Instance keys so
+    -- the actual remote Instance surfaces.
+    local wrapped = {}
+    pcall(function()
+        for _, v in ipairs(getgc(true)) do
+            if typeof(v) == "table" and not seen[v] then
+                seen[v] = true
+                local hasFS = false
+                for _, vv in pairs(v) do
+                    if typeof(vv) == "function" and not hasFS then
+                        local okS, src = pcall(function() return debug.info(vv, "s") end)
+                        if okS and type(src) == "string"
+                            and (src:find("FireServer", 1, true)
+                                or src:find("InvokeServer", 1, true)) then
+                            hasFS = true
+                        end
+                    end
+                end
+                if hasFS then
+                    local keys = {}
+                    for kk, vv in pairs(v) do
+                        if typeof(vv) == "Instance" then
+                            local okF, full = pcall(function() return vv:GetFullName() end)
+                            keys[#keys + 1] = tostring(kk) .. "="
+                                .. (okF and full or vv.Name)
+                        end
+                    end
+                    wrapped[#wrapped + 1] = "keys: " .. (#keys > 0
+                        and table.concat(keys, ", ") or "(none — remote held as upvalue)")
+                end
+            end
+        end
+    end)
+    if #wrapped > 0 then
+        pushLine("[SWEEP] FireServer/InvokeServer wrappers (" .. #wrapped .. "):")
+        for i, w in ipairs(wrapped) do
+            pushLine("[SWEEP]   w" .. i .. " " .. w)
         end
     end
 end
@@ -599,7 +646,7 @@ baseText = "READY (hook-free)"
 baseColor = Color3.fromRGB(60, 200, 110)
 restoreBase()
 
-print("══════ SPAWN ARGS CAPTURE (§29 v7.3) ══════")
+print("══════ SPAWN ARGS CAPTURE (§29 v7.4) ══════")
 print("holder:       " .. holderName)
 print("capabilities: getconnections=" .. (hasGetConn and "yes" or "NO")
     .. "  debug.upvalues=" .. (hasDebug and "yes" or "NO"))
