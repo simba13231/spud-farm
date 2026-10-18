@@ -24,7 +24,7 @@
 -- press COPY → paste it back. Rejoin NOT required (no hooks).
 --------------------------------------------------------------------
 
-print("[SpudCapture] boot v7.2 — hook-free capture (upvalue reader crash fixed)")
+print("[SpudCapture] boot v7.3 — hook-free capture (ancestor handlers + deep upvalue walk + GC remote sweep)")
 
 local lines = _G.SpudCaptureLog or {}
 _G.SpudCaptureLog = lines
@@ -48,9 +48,13 @@ local hasDebug = pcall(function()
         and (type(debug.getupvalues) == "function"
             or type(debug.getupvalue) == "function"), "no debug upvalues")
 end)
+local hasGetGc = pcall(function()
+    assert(type(getgc) == "function", "no getgc")
+end)
 print("[SpudCapture] getconnections: " .. (hasGetConn and "yes"
     or "NO — handler read unavailable"))
 print("[SpudCapture] debug upvalues: " .. (hasDebug and "yes" or "NO"))
+print("[SpudCapture] getgc: " .. (hasGetGc and "yes" or "NO"))
 
 -- ▸ WHERE THE WINDOW LIVES: gethui() → CoreGui → PlayerGui fallback
 local holder, holderName
@@ -386,6 +390,26 @@ local function readUpvalues(fn)
     return out
 end
 
+-- ▸ DEEP WALK: read a function's upvalues, then recurse ONE level into
+-- any upvalue function so a wrapper's inner closure gets read too.
+local function deepRead(fn, tag, seen, level)
+    level = level or 0
+    if seen[fn] or level > 1 then return end
+    seen[fn] = true
+    if not hasDebug then return end
+    local uvs = readUpvalues(fn)
+    if #uvs == 0 then
+        pushLine("[SPAWNBTN]   " .. tag .. " (no upvalues)")
+    end
+    for i, u in ipairs(uvs) do
+        pushLine(string.format("[SPAWNBTN]   %s [%d] %s = %s",
+            tag, i, u.name, desc(u.value)))
+        if type(u.value) == "function" then
+            deepRead(u.value, tag .. "." .. i, seen, level + 1)
+        end
+    end
+end
+
 -- ▸ THE SPAWN BUTTON READER — no hooks, pure reads -----------------
 local spawnAnalyzed = false
 local function analyzeSpawn(btn)
@@ -402,43 +426,93 @@ local function analyzeSpawn(btn)
 
     local events = { "Activated", "MouseButton1Click", "MouseButton1Down", "InputBegan" }
     local fns = {} -- fn -> { event names }
-    for _, ev in ipairs(events) do
-        local okC, conns = pcall(function() return getconnections(btn[ev]) end)
-        if okC and conns then
-            for _, c in ipairs(conns) do
-                local f = c.Function
-                if f then
-                    fns[f] = fns[f] or {}
-                    table.insert(fns[f], ev)
+    -- walk the button AND its ancestors: the real click handler often lives
+    -- on the Actions/Content/GarageMenu frame, not the TextButton itself
+    local seenObj, obj, hop = {}, btn, 0
+    while obj and hop < 5 do
+        seenObj[obj] = true
+        local label = (hop == 0) and "button" or ("ancestor " .. tostring(obj.Name))
+        for _, ev in ipairs(events) do
+            local okC, conns = pcall(function() return getconnections(obj[ev]) end)
+            if okC and conns then
+                for _, c in ipairs(conns) do
+                    local f = c.Function
+                    if f then
+                        fns[f] = fns[f] or {}
+                        table.insert(fns[f], ev .. "@" .. label)
+                    end
                 end
             end
         end
+        obj = obj.Parent
+        hop += 1
     end
 
     if next(fns) == nil then
-        pushLine("[SPAWNBTN] no connections on the button itself (handler may live on a parent)")
+        pushLine("[SPAWNBTN] no connections on the button or ancestors")
         flash("SPAWN: 0 connections", false)
         return
     end
 
-    local nFn = 0
+    local seenFn, nFn = {}, 0
     for f, evs in pairs(fns) do
         nFn += 1
         pushLine("[SPAWNBTN] handler " .. tostring(f) .. " on " .. table.concat(evs, "+"))
-        if hasDebug then
-            local uvs = readUpvalues(f)
-            if #uvs == 0 then
-                pushLine("[SPAWNBTN]   (handler has no upvalues)")
-            end
-            for i, u in ipairs(uvs) do
-                pushLine(string.format("[SPAWNBTN]   [%d] %s = %s",
-                    i, u.name, desc(u.value)))
-            end
-        else
-            pushLine("[SPAWNBTN]   debug.getupvalues NOT available — captures unreadable")
-        end
+        deepRead(f, "", seenFn, 0)
     end
     flash("SPAWN: " .. nFn .. " handler(s) read", true)
+    -- the handler above was a shallow wrapper (sound + timestamp); go find
+    -- the actual respawn remote directly in the heap so we don't miss it
+    gcSweep()
+end
+
+-- ▸ GC SWEEP: hunt the respawn remote(s) by name across every live object.
+-- This is the guaranteed path if the button handler is a shallow wrapper
+-- that only holds a sound module + timestamp (as v7.2 observed).
+local function gcSweep()
+    if not hasGetGc then
+        pushLine("[SWEEP] getgc NOT available")
+        return
+    end
+    local KEYS = { "FNCRespawnEquipment", "FNCForceRespawnEquipment", "RespawnEquipment" }
+    local seen, hits = {}, {}
+    pcall(function()
+        for _, v in ipairs(getgc(true)) do
+            if typeof(v) == "Instance" and v:IsA("RemoteEvent") then
+                local n = v.Name
+                for _, k in ipairs(KEYS) do
+                    if n == k or (n:find(k, 1, true)) then
+                        if not seen[v] then
+                            seen[v] = true
+                            hits[#hits + 1] = v
+                        end
+                    end
+                end
+            elseif typeof(v) == "table" and not seen[v] then
+                seen[v] = true
+                for kk, vv in pairs(v) do
+                    if typeof(vv) == "Instance"
+                        and (vv:IsA("RemoteEvent") or vv:IsA("RemoteFunction")) then
+                        for _, k in ipairs(KEYS) do
+                            if vv.Name:find(k, 1, true) or tostring(kk):find(k, 1, true) then
+                                hits[#hits + 1] = vv
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end)
+    if #hits == 0 then
+        pushLine("[SWEEP] no respawn remote found in GC")
+    else
+        pushLine("[SWEEP] respawn remotes (" .. #hits .. "):")
+        for _, r in ipairs(hits) do
+            local okF, full = pcall(function() return r:GetFullName() end)
+            pushLine("[SWEEP]   " .. tostring(r.ClassName) .. " "
+                .. (okF and full or r.Name))
+        end
+    end
 end
 
 -- ▸ MENU WATCHER: card count flash + Spawn-button reader -----------
@@ -525,7 +599,7 @@ baseText = "READY (hook-free)"
 baseColor = Color3.fromRGB(60, 200, 110)
 restoreBase()
 
-print("══════ SPAWN ARGS CAPTURE (§29 v7.2) ══════")
+print("══════ SPAWN ARGS CAPTURE (§29 v7.3) ══════")
 print("holder:       " .. holderName)
 print("capabilities: getconnections=" .. (hasGetConn and "yes" or "NO")
     .. "  debug.upvalues=" .. (hasDebug and "yes" or "NO"))
