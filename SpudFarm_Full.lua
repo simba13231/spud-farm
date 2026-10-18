@@ -1285,8 +1285,8 @@ local okBuild, errBuild = pcall(function()
     -- (v3 orbited goals; v4 reverse-assist jackknifed the plow — both gone.)
     -- Returns true=leg done, false=keys didn't drive (caller falls back to
     -- the glide), nil=killed.
-    local KEY_W, KEY_A, KEY_D =
-        Enum.KeyCode.W, Enum.KeyCode.A, Enum.KeyCode.D
+    local KEY_W, KEY_A, KEY_D, KEY_S =
+        Enum.KeyCode.W, Enum.KeyCode.A, Enum.KeyCode.D, Enum.KeyCode.S
     local keyHeld = {}
     local function setKey(key, down)
         if keyHeld[key] == down then return end
@@ -1294,7 +1294,51 @@ local okBuild, errBuild = pcall(function()
         VIM:SendKeyEvent(down, key, false, game)
     end
     local function releaseDriveKeys()
-        setKey(KEY_W, false) setKey(KEY_A, false) setKey(KEY_D, false)
+        setKey(KEY_W, false) setKey(KEY_A, false)
+        setKey(KEY_D, false) setKey(KEY_S, false)
+    end
+
+    -- ▸ REVERSE — ONLY where a turn is too sharp to take going forward
+    --   (user: "allow it to reverse? but only when needed on turns and
+    --   sharp turns"): back up while steering the nose around. Reversing
+    --   MIRRORS the steering response (parallel-parking logic: steer
+    --   right while backing = the NOSE swings left), so the error is
+    --   flipped vs the forward pursuit. Closed-loop on the heading error
+    --   — stops the moment the forward pursuit can take over (~55°), at
+    --   ~1.2 s, or on shutdown, with an honest log if it couldn't clear
+    --   it (blocked behind). Nothing else reverses: gentle corrections,
+    --   glides, arcs and the hitch line-ups stay forward/pivot.
+    local SHARP_TURN_DEG = 100 -- a leg-start heading jump bigger than this earns a reverse
+    local function reverseTurn(tr, seat, aimPos)
+        setKey(KEY_W, false)
+        setKey(KEY_S, true)
+        local cleared = false
+        for _ = 1, 20 do -- ~1.2 s cap at 0.06 s ticks
+            if stopping() then break end
+            local p = tr:GetPivot().Position
+            local look = seat.CFrame.LookVector
+            local nose = Vector3.new(look.X, 0, look.Z)
+            local want = Vector3.new(aimPos.X - p.X, 0, aimPos.Z - p.Z)
+            if nose.Magnitude < 0.1 or want.Magnitude < 0.5 then break end
+            nose, want = nose.Unit, want.Unit
+            local ang = math.deg(math.acos(math.clamp(nose:Dot(want), -1, 1)))
+            if ang < 55 then cleared = true break end
+            local wperp = Vector3.new(-want.Z, 0, want.X) -- right of the aim
+            local err = nose:Dot(wperp) -- >0 = nose right of aim → nose must swing LEFT
+            if err > 0.1 then
+                setKey(KEY_D, true) setKey(KEY_A, false) -- backed-up LEFT = steer right
+            elseif err < -0.1 then
+                setKey(KEY_A, true) setKey(KEY_D, false) -- backed-up RIGHT = steer left
+            else
+                setKey(KEY_A, false) setKey(KEY_D, false)
+            end
+            task.wait(0.06)
+        end
+        releaseDriveKeys()
+        if not cleared and not stopping() then
+            log("reverse didn't clear the turn (space behind blocked?) — continuing forward")
+        end
+        task.wait(0.15) -- settle before the forward pursuit re-engages
     end
 
     driveLegKeys = function(tr, seat, fromPt, toPt, tol)
@@ -1307,6 +1351,23 @@ local okBuild, errBuild = pcall(function()
         if legLen < 0.5 then return true end
         dir = dir / legLen
         local perp = Vector3.new(-dir.Z, 0, dir.X) -- right of the leg line
+        -- ▸ SHARP-TURN REVERSE (only when needed): a leg whose line
+        --   points >SHARP_TURN_DEG away from where the tractor's nose
+        --   faces earns a backed-up swing first — everything else
+        --   (90° lap corners, gentle corrections) drives forward exactly
+        --   as before. startPos is captured AFTER it so the keys-didn't-
+        --   drive probe measures only the forward pursuit.
+        local look0 = seat.CFrame.LookVector
+        local nose0 = Vector3.new(look0.X, 0, look0.Z)
+        if nose0.Magnitude > 0.1 then
+            nose0 = nose0.Unit
+            local ang0 = math.deg(math.acos(math.clamp(nose0:Dot(dir), -1, 1)))
+            if ang0 > SHARP_TURN_DEG then
+                log(string.format("sharp turn (%d°) — reversing to swing the nose around",
+                    math.floor(ang0 + 0.5)))
+                reverseTurn(tr, seat, A + dir * math.min(12, legLen))
+            end
+        end
         local startPos = tr:GetPivot().Position
         local prevPos, fwd = startPos, nil
         for tick = 1, 350 do -- ~42 s cap per leg (0.12 s ticks)
