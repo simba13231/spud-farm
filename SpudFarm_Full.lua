@@ -283,12 +283,11 @@ local okBuild, errBuild = pcall(function()
     --   "i want a new safty feature. when a vehicle is not within 1000
     --   studs it will use the equipement manager to respawn it"). The
     --   menu is driven the way a PLAYER drives it: click the MainHUD
-    --   "Equipment Manager" menu button (dump: MenuSelection.Garage),
-    --   find THIS vehicle's card by NAME, click its Respawn button,
-    --   close. Everything is name/text-driven at runtime (the card
-    --   layout was never dumped) and every miss logs honestly — down to
-    --   the labels the menu COULD show — instead of ever clicking
-    --   something else by guess.
+    --   "Equipment Manager" menu button, click THIS vehicle's card,
+    --   click that card's Spawn button, close. The paths are the live
+    --   ones from dump §28, and the expanded card is verified BY NAME
+    --   before anything is clicked — a wrong card can never be spawned.
+    --   Every miss logs honestly, down to what the menu does show.
     local RESPAWN_RANGE = 1000 -- studs: farther than this = respawn, not walk
 
     local function guiTextOf(btn)
@@ -299,39 +298,17 @@ local okBuild, errBuild = pcall(function()
         return btn.Name
     end
 
-    -- a GuiObject "mentions" a token via its Name, its own Text, or any
-    -- text-bearing descendant (that's how cards/buttons are recognised
-    -- without ever guessing a layout)
-    local function mentions(node, token)
-        token = tostring(token):lower()
-        if node.Name:lower():find(token, 1, true) then return true end
-        if (node:IsA("TextButton") or node:IsA("TextLabel"))
-            and node.Text:lower():find(token, 1, true) then return true end
-        for _, d in ipairs(node:GetDescendants()) do
-            if (d:IsA("TextButton") or d:IsA("TextLabel")) then
-                if d.Text:lower():find(token, 1, true) then return true end
-            elseif d.Name:lower():find(token, 1, true) then
-                return true
-            end
-        end
-        return false
-    end
-
+    -- close the manager the way dump §28 saw it close: the menu-level
+    -- ExitButton, falling back to the Garage toggle button
     local function closeManager(menu, garageBtn)
         if not menu or not menu.Enabled then return end
-        for _, d in ipairs(menu:GetDescendants()) do
-            if d:IsA("GuiButton") then
-                local nm = d.Name:lower()
-                local txt = d:IsA("TextButton")
-                    and d.Text:lower():gsub("%s+", "") or ""
-                if nm:find("close", 1, true) or txt == "x" or txt == "✕" or txt == "×" then
-                    pcall(function() d:Activate() end)
-                    task.wait(0.3)
-                    if not menu.Enabled then return end
-                end
-            end
+        local bg = menu:FindFirstChild("Background")
+        local exitBtn = bg and bg:FindFirstChild("ExitButton")
+        if exitBtn and exitBtn:IsA("GuiButton") then
+            pcall(function() exitBtn:Activate() end)
+            task.wait(0.3)
         end
-        if garageBtn then -- fall back to the same menu button (toggle)
+        if menu.Enabled and garageBtn then
             pcall(function() garageBtn:Activate() end)
             task.wait(0.3)
         end
@@ -340,6 +317,15 @@ local okBuild, errBuild = pcall(function()
         end
     end
 
+    -- the Equipment Manager's real layout, live-dumped in §28:
+    --   Background.Content.Cards.<level>.<id>   one ImageButton per vehicle
+    --     └ EquipmentName  TextLabel — text starts with the model name
+    --   Background.Content.Cards.ExpandedCard    fills on card click
+    --     └ Content.Info.EquipmentName           names the selected vehicle
+    --     └ Content.Actions.Spawn                TextButton "Spawn"
+    --   Background.ExitButton                    closes the menu
+    -- Flow: open → click this vehicle's card → verify the expanded card
+    -- really shows it → click Spawn → close.
     local function respawnViaManager(vehicleName)
         local ok, res = pcall(function()
             local pg = LocalPlayer:FindFirstChild("PlayerGui")
@@ -351,14 +337,8 @@ local okBuild, errBuild = pcall(function()
             local sel = main and main:FindFirstChild("MenuSelection")
             local garage = sel and sel:FindFirstChild("Garage")
             local garageBtn
-            if garage then
-                if garage:IsA("GuiButton") then
-                    garageBtn = garage
-                else
-                    for _, d in ipairs(garage:GetDescendants()) do
-                        if d:IsA("GuiButton") then garageBtn = d break end
-                    end
-                end
+            if garage and garage:IsA("GuiButton") then
+                garageBtn = garage
             end
             if not menu then
                 log("equipment manager: GuiViews.Menus.GarageMenu not found")
@@ -382,107 +362,78 @@ local okBuild, errBuild = pcall(function()
                 task.wait(0.4) -- let the card list populate
             end
             if stopping() then closeManager(menu, garageBtn) return false end
-            -- every vehicle this farm knows — used to tell one card apart
-            local known = { vehicleName }
-            local folder = equipmentFolder()
-            for _, e in ipairs(folder and folder:GetChildren() or {}) do
-                if e:IsA("Model") then known[#known + 1] = e.Name end
+            local bg = menu:FindFirstChild("Background")
+            local content = bg and bg:FindFirstChild("Content")
+            local cards = content and content:FindFirstChild("Cards")
+            if not cards then
+                log("equipment manager: Background.Content.Cards not found")
+                closeManager(menu, garageBtn)
+                return false
             end
-            local function scanButtons()
-                local list = {}
-                for _, d in ipairs(menu:GetDescendants()) do
-                    if d:IsA("GuiButton") then list[#list + 1] = d end
-                end
-                return list
-            end
-            local function candidates()
-                local respawn, spawn = {}, {}
-                for _, b in ipairs(scanButtons()) do
-                    if mentions(b, "respawn") then
-                        respawn[#respawn + 1] = b
-                    elseif mentions(b, "spawn") and not mentions(b, "store")
-                        and not mentions(b, "unstore") then
-                        spawn[#spawn + 1] = b
+            -- this vehicle's card: an ImageButton whose EquipmentName text
+            -- STARTS with the model name ("ZM80\n#9" → ZM80), so "Trailer"
+            -- can never match a card that merely mentions it
+            local card
+            for _, d in ipairs(cards:GetDescendants()) do
+                if d:IsA("ImageButton") then
+                    local nm = d:FindFirstChild("EquipmentName")
+                    if nm and nm:IsA("TextLabel") then
+                        local t = nm.Text:gsub("^%s+", ""):gsub("%s+$", "")
+                        if t:sub(1, #vehicleName) == vehicleName then
+                            card = d
+                            break
+                        end
                     end
                 end
-                if #respawn > 0 then return respawn end
-                return spawn
             end
-            local cands
-            for _ = 1, 4 do -- ~2 s for the card list to populate
-                cands = candidates()
-                if #cands > 0 then break end
-                task.wait(0.5)
-            end
-            if #cands == 0 then
-                -- log what the menu DOES show, so a structure surprise is
-                -- diagnosable from the Console alone
+            if not card then
+                -- log the cards the menu DOES show (honest diagnosing)
                 local shown = {}
-                for _, d in ipairs(menu:GetDescendants()) do
+                for _, d in ipairs(cards:GetDescendants()) do
                     if #shown >= 12 then break end
-                    if d:IsA("TextLabel") and d.Text ~= "" then
-                        shown[#shown + 1] = d.Text
+                    if d:IsA("TextLabel") and d.Name == "EquipmentName" and d.Text ~= "" then
+                        shown[#shown + 1] = d.Text:match("[^\n<]+") or d.Text
                     end
                 end
-                log("equipment manager: no Respawn/Spawn button found. it shows: "
-                    .. (#shown > 0 and table.concat(shown, " · ") or "no labels at all"))
+                log("equipment manager: no card for " .. vehicleName .. ". it shows: "
+                    .. (#shown > 0 and table.concat(shown, " · ") or "no cards"))
                 closeManager(menu, garageBtn)
                 return false
             end
-            -- the nearest ancestor that names EXACTLY ONE known vehicle
-            -- is that vehicle's card — a shared container naming several
-            -- is rejected, so a wrong card can never match
-            local function cardVehicle(node)
-                local found
-                for _, name in ipairs(known) do
-                    if mentions(node, name) then
-                        if found then return nil end -- several = shared container
-                        found = name
-                    end
-                end
-                return found
-            end
-            local pick
-            for _, b in ipairs(cands) do
-                local p = b.Parent
-                while p and p ~= menu do
-                    local v = cardVehicle(p)
-                    if v then
-                        if v:lower() == vehicleName:lower() then pick = b end
-                        break
-                    end
-                    p = p.Parent
-                end
-                if pick then break end
-            end
-            -- selection-flow fallback: some managers act on the SELECTED
-            -- vehicle — click this vehicle's card first, then retry
-            if not pick then
-                for _, b in ipairs(scanButtons()) do
-                    if mentions(b, vehicleName) then
-                        pcall(function() b:Activate() end)
-                        task.wait(0.5)
-                        break
-                    end
-                end
-                for _, b in ipairs(candidates()) do
-                    if b.Visible and b.Enabled then pick = b break end
+            -- click the card → fills the ExpandedCard for THIS vehicle
+            pcall(function() card:Activate() end)
+            task.wait(0.6)
+            local expanded = cards:FindFirstChild("ExpandedCard")
+            local expContent = expanded and expanded:FindFirstChild("Content")
+            local info = expContent and expContent:FindFirstChild("Info")
+            local expName = info and info:FindFirstChild("EquipmentName")
+            if expName and expName:IsA("TextLabel") then
+                local t = expName.Text:gsub("^%s+", ""):gsub("%s+$", "")
+                if t:sub(1, #vehicleName) ~= vehicleName then
+                    log(string.format("equipment manager: the card opened '%s', not %s — clicking nothing",
+                        t:match("[^\n<]+") or t, vehicleName))
+                    closeManager(menu, garageBtn)
+                    return false
                 end
             end
-            if not pick then
-                local texts = {}
-                for _, b in ipairs(cands) do
-                    texts[#texts + 1] = string.format("'%s'%s",
-                        guiTextOf(b), b.Enabled and "" or " (disabled)")
+            local actions = expContent and expContent:FindFirstChild("Actions")
+            local spawnBtn = actions and actions:FindFirstChild("Spawn")
+            if not (spawnBtn and spawnBtn:IsA("GuiButton")) then
+                local shown = {}
+                if actions then
+                    for _, d in ipairs(actions:GetDescendants()) do
+                        if d:IsA("TextButton") then
+                            shown[#shown + 1] = guiTextOf(d)
+                        end
+                    end
                 end
-                log(string.format("equipment manager: found %d button(s) (%s) but none on a %s card",
-                    #cands, table.concat(texts, ", "), vehicleName))
+                log("equipment manager: the " .. vehicleName .. " card has no Spawn button. its actions: "
+                    .. (#shown > 0 and table.concat(shown, " · ") or "none"))
                 closeManager(menu, garageBtn)
                 return false
             end
-            log(string.format("equipment manager: clicking '%s' to respawn %s",
-                guiTextOf(pick), vehicleName))
-            pcall(function() pick:Activate() end)
+            log(string.format("equipment manager: clicking 'Spawn' to respawn %s", vehicleName))
+            pcall(function() spawnBtn:Activate() end)
             task.wait(1) -- let the game process the respawn
             closeManager(menu, garageBtn)
             return true
