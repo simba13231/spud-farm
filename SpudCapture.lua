@@ -1,26 +1,28 @@
 --------------------------------------------------------------------
 -- SpudCapture — RESPAWN REMOTE ARGS (§29) with its own DEBUG GUI
--- v4: PARENT FIX — the window now lives in gethui()/CoreGui like
--- every executor UI library (the farming script's Fluent window is
--- there too), because games may SWEEP unknown ScreenGuis out of
--- PlayerGui — the classic "built but never shows" trap. v3's
--- diagnostics stay (boot line first, pcall'd build, exact-error
--- report, console-only fallback) + a 2s watchdog reports if anything
--- destroys the window anyway.
+-- v5: COLLAPSE-TO-PILL + MENU CARD COUNTER.
+--   * user report: "it makes the tractor and tools in the ui go away
+--     and i dont see them" — v4 spawned 440×300 DEAD CENTRE at
+--     DisplayOrder 9999, exactly on top of the Equipment Manager's
+--     card grid. v5 STARTS COLLAPSED as a small pill (bottom-left);
+--     nothing covers the menu. Tap the pill to expand, "–" to
+--     collapse, ✕ to close. The pill shows the live line count.
+--   * SELF-DIAGNOSTIC: when GarageMenu opens the script COUNTS the
+--     cards itself and flashes "MENU: N CARDS" (green) / "MENU: 0
+--     CARDS" (red) on pill + status chip + console. N>0 = cards were
+--     only being COVERED before; N=0 = menu really empty (then the
+--     hook is the suspect, not the window).
+-- v4 fixes stay: window lives in gethui()/CoreGui (games sweep
+-- unknown PlayerGui ScreenGuis), 2s alive/vanished watchdog,
+-- pcall'd build with console-only fallback, boot line first.
 --
--- WHY: the menu flow (open manager -> card -> Spawn) takes ~8-10 s of
--- mouse work. The game must be firing a REMOTE to do the respawn
--- (dump §28 found FNCRespawnEquipment / FNCForceRespawnEquipment).
--- If we know that remote's EXACT arguments, the farming script can
--- fire it directly — no menu, no clicks, instant.
---
--- RUN: paste + execute, then do the video's 3 clicks ONCE by hand:
---   1) open the Equipment Manager  2) click the ZM80 card
---   3) click Spawn            -> press COPY -> paste it back.
+-- RUN: loadstring(game:HttpGet("…/SpudCapture.lua"))()
+-- Then: collapse (–) → your video's 3 clicks (menu → ZM80 card →
+-- Spawn) → expand → COPY → paste it back.
 -- Changes NO game state — it only watches.
 --------------------------------------------------------------------
 
-print("[SpudCapture] boot v4 — building capture window")
+print("[SpudCapture] boot v5 — building capture window")
 
 _G.SpudCaptureSeq = (_G.SpudCaptureSeq or 0) + 1
 local mySeq = _G.SpudCaptureSeq
@@ -37,8 +39,7 @@ local function mk(class, props, parent)
     return o
 end
 
--- ▸ WHERE THE WINDOW LIVES: gethui() (hidden, game can't see it) →
---   CoreGui (games can't sweep it) → PlayerGui only as last resort
+-- ▸ WHERE THE WINDOW LIVES: gethui() → CoreGui → PlayerGui fallback
 local holder, holderName
 pcall(function()
     if type(gethui) == "function" then holder = gethui() end
@@ -56,7 +57,6 @@ else
 end
 print("[SpudCapture] holder: " .. holderName)
 
--- kill any window from an earlier run, wherever it lives
 pcall(function()
     local pg = Players.LocalPlayer:FindFirstChild("PlayerGui")
     for _, container in ipairs({ holder, pg, game:GetService("CoreGui") }) do
@@ -67,17 +67,31 @@ pcall(function()
     end
 end)
 
-local status, refresh, guiRef
+local status, pill, refresh, hookOK
 
--- ▸ THE WINDOW — built inside pcall so ANY failure is reported and
---   degrades to console-only capture instead of dying silently ------
+-- ▸ THE WINDOW — starts COLLAPSED (pill) so it never covers the menu
 local okBuild, errBuild = pcall(function()
     local gui = mk("ScreenGui", {
         Name = "SpudCaptureGui",
         ResetOnSpawn = false,
         DisplayOrder = 9999,
     }, holder)
-    guiRef = gui
+
+    -- the pill: small, bottom-left, always out of the menu's way
+    pill = mk("TextButton", {
+        AnchorPoint = Vector2.new(0, 1),
+        Position = UDim2.new(0, 14, 1, -48),
+        Size = UDim2.fromOffset(190, 32),
+        BackgroundColor3 = Color3.fromRGB(31, 31, 31),
+        BorderSizePixel = 0,
+        Text = "SPAWN CAPTURE (0)",
+        TextColor3 = Color3.fromRGB(255, 255, 255),
+        TextSize = 13,
+        Font = Enum.Font.GothamMedium,
+        Visible = true,
+    }, gui)
+    mk("UICorner", { CornerRadius = UDim.new(0, 16) }, pill)
+    mk("UIStroke", { Color = Color3.fromRGB(0, 120, 212), Thickness = 1 }, pill)
 
     local frame = mk("Frame", {
         AnchorPoint = Vector2.new(0.5, 0.5),
@@ -87,6 +101,7 @@ local okBuild, errBuild = pcall(function()
         BorderSizePixel = 0,
         ClipsDescendants = true,
         Active = true,
+        Visible = false, -- STARTS COLLAPSED — nothing covers the menu
     }, gui)
     mk("UICorner", { CornerRadius = UDim.new(0, 8) }, frame)
     mk("UIStroke", { Color = Color3.fromRGB(42, 42, 42), Thickness = 1 }, frame)
@@ -98,7 +113,7 @@ local okBuild, errBuild = pcall(function()
     }, frame)
     mk("TextLabel", {
         Position = UDim2.new(0, 12, 0, 0),
-        Size = UDim2.new(1, -160, 1, 0),
+        Size = UDim2.new(1, -195, 1, 0),
         BackgroundTransparency = 1,
         Text = "SPAWN CAPTURE",
         TextColor3 = Color3.fromRGB(255, 255, 255),
@@ -108,14 +123,25 @@ local okBuild, errBuild = pcall(function()
     }, titleBar)
 
     status = mk("TextLabel", {
-        Position = UDim2.new(1, -160, 0, 0),
-        Size = UDim2.new(0, 118, 1, 0),
+        Position = UDim2.new(1, -185, 0, 0),
+        Size = UDim2.new(0, 112, 1, 0),
         BackgroundTransparency = 1,
         Text = "starting…",
         TextColor3 = Color3.fromRGB(160, 160, 160),
         TextSize = 12,
         Font = Enum.Font.GothamMedium,
         TextXAlignment = Enum.TextXAlignment.Right,
+    }, titleBar)
+
+    local collapseBtn = mk("TextButton", {
+        Position = UDim2.new(1, -66, 0, 5),
+        Size = UDim2.fromOffset(24, 24),
+        BackgroundTransparency = 1,
+        Text = "–",
+        TextColor3 = Color3.fromRGB(180, 180, 180),
+        TextSize = 16,
+        Font = Enum.Font.GothamMedium,
+        AutoButtonColor = false,
     }, titleBar)
 
     local closeBtn = mk("TextButton", {
@@ -128,9 +154,6 @@ local okBuild, errBuild = pcall(function()
         Font = Enum.Font.GothamMedium,
         AutoButtonColor = false,
     }, titleBar)
-    closeBtn.MouseButton1Click:Connect(function()
-        gui:Destroy() -- the console [SPAWNWATCH …] backup keeps working
-    end)
 
     local logLabel = mk("TextLabel", {
         Position = UDim2.new(0, 8, 0, 42),
@@ -158,7 +181,7 @@ local okBuild, errBuild = pcall(function()
         ScrollingDirection = Enum.ScrollingDirection.Y,
     }, frame)
     mk("UICorner", { CornerRadius = UDim.new(0, 6) }, logScroll)
-    logLabel.Parent = logScroll -- label lives INSIDE the scroller
+    logLabel.Parent = logScroll
 
     local copyBtn = mk("TextButton", {
         Position = UDim2.new(0, 8, 1, -40),
@@ -171,9 +194,23 @@ local okBuild, errBuild = pcall(function()
     }, frame)
     mk("UICorner", { CornerRadius = UDim.new(0, 6) }, copyBtn)
 
+    local function setExpanded(on)
+        frame.Visible = on
+        pill.Visible = not on
+    end
+
     refresh = function()
         logLabel.Text = table.concat(lines, "\n")
+        if pill.Visible then
+            pill.Text = "SPAWN CAPTURE (" .. #lines .. ")"
+        end
     end
+
+    pill.MouseButton1Click:Connect(function() setExpanded(true) end)
+    collapseBtn.MouseButton1Click:Connect(function() setExpanded(false) end)
+    closeBtn.MouseButton1Click:Connect(function()
+        gui:Destroy() -- the console [SPAWNWATCH …] backup keeps working
+    end)
 
     copyBtn.MouseButton1Click:Connect(function()
         if #lines == 0 then
@@ -212,27 +249,58 @@ local okBuild, errBuild = pcall(function()
     end)
 
     refresh()
-    print("[SpudCapture] ✔ window up under " .. holderName
-        .. " (440×300, centre screen, drag by title)")
+    print("[SpudCapture] ✔ pill up under " .. holderName
+        .. " (bottom-left; tap to expand, – collapses, ✕ closes)")
 end)
 if not okBuild then
     warn("[SpudCapture] ✘ WINDOW BUILD FAILED: " .. tostring(errBuild))
     warn("[SpudCapture] falling back to CONSOLE-ONLY — watch [SPAWNWATCH …] lines")
 end
 
--- watchdog: did anything destroy it after the fact?
 task.delay(2, function()
-    if not guiRef then return end
-    if not guiRef.Parent then
-        warn("[SpudCapture] ✘ window VANISHED after 2s — something destroyed"
-            .. " it (game sweeping " .. holderName .. "?)")
+    if not pill and not status then return end -- build failed: console-only
+    local gui = pill and pill.Parent or (status and status:FindFirstAncestorWhichIsA("ScreenGui"))
+    if not gui then return end
+    if not gui.Parent then
+        warn("[SpudCapture] ✘ window VANISHED after 2s — something destroyed it")
     else
-        print("[SpudCapture] ✔ window still alive under " .. holderName .. " (+2s)")
+        print("[SpudCapture] ✔ window still alive (+2s)")
     end
 end)
 
 local function refreshSafe()
     if refresh then pcall(refresh) end
+end
+
+-- ▸ STATUS FLASH (also answers the "cards gone" question) ----------
+local flashTok = 0
+local function restoreBase()
+    if pill then
+        pill.Text = "SPAWN CAPTURE (" .. #lines .. ")"
+        pill.TextColor3 = Color3.fromRGB(255, 255, 255)
+    end
+    if status then
+        status.Text = hookOK and "CAPTURE ON" or "HOOK FAILED"
+        status.TextColor3 = hookOK and Color3.fromRGB(60, 200, 110)
+            or Color3.fromRGB(240, 80, 80)
+    end
+end
+local function flash(msg, good)
+    flashTok += 1
+    local my = flashTok
+    local col = good and Color3.fromRGB(60, 200, 110)
+        or Color3.fromRGB(240, 80, 80)
+    if pill then
+        pill.Text = msg
+        pill.TextColor3 = col
+    end
+    if status then
+        status.Text = msg
+        status.TextColor3 = col
+    end
+    task.delay(5, function()
+        if flashTok == my then restoreBase() end
+    end)
 end
 
 -- ▸ ARG PRINTER (dump §28's summarize, returns the string) ---------
@@ -263,8 +331,6 @@ local function summarizeArgs(...)
     return table.concat(parts, "  ")
 end
 
--- remotes the menu flow plausibly calls by NAME, plus any call whose
--- STRING args mention a known model (catches an oddly-named remote)
 local KEYS = { "respawn", "spawn", "store", "equip", "garage",
     "manager", "select", "hitch" }
 local MODELS = { "ZM80", "KADL", "KQF3000", "SRC6", "R150", "S4204", "Trailer" }
@@ -304,20 +370,56 @@ local okHook, errHook = pcall(function()
         return oldHook(self, ...)
     end))
 end)
-
-if status then
-    status.Text = okHook and "CAPTURE ON" or "HOOK FAILED"
-    status.TextColor3 = okHook and Color3.fromRGB(60, 200, 110)
-        or Color3.fromRGB(240, 80, 80)
-end
+hookOK = okHook
+restoreBase()
 if not okHook then
     warn("[SPAWNWATCH] hook FAILED: " .. tostring(errHook))
 end
 
-print("══════ SPAWN ARGS CAPTURE (§29 v4) ══════")
+-- ▸ MENU CARD COUNTER — when the Equipment Manager opens, count the
+--   cards: N>0 = they were only being COVERED before; N=0 = the menu
+--   is really empty (then the hook, not the window, is the suspect)
+local okWatch, errWatch = pcall(function()
+    local pg = Players.LocalPlayer:WaitForChild("PlayerGui")
+    local gv = pg:WaitForChild("GuiViews", 5)
+    local menus = gv and gv:WaitForChild("Menus", 5)
+    local menu = menus and menus:FindFirstChild("GarageMenu")
+    assert(menu, "GarageMenu not found under GuiViews.Menus")
+    local function countCards()
+        local bg = menu:FindFirstChild("Background")
+        local content = bg and bg:FindFirstChild("Content")
+        local cards = content and content:FindFirstChild("Cards")
+        if not cards then return nil end
+        local n = 0
+        for _, d in ipairs(cards:GetDescendants()) do
+            if d:IsA("ImageButton") and d:FindFirstChild("EquipmentName") then
+                n += 1
+            end
+        end
+        return n
+    end
+    menu:GetPropertyChangedSignal("Enabled"):Connect(function()
+        if not menu.Enabled then return end
+        local n = countCards()
+        warn("[SPAWNWATCH] GarageMenu opened — "
+            .. (n and (n .. " cards") or "card count FAILED"))
+        if n then
+            flash("MENU: " .. n .. " CARDS", n > 0)
+        else
+            flash("MENU: ? CARDS", false)
+        end
+    end)
+end)
+if not okWatch then
+    warn("[SpudCapture] menu watcher FAILED: " .. tostring(errWatch))
+end
+
+print("══════ SPAWN ARGS CAPTURE (§29 v5) ══════")
 print("holder:  " .. holderName)
-print(okBuild and "window: ✔ built" or "window: ✘ FAILED (error above)")
-print(okHook and "capture: ✔ ON — 3 clicks once (menu → ZM80 card →"
-    .. " Spawn), then press COPY" or ("capture: ✘ hook FAILED: "
-    .. tostring(errHook)))
+print(okBuild and "window:  ✔ PILL bottom-left (tap to expand)"
+    or "window:  ✘ FAILED (error above)")
+print(okWatch and "watcher: ✔ GarageMenu card counter ON"
+    or ("watcher: ✘ " .. tostring(errWatch)))
+print(okHook and "capture: ✔ ON — collapse (–) → 3 clicks → expand → COPY"
+    or ("capture: ✘ hook FAILED: " .. tostring(errHook)))
 print("══════════════════════════════════════")
