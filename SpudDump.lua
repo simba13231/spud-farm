@@ -1787,6 +1787,12 @@ local ok, err = pcall(function()
     --     manager yourself and click Respawn once to feed [MGRWATCH].
     ------------------------------------------------------------------
     local ok28, err28 = pcall(function()
+        -- crash-proof property reader — §28 run 1 died reading .Enabled
+        -- off the Percy FOLDER inside Menus (Folders have no Enabled)
+        local function propOf(inst, prop)
+            local okv, v = pcall(function() return inst[prop] end)
+            return okv and v or nil
+        end
         header("EQUIPMENT MANAGER (GarageMenu structure)")
         local pg28 = game:GetService("Players").LocalPlayer:FindFirstChildOfClass("PlayerGui")
         local gv28 = pg28 and pg28:FindFirstChild("GuiViews")
@@ -1819,8 +1825,9 @@ local ok, err = pcall(function()
         end
         local menuNames28 = {}
         for _, m in ipairs(menus28 and menus28:GetChildren() or {}) do
+            local en28 = propOf(m, "Enabled") -- Folders in Menus have no Enabled
             menuNames28[#menuNames28 + 1] = string.format("%s[%s] Enabled=%s",
-                m.Name, m.ClassName, tostring(m.Enabled))
+                m.Name, m.ClassName, en28 ~= nil and tostring(en28) or "n/a")
         end
         w("  GuiViews.Menus children: " .. (#menuNames28 > 0
             and table.concat(menuNames28, ", ") or "(none / no GuiViews.Menus)"))
@@ -1833,8 +1840,9 @@ local ok, err = pcall(function()
                 n += 1
                 local extra = ""
                 if inst:IsA("GuiObject") then
+                    local en28 = propOf(inst, "Enabled")
                     extra = string.format("  Vis=%s%s", tostring(inst.Visible),
-                        inst:IsA("GuiButton") and (" Enabled=" .. tostring(inst.Enabled)) or "")
+                        en28 ~= nil and (" Enabled=" .. tostring(en28)) or "")
                 end
                 local txt = ""
                 if (inst:IsA("TextLabel") or inst:IsA("TextButton") or inst:IsA("TextBox"))
@@ -1853,7 +1861,9 @@ local ok, err = pcall(function()
         end
 
         if menu28 then
-            w(string.format("  GarageMenu: Enabled=%s — CLOSED tree:", tostring(menu28.Enabled)))
+            w(string.format("  GarageMenu: Enabled=%s — current tree%s:", tostring(menu28.Enabled),
+                menu28.Enabled and " (it's already OPEN — the dump skips the open-click and just closes it after)"
+                    or " (closed state)"))
             tree28(menu28, 150)
         else
             w("  GuiViews.Menus.GarageMenu NOT FOUND")
@@ -1924,7 +1934,7 @@ local ok, err = pcall(function()
                 hits28 += 1
                 w(string.format("  [%d] %s (%s)%s%s", hits28, d:GetFullName(), d.ClassName,
                     (tx28 and tx28 ~= "") and ("  Text=" .. string.sub(tx28, 1, 40)) or "",
-                    d:IsA("GuiButton") and ("  Enabled=" .. tostring(d.Enabled)) or ""))
+                    d:IsA("GuiButton") and ("  Enabled=" .. tostring(propOf(d, "Enabled"))) or ""))
             end
         end
         w("  hits: " .. hits28)
