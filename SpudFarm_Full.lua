@@ -2095,6 +2095,16 @@ local okBuild, errBuild = pcall(function()
             log(string.format("✅ tractor respawned — %.0f studs away now", dist))
         end
 
+        -- ▸ THE HARVESTER (user: "the harvester is a seperate tool from
+        --   the tractor. just make it spawn and we will work from
+        --   there."): NO hitch and no pass — this only makes sure the
+        --   harvester is OUT and near the plot instead of sitting in
+        --   storage, through the exact proven path (Equipment Manager →
+        --   the game's own Spawn handler). Already out and near → it does
+        --   nothing at all. Harvesting comes later, one step at a time.
+        ensureToolNearby(tr, "Harvester", "harvester")
+        if stopping() then return end
+
         -- ▸ step 0: what work is left? (ALL of my fields are scanned —
         --   including fields placed on my plots — and each field's real
         --   state is logged). Checked BEFORE mount so an idle run never
