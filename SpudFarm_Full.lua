@@ -205,6 +205,18 @@ local okBuild, errBuild = pcall(function()
         --   game fires FNCSeedFieldCell itself — never spoofed
         { typeName = "Planter",    stage = "Cultivated", verb = "seed",
           past = "seeded",    prog = "seeding",    remote = "FNCSeedFieldCell" },
+        -- ▸ THE HARVEST PASS (user: "once it's in the harvester it does the
+        --   same loop at the tractor to harvest the crops, goes back and
+        --   re does it if any missed"): the SAME field tour + SAME
+        --   outside-in spiral + touch-up/missed-cell visits — but the tool
+        --   IS the ride (the harvester is a separate self-propelled tool,
+        --   never hitched to the tractor), and the target is any cell with
+        --   a crop STANDING (grown = a stage that is not one of the four
+        --   we know; the real stage string isn't in the dumps, and the
+        --   per-field log now prints every stage name so it shows up).
+        { typeName = "Harvester", grown = true, selfPropelled = true,
+          verb = "harvest", past = "harvested", prog = "harvesting",
+          remote = "unknown (the harvest event isn't in the dumps)" },
     }
 
     -- dump-named MODEL per type — user-corrected live: the KQF3000 (the
@@ -1510,6 +1522,8 @@ local okBuild, errBuild = pcall(function()
     -- cols×rows of 10-stud tiles laid over the plate, and the plate is
     -- ROTATED — so the columns' axis follows whichever plate side measures
     -- cols*10 studs. Returns { {X=, Y=, Z=}, ... } or nil when unreadable.
+    -- `stage` may also be a FUNCTION (the harvester targets "any stage
+    -- that isn't one of the four we know" — see whichNeed).
     local function cellsAtStage(field, stage, baseCF, baseSize)
         local ok, out = pcall(function()
             local mods = game:GetService("ReplicatedStorage"):FindFirstChild("Modules")
@@ -1532,7 +1546,9 @@ local okBuild, errBuild = pcall(function()
                     if x and y then
                         if x > cols then cols = x end
                         if y > rows then rows = y end
-                        if tostring(cell.Stage or "?") == stage then
+                        local s = tostring(cell.Stage or "?")
+                        if (type(stage) == "function" and stage(s))
+                            or (type(stage) ~= "function" and s == stage) then
                             missed[#missed + 1] = { x = x, y = y }
                         end
                     end
@@ -1560,30 +1576,78 @@ local okBuild, errBuild = pcall(function()
         return nil
     end
 
+    -- ▸ WHAT EACH JOB AIMS AT (shared by probeWork, runPass and sweepField).
+    --   The three tractor jobs target ONE stage each (Empty → Plowed →
+    --   Cultivated → Seeded, every transition fired by the game itself on
+    --   drive-over). The HARVESTER has no stage name in the dumps, so "a
+    --   crop is standing here" = any stage that is NOT one of the four we
+    --   know — the per-field log prints every stage it sees, so the real
+    --   name shows up in the Console after one run.
+    local KNOWN_STAGES = {
+        Empty = true, Plowed = true, Cultivated = true, Seeded = true,
+    }
+    local function grownStage(s) return not KNOWN_STAGES[s] end
+
+    -- how many cells in `st` still need `job` (nil when counts unknown)
+    local function whichNeed(job, st)
+        if not st or st.total == 0 then return nil end
+        if job.grown then
+            local left = st.total
+            for name in pairs(KNOWN_STAGES) do
+                left -= (st[name] or 0)
+            end
+            return left
+        end
+        return st[job.stage] or 0
+    end
+
+    -- world points of the cells still needing `job` (nil = unreadable)
+    local function whichCells(job, field, baseCF, baseSize)
+        if job.grown then
+            return cellsAtStage(field, grownStage, baseCF, baseSize)
+        end
+        return cellsAtStage(field, job.stage, baseCF, baseSize)
+    end
+
     -- scan every field of mine ONCE (nearest-first) and say what work is
     -- left: any bare cells (the PLOW's job) and any Plowed cells (the
     -- CULTIVATOR's job). Every field's real state is logged. A failed
     -- count read never disqualifies a field (unknown = work to try).
     local function probeWork(nearPos)
         local crops = findMyFields(nearPos)
-        if #crops == 0 then return false, false, false end
-        local needPlow, needCult, needSeed = false, false, false
+        if #crops == 0 then return false, false, false, false end
+        local needPlow, needCult, needSeed, needHarv =
+            false, false, false, false
         for _, m in ipairs(crops) do
             local st = countStages(m.d)
             if st and st.total > 0 then
-                local bare, plowedN, cultN = st.Empty or 0, st.Plowed or 0,
-                    st.Cultivated or 0
-                log(string.format("%s: %d bare, %d plowed, %d cultivated, %d total cells",
-                    m.d.Name, bare, plowedN, cultN, st.total))
+                local bare, plowedN = st.Empty or 0, st.Plowed or 0
+                local cultN, seedN = st.Cultivated or 0, st.Seeded or 0
+                local grownN = whichNeed(JOBS[4], st) or 0
+                -- EVERY stage name the field reports right now (so the
+                -- harvester's real "crop is standing" name becomes visible)
+                local parts = {}
+                for name, n in pairs(st) do
+                    if name ~= "total" then
+                        parts[#parts + 1] = string.format("%s=%d", name, n)
+                    end
+                end
+                table.sort(parts)
+                log(string.format(
+                    "%s: %d bare, %d plowed, %d cultivated, %d seeded, %d standing, %d total cells  [%s]",
+                    m.d.Name, bare, plowedN, cultN, seedN, grownN, st.total,
+                    table.concat(parts, " ")))
                 if bare > 0 then needPlow = true end
                 if plowedN > 0 then needCult = true end
                 if cultN > 0 then needSeed = true end
+                if grownN > 0 then needHarv = true end
             else
                 log(m.d.Name .. ": cell count unavailable — treating as needing work")
                 needPlow, needCult, needSeed = true, true, true
+                needHarv = true -- unknown counts never skip the harvest
             end
         end
-        return needPlow, needCult, needSeed
+        return needPlow, needCult, needSeed, needHarv
     end
 
     -- ▸ SEEDER STEP 1 (dump §27 settled WHERE the seed state lives): the
@@ -1958,7 +2022,7 @@ local okBuild, errBuild = pcall(function()
             return c + driveDir * along + stepDir * step
         end
         local st0 = countStages(field)
-        local need0 = st0 and (st0[job.stage] or 0) or nil
+        local need0 = st0 and whichNeed(job, st0) or nil
         log(string.format("%s: %d-ring spiral, outside-in  (%s)", job.verb, rings,
             st0 and string.format("%d/%d cells still need %s", need0, st0.total, job.prog)
                 or "cell read unavailable"))
@@ -2022,7 +2086,7 @@ local okBuild, errBuild = pcall(function()
         --   the plate's own axis so the trailing tool sweeps its full
         --   width (a diagonal crossing can miss the corners of a 10×10
         --   cell). Then stop and recount — verdict below stays honest.
-        local missed = cellsAtStage(field, job.stage, baseCF, baseSize)
+        local missed = whichCells(job, field, baseCF, baseSize)
         if missed == nil then
             log("touch-up: cell read unavailable — can't locate missed cubes")
         elseif #missed > 0 then
@@ -2064,7 +2128,7 @@ local okBuild, errBuild = pcall(function()
         end
         local st1 = countStages(field)
         if st1 then
-            local need1 = st1[job.stage] or 0
+            local need1 = whichNeed(job, st1) or 0
             log(string.format("sweep done: %d/%d cells still need %s", need1, st1.total, job.prog))
             if st1.total > 0 and need1 == 0 then
                 log("✅ the whole field is " .. job.past)
@@ -2122,52 +2186,20 @@ local okBuild, errBuild = pcall(function()
             log(string.format("✅ tractor respawned — %.0f studs away now", dist))
         end
 
-        -- ▸ THE HARVESTER — SPAWN IT, THEN TRAVEL TO IT AND GET IN
-        --   (user: "the harvester is a seperate tool from the tractor.
-        --   just make it spawn and we will work from there." → "now make
-        --   it travel and get into the harvester"). NO hitch and NO
-        --   harvest pass yet: the tool is brought out of storage through
-        --   the proven Equipment Manager path, then the player walks to
-        --   it and sits in its driver seat with the SAME proven mount
-        --   sequence the tractor uses (moveTo → F → seated check; it gets
-        --   out of any other ride first). Already out and near → it just
-        --   walks over and climbs in.
-        local hv = ensureToolNearby(tr, "Harvester", "harvester")
-        if stopping() then return end
-        if hv then
-            local hseat = hv:FindFirstChildWhichIsA("VehicleSeat", true)
-                or hv:FindFirstChildWhichIsA("Seat", true)
-            if not hseat then
-                log("the harvester has no driver seat — can't get in")
-            elseif hum.SeatPart and hum.SeatPart:IsDescendantOf(hv) then
-                log("already in the harvester (" .. hv.Name .. ")")
-            else
-                local root = char:FindFirstChild("HumanoidRootPart")
-                local hdist = root
-                    and (hseat.Position - root.Position).Magnitude or 0
-                log(string.format("traveling to the harvester (%s, %.0f studs)…",
-                    hv.Name, hdist))
-                if not mountTractor(char, hum, hv, hseat, hdist, "harvester") then
-                    log("couldn't get into the harvester — carrying on without it")
-                end
-            end
-        end
-        if stopping() then return end
-
         -- ▸ step 0: what work is left? (ALL of my fields are scanned —
         --   including fields placed on my plots — and each field's real
         --   state is logged). Checked BEFORE mount so an idle run never
         --   even walks to the tractor. Failed counts never skip (unknown
         --   = work to try).
-        local needPlow, needCult, needSeed =
+        local needPlow, needCult, needSeed, needHarv =
             probeWork(tr:GetPivot().Position)
-        if not needPlow and not needCult and not needSeed then
+        if not needPlow and not needCult and not needSeed and not needHarv then
             -- truly idle: nothing bare, nothing plowed, everything seeded
             -- — but a FULL seeder is still the step-2 rule (hitch it), so
             -- the seed check still decides
             if not seedCheck(tr, hum) then
                 if stopping() then return end
-                log("✅ every field is plowed, cultivated and seeded — nothing to do")
+                log("✅ every field is plowed, cultivated and seeded, and nothing is standing — nothing to do")
                 return
             end
             if stopping() then return end
@@ -2178,29 +2210,68 @@ local okBuild, errBuild = pcall(function()
         end
         if stopping() then return end
 
-        -- ▸ step 1: mount (skipped when already in the tractor)
-        if not mountTractor(char, hum, tr, seat, dist) then return end
-
-        logEquipment() -- always show the names so we can confirm the pick
+        -- ▸ THE HARVESTER — SPAWN IT, THEN TRAVEL TO IT AND GET IN
+        --   (user: "the harvester is a seperate tool from the tractor.
+        --   just make it spawn and we will work from there." → "now make
+        --   it travel and get into the harvester"): only when there is
+        --   actually something standing to harvest (needHarv above) — a
+        --   run with nothing to harvest never walks to it at all. The
+        --   tool is brought out of storage through the proven Equipment
+        --   Manager path, then the player walks to it and sits in its
+        --   driver seat with the SAME proven mount sequence the tractor
+        --   uses (moveTo → F → seated check; it gets out of any other ride
+        --   first). Already out and near → it just walks over and climbs
+        --   in.
+        local hv, hseat
+        if needHarv then
+            hv = ensureToolNearby(tr, "Harvester", "harvester")
+            if stopping() then return end
+            if hv then
+                hseat = hv:FindFirstChildWhichIsA("VehicleSeat", true)
+                    or hv:FindFirstChildWhichIsA("Seat", true)
+                if not hseat then
+                    log("the harvester has no driver seat — can't get in")
+                elseif hum.SeatPart and hum.SeatPart:IsDescendantOf(hv) then
+                    log("already in the harvester (" .. hv.Name .. ")")
+                else
+                    local root = char:FindFirstChild("HumanoidRootPart")
+                    local hdist = root
+                        and (hseat.Position - root.Position).Magnitude or 0
+                    log(string.format("traveling to the harvester (%s, %.0f studs)…",
+                        hv.Name, hdist))
+                    if not mountTractor(char, hum, hv, hseat, hdist, "harvester") then
+                        log("couldn't get into the harvester — carrying on without it")
+                    end
+                end
+            end
+            if stopping() then return end
+        end
 
         -- ONE implement pass: the nearest field still at the job's stage,
         -- hitch THAT job's implement (tug-verified, origin remembered),
         -- drive there, spiral sweep, then unhitch the tool WHERE IT CAME
         -- FROM. Used twice below: the plow (bare -> Plowed), then the
         -- cultivator (Plowed -> Cultivated) — same proven machinery.
-        local function runPass(job)
+        -- ▸ `ride` = the vehicle that DRIVES the tour and `rideSeat` = the
+        --   seat its drive keys go to. Default = the tractor. The HARVEST
+        --   job passes the harvester instead: it is self-propelled, so it
+        --   IS the tool — nothing is hitched and nothing is dropped.
+        local function runPass(job, ride, rideSeat)
+            ride = ride or tr
+            rideSeat = rideSeat or hum.SeatPart
             -- ▸ the TOUR (user request): walk EVERY field of mine, grouped
             --   by land type, nearest-first per group — work the fields
             --   that still need this job, log-and-skip the rest. One
             --   hitch for the whole tour; only mount-hitch when at least
             --   ONE field still needs the job.
-            local groups = fieldTour(tr:GetPivot().Position)
+            local groups = fieldTour(ride:GetPivot().Position)
             local anyNeed = false
             for _, grp in ipairs(groups) do
                 for _, m in ipairs(grp.fields) do
                     local st = countStages(m.d)
                     -- unknown counts stay eligible (never skip on unknown)
-                    if not st or st.total == 0 or (st[job.stage] or 0) > 0 then
+                    if not st or st.total == 0
+                        or (whichNeed(job, st) or 0) > 0 then
                         anyNeed = true
                     end
                 end
@@ -2209,23 +2280,37 @@ local okBuild, errBuild = pcall(function()
                 log("no field needs " .. job.verb .. " — pass skipped")
                 return false
             end
-            -- safety for every tool: in storage or >1000 studs away =
-            -- respawn it via the Equipment Manager (same rule as the
-            -- tractor gate), then re-find the fresh model
-            local impl, idist, basis =
-                ensureToolNearby(tr, job.typeName, job.verb)
-            if not impl then return false end
-            -- remember WHERE the tool was found: after the sweep it gets
-            -- unhitched back at THIS spot (user: "unhitch the tools where
-            -- they came from")
-            local origin = impl:GetPivot().Position
-            log(string.format("hitch target: %s (%.0f studs, by %s)",
-                impl.Name, idist or 0, basis or "?"))
+            local impl, origin
+            if job.selfPropelled then
+                -- the ride IS the tool — nothing to hitch, nothing to
+                -- unhitch, no Equipment Manager trip either (the harvester
+                -- step already made sure it is out and near)
+                impl = ride
+                origin = ride:GetPivot().Position
+                log(string.format("%s: driving the %s itself (self-propelled — nothing to hitch)",
+                    job.verb, ride.Name))
+            else
+                -- safety for every tool: in storage or >1000 studs away =
+                -- respawn it via the Equipment Manager (same rule as the
+                -- tractor gate), then re-find the fresh model
+                local idist, basis
+                impl, idist, basis =
+                    ensureToolNearby(tr, job.typeName, job.verb)
+                if not impl then return false end
+                -- remember WHERE the tool was found: after the sweep it gets
+                -- unhitched back at THIS spot (user: "unhitch the tools where
+                -- they came from")
+                origin = impl:GetPivot().Position
+                log(string.format("hitch target: %s (%.0f studs, by %s)",
+                    impl.Name, idist or 0, basis or "?"))
+            end
 
             -- the proven hitch sequence (stale-HUD tug-verify, wrong-tool
             -- guard, line-up/creep retries) — extracted as hitchTool so
             -- the seeder hitch (step 2) reuses the exact same code
-            if not hitchTool(tr, impl) then return false end
+            if not job.selfPropelled and not hitchTool(tr, impl) then
+                return false
+            end
 
             -- ▸ the tour: every field, in order — skip the finished ones,
             --   sweep the rest; the tool stays hitched across the whole
@@ -2235,7 +2320,7 @@ local okBuild, errBuild = pcall(function()
                 for _, m in ipairs(grp.fields) do
                     if stopping() then return false end
                     local st = countStages(m.d)
-                    local need = st and (st[job.stage] or 0) or nil
+                    local need = st and whichNeed(job, st) or nil
                     if st and st.total > 0 and need == 0 then
                         log(string.format("SKIP %s — nothing needs %s (%d cells)",
                             m.d.Name, job.verb, st.total))
@@ -2243,22 +2328,27 @@ local okBuild, errBuild = pcall(function()
                         log(string.format("%s %s (%s land, %s)",
                             job.verb, m.d.Name, m.typeName,
                             need and (need .. " cells need it") or "state unknown"))
-                        local arrived, how = driveToField(tr, m.d, hum.SeatPart, impl)
+                        local arrived, how =
+                            driveToField(ride, m.d, rideSeat, impl)
                         if stopping() then return false end
                         if not arrived then
                             log("couldn't reach " .. m.d.Name .. " (" .. tostring(how) .. ")")
                             return false
                         end
                         log("✅ reached " .. m.d.Name)
-                        -- honest end-state: did the tool come along?
-                        local tH, pH = findHitchPart(tr), findHitchPart(impl)
-                        if tH and pH then
-                            log(string.format("hitch gap at arrival: %.1f studs",
-                                (tH.Position - pH.Position).Magnitude))
+                        -- honest end-state: did the tool come along? (only
+                        -- meaningful when something is HITCHED to the ride)
+                        if not job.selfPropelled then
+                            local tH, pH =
+                                findHitchPart(ride), findHitchPart(impl)
+                            if tH and pH then
+                                log(string.format("hitch gap at arrival: %.1f studs",
+                                    (tH.Position - pH.Position).Magnitude))
+                            end
                         end
                         -- the spiral sweep — the game stages cells over as
                         -- the tool passes over them (same for every job)
-                        local swept, why = sweepField(tr, m.d, hum.SeatPart, job)
+                        local swept, why = sweepField(ride, m.d, rideSeat, job)
                         if stopping() then return false end
                         if not swept then
                             log(job.verb .. " pass aborted (" .. tostring(why) .. ")")
@@ -2269,18 +2359,78 @@ local okBuild, errBuild = pcall(function()
             end
 
             -- unhitch the tool WHERE IT CAME FROM (the tour is done and
-            -- it is still attached — an aborted pass leaves it hitched)
-            if impl:IsDescendantOf(workspace) then
+            -- it is still attached — an aborted pass leaves it hitched).
+            -- A self-propelled ride (the harvester) is never dropped.
+            if not job.selfPropelled and impl:IsDescendantOf(workspace) then
                 dropImplementAtOrigin(tr, impl, origin)
             end
             return true
         end
 
-        -- ▸ steps 3-6: the plow pass (bare cells -> Plowed)
-        if needPlow then
-            runPass(JOBS[1])
-            if stopping() then return end
+        -- ▸ THE HARVEST PASS (user: "once it's in the harvester it does the
+        --   same loop at the tractor to harvest the crops, goes back and
+        --   re does it if any missed"): the SAME field tour + outside-in
+        --   spiral + touch-up/missed-cell visits as the tractor passes —
+        --   driven IN THE HARVESTER (self-propelled, nothing hitched) and
+        --   aimed at every cell with a crop standing. If cells are still
+        --   standing after a pass it goes BACK to those fields, with the
+        --   same honest guards as the re-seed rule: stop when nothing is
+        --   left, when a pass changed nothing, or after 4 rounds.
+        local function grownLeft()
+            local crops = findMyFields(tr:GetPivot().Position)
+            local cells, fields = 0, 0
+            for _, m in ipairs(crops) do
+                local n = whichNeed(JOBS[4], countStages(m.d))
+                if n and n > 0 then
+                    cells += n
+                    fields += 1
+                end
+            end
+            return cells, fields
         end
+        if needHarv and hv and hseat then
+            local rounds = 0
+            while true do
+                rounds += 1
+                local before = grownLeft()
+                runPass(JOBS[4], hv, hseat)
+                if stopping() then return end
+                local after, afields = grownLeft()
+                if not after or after == 0 then
+                    log("✅ nothing is standing in the fields any more")
+                    break
+                end
+                if rounds >= 4 then
+                    log(string.format("harvested %d time(s) and %d cell(s) across %d field(s) are still standing — stopping instead of looping",
+                        rounds, after, afields))
+                    break
+                end
+                if before and before > 0 and after >= before then
+                    log(string.format("the harvest pass didn't change the fields (%d cell(s) still standing) — stopping instead of looping",
+                        after))
+                    break
+                end
+                log(string.format("%d cell(s) across %d field(s) still standing — going back to harvest them",
+                    after, afields))
+            end
+        elseif needHarv then
+            log("crops are standing but the harvester couldn't be entered — skipping the harvest pass")
+        end
+        if stopping() then return end
+
+        -- ▸ step 1: mount the tractor (it SWITCHES out of the harvester
+        --   when needed; skipped when already in the tractor)
+        if not mountTractor(char, hum, tr, seat, dist) then return end
+
+        logEquipment() -- always show the names so we can confirm the pick
+
+        -- ▸ steps 3-6: the plow pass (bare cells -> Plowed). Called
+        --   unconditionally (like the cultivate pass): runPass re-reads the
+        --   fields itself and logs "pass skipped" when nothing is bare —
+        --   so cells the HARVEST just turned bare are picked up in the
+        --   SAME run instead of waiting for the next one.
+        runPass(JOBS[1])
+        if stopping() then return end
         -- ▸ steps 7-10: the cultivate pass (Plowed -> Cultivated) — usually
         --   the same field the plow pass just finished
         runPass(JOBS[2])
