@@ -422,7 +422,9 @@ local okBuild, errBuild = pcall(function()
     --      your plot."
     -- Flow: open → card (poll until the list populates) → verify the
     -- expanded card really shows it → Spawn (scrolled into view) → close.
-    local function respawnViaManager(vehicleName)
+    local function managerAction(vehicleName, action)
+        -- action = "Spawn" (bring it out) or "Store" (put it back)
+        action = action or "Spawn"
         local ok, res = pcall(function()
             local pg = LocalPlayer:FindFirstChild("PlayerGui")
             local gv = pg and pg:FindFirstChild("GuiViews")
@@ -532,9 +534,11 @@ local okBuild, errBuild = pcall(function()
             -- places the ExpandedCard from the clicked card's position,
             -- so it is scrolled into view first.
             if not ensureVisible(cards, card) then
-                log("equipment manager: the " .. vehicleName .. " card is outside the visible list even after scrolling — clicking nothing")
-                closeManager(menu, garageBtn)
-                return false
+                -- an OUT vehicle's card can sit outside the visible list —
+                -- that only ever mattered when a screen point was clicked
+                -- with a mouse. Nothing is mouse-clicked any more, so carry
+                -- on and let the expanded-card effect poll judge.
+                log("equipment manager: the " .. vehicleName .. " card is outside the visible list — calling it anyway (no mouse)")
             end
             -- ▸ THE EXPANDED CARD IS NESTED (user's capture: the real path
             --   is Cards.1.ExpandedCard.Content.Actions.Spawn — NOT a
@@ -591,8 +595,8 @@ local okBuild, errBuild = pcall(function()
             local expanded = findExpanded()
             local expContent = expanded and expanded:FindFirstChild("Content")
             local actions = expContent and expContent:FindFirstChild("Actions")
-            local spawnBtn = actions and actions:FindFirstChild("Spawn")
-            if not (spawnBtn and spawnBtn:IsA("GuiButton")) then
+            local actBtn = actions and actions:FindFirstChild(action)
+            if not (actBtn and actBtn:IsA("GuiButton")) then
                 local shown = {}
                 if actions then
                     for _, d in ipairs(actions:GetDescendants()) do
@@ -601,7 +605,7 @@ local okBuild, errBuild = pcall(function()
                         end
                     end
                 end
-                log("equipment manager: the " .. vehicleName .. " card has no Spawn button. its actions: "
+                log("equipment manager: the " .. vehicleName .. " card has no " .. action .. " button. its actions: "
                     .. (#shown > 0 and table.concat(shown, " · ") or "none"))
                 closeManager(menu, garageBtn)
                 return false
@@ -616,9 +620,9 @@ local okBuild, errBuild = pcall(function()
             -- sidesteps the clip problem entirely: the button only needs
             -- to EXIST in the tree, not be visible — a handler call can
             -- never miss (and no mouse is involved anywhere any more).
-            local handled, how = invokeHandlers(spawnBtn)
+            local handled, how = invokeHandlers(actBtn)
             if handled then
-                log(string.format("equipment manager: called the game's own Spawn handler for %s (%s — instant, no clip risk)", vehicleName, tostring(how)))
+                log(string.format("equipment manager: called the game's own %s handler for %s (%s — instant, no clip risk)", action, vehicleName, tostring(how)))
                 task.wait(1) -- let the game process the respawn
                 closeManager(menu, garageBtn)
                 return true
@@ -627,8 +631,8 @@ local okBuild, errBuild = pcall(function()
             -- anywhere (user rule) — :Activate() fires just this one
             -- button's Activated signal, so it cannot hit anything else.
             -- The caller's ~15 s re-find poll is the effect check.
-            log(string.format("equipment manager: no readable Spawn handler for %s (getconnections) — trying :Activate() instead", vehicleName))
-            pcall(function() spawnBtn:Activate() end)
+            log(string.format("equipment manager: no readable %s handler for %s (getconnections) — trying :Activate() instead", action, vehicleName))
+            pcall(function() actBtn:Activate() end)
             task.wait(1) -- let the game process the respawn
             closeManager(menu, garageBtn)
             return true
@@ -665,7 +669,7 @@ local okBuild, errBuild = pcall(function()
             impl.Name, verb,
             stored and "IN STORAGE"
                 or string.format("%.0f studs away (>%d)", dist, RESPAWN_RANGE)))
-        local respawned = respawnViaManager(impl.Name)
+        local respawned = managerAction(impl.Name)
         if respawned == false then
             log(string.format("equipment manager: the respawn for %s failed — see the lines above for why", impl.Name))
         end
@@ -2151,10 +2155,64 @@ local okBuild, errBuild = pcall(function()
         return true
     end
 
+    -- ▸ WHEN IT'S DONE — PUT THE TOOLS AWAY (user: "it should despawn any
+    --   unused tools when it's done (when i say despawn i mean store ok)"):
+    --   after the pass chain, the tools that are OUT in the world go back
+    --   into the Equipment Manager's storage, through the SAME proven
+    --   card + action path the respawn uses (no guessed remote, no mouse).
+    --   Skipped, each with an honest line: the ride the player is sitting
+    --   in (nothing can be stored from the seat), a tool that is still
+    --   hitched to the tractor, and anything already in storage. Every
+    --   store is VERIFIED (InStorage flips true) — a card whose Store is
+    --   refused while the tool is out simply won't flip it, and that shows
+    --   up in the log instead of being claimed as done.
+    local function storeUnusedTools()
+        if stopping() then
+            log("store: the loop was stopped by hand — leaving the tools where they are")
+            return
+        end
+        local folder = equipmentFolder()
+        if not folder then log("store: Objects.Equipment not found") return end
+        local char = LocalPlayer.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        local hitched = hitchedImplementName()
+        local out = {}
+        for _, m in ipairs(folder:GetChildren()) do
+            if not m:GetAttribute("InStorage") then out[#out + 1] = m end
+        end
+        if #out == 0 then
+            log("store: nothing is out — every tool is already in storage")
+            return
+        end
+        for _, m in ipairs(out) do
+            if stopping() then
+                log("store: stopped by hand — leaving the rest out")
+                return
+            end
+            if hum and hum.SeatPart and hum.SeatPart:IsDescendantOf(m) then
+                log("store: you're sitting in the " .. m.Name .. " — not storing it from the seat")
+            elseif hitched and hitched == m.Name then
+                log("store: " .. m.Name .. " is still hitched — not storing it from under the hitch")
+            else
+                log("store: putting the " .. m.Name .. " back in storage…")
+                managerAction(m.Name, "Store")
+                local stored = false
+                for _ = 1, 10 do -- ~5 s for the store to land
+                    if stopping() then break end
+                    if m:GetAttribute("InStorage") then stored = true break end
+                    task.wait(0.5)
+                end
+                log(stored
+                    and ("✅ " .. m.Name .. " is back in storage")
+                    or ("couldn't store the " .. m.Name .. " — store it by hand (its card's Store button may refuse while the tool is out)"))
+            end
+        end
+    end
+
     -- the actual farming loop, run on its own thread by the toggle below.
     -- stopping() is checked at every wait/step so switching the toggle off
     -- kills the loop at its next step instead of letting it run on.
-    local function runFarmingLoop()
+    local function runFarmingBody()
         local char = LocalPlayer.Character
         local hum = char and char:FindFirstChildOfClass("Humanoid")
         if not hum then log("no character") return end
@@ -2172,7 +2230,7 @@ local okBuild, errBuild = pcall(function()
         if dist and dist > RESPAWN_RANGE then
             log(string.format("tractor is %.0f studs away (>%d) — respawning it via the Equipment Manager",
                 dist, RESPAWN_RANGE))
-            respawnViaManager(tr.Name)
+            managerAction(tr.Name)
             local back = false
             for _ = 1, 30 do -- ~15 s for the respawn to land
                 if stopping() then return end
@@ -2489,6 +2547,15 @@ local okBuild, errBuild = pcall(function()
                 log(string.format("seeder still has %d seed(s) and %d cell(s) across %d field(s) still need seeding — going back to seed them", seeds, after, afields))
             end
         end
+    end
+
+    -- ▸ the run's wrapper: the whole pass chain above, then the tools go
+    --   back in storage ("when it's done"). A wrapper rather than a call at
+    --   the end of the body, so EVERY exit of the body — a finished run or
+    --   an honest stop — gets the cleanup.
+    local function runFarmingLoop()
+        runFarmingBody()
+        storeUnusedTools()
     end
 
     -- ON = spawn the loop on its own thread; OFF = clear the thread id so
