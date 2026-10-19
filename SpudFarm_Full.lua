@@ -298,24 +298,14 @@ local okBuild, errBuild = pcall(function()
         return btn.Name
     end
 
-    -- ▸ CLICKING (user test: the manager's menu button "didn't open
-    --   GarageMenu (real click + :Activate() both tried)") — in this
-    --   executor the game does NOT act on synthetic mouse events and
-    --   NOT on :Activate(); it acts on the functions the game ITSELF
-    --   connected to the button. The v7.6 capture proved it: the Spawn
-    --   button only respawns when its own Activated handler is called.
-    --   So a "click" is now, in order: a REAL mouse click (most
-    --   faithful) → the button's OWN connected handlers (its
-    --   MouseButton1Click/Activated/MouseButton1Down, walking up to 4
-    --   parents exactly like the capture did) → :Activate() as the
-    --   last resort. The effect poll after each attempt means exactly
-    --   ONE effective action can ever land (never a double-toggle).
-    local function realClick(btn)
-        local p = btn.AbsolutePosition + btn.AbsoluteSize / 2
-        VIM:SendMouseButtonEvent(p.X, p.Y, 0, true, game, 1)
-        task.wait(0.05)
-        VIM:SendMouseButtonEvent(p.X, p.Y, 0, false, game, 1)
-    end
+    -- ▸ CLICKING — NO MOUSE AT ALL (user: "revoke it's ability to use
+    --   the mouse. it could buy things with robux."): the script NEVER
+    --   sends mouse events, so it can never land on a purchase button.
+    --   A "click" instead = call the functions the game ITSELF connected
+    --   to that button (capture v7.6 proved the game acts on those — and
+    --   that it IGNORES synthetic mouse events and :Activate() anyway).
+    --   The effect poll after each attempt means exactly ONE effective
+    --   action can ever land (never a double-toggle).
 
     -- call the game's OWN connections for a button (capture-proven).
     -- Prefers one event's set (the first non-empty), never mixing events
@@ -348,17 +338,7 @@ local okBuild, errBuild = pcall(function()
 
     local function clickEffect(btn, effect)
         if effect and effect() then return true end -- already there
-        -- attempt 1: a REAL mouse click at the button's centre
-        local ok, err = pcall(realClick, btn)
-        if not ok then
-            log("real click failed on '" .. btn.Name .. "': " .. tostring(err))
-        end
-        for _ = 1, 6 do -- ~1.5 s for the effect to show
-            if stopping() then return false end
-            if effect and effect() then return true end
-            task.wait(0.25)
-        end
-        -- attempt 2: the game's OWN connected handlers (capture-proven —
+        -- attempt 1: the game's OWN connected handlers (capture-proven —
         -- this is what makes the manager open in this executor)
         local called, how = invokeHandlers(btn)
         if called then
@@ -369,7 +349,8 @@ local okBuild, errBuild = pcall(function()
                 task.wait(0.25)
             end
         end
-        -- attempt 3: :Activate() (Activated-only)
+        -- attempt 2: :Activate() (fires only THIS button's Activated
+        -- signal — not a mouse event, so it can't hit anything else)
         pcall(function() btn:Activate() end)
         for _ = 1, 8 do
             if stopping() then return false end
@@ -381,9 +362,9 @@ local okBuild, errBuild = pcall(function()
 
     -- the Cards list SCROLLS (user's video: the expanded card grows
     -- DOWNWARD and its buttons sit half-clipped below the viewport until
-    -- the list scrolls), and a real click at a CLIPPED button's centre
-    -- hits nothing. ScrollIntoView + verify the target's centre is
-    -- inside the visible list before any click.
+    -- the list scrolls). We no longer mouse-click, but the game positions
+    -- the ExpandedCard from the CLICKED card's spot (SetExpandedCardPos),
+    -- so the target card is still scrolled into view first.
     local function ensureVisible(frame, obj)
         pcall(function() obj:ScrollIntoView() end)
         task.wait(0.3)
@@ -414,7 +395,9 @@ local okBuild, errBuild = pcall(function()
     -- the Equipment Manager's real layout, live-dumped in §28:
     --   Background.Content.Cards.<level>.<id>   one ImageButton per vehicle
     --     └ EquipmentName  TextLabel — text starts with the model name
-    --   Background.Content.Cards.ExpandedCard    fills on card click
+    --   Background.Content.Cards.<level>.ExpandedCard   fills on card
+    --     click (the bare Cards.ExpandedCard is a placeholder that
+    --     errors — capture v7.6: real path = Cards.1.ExpandedCard)
     --     └ Content.Info.EquipmentName           names the selected vehicle
     --     └ Content.Actions.Spawn                TextButton "Spawn"
     --   Background.ExitButton                    closes the menu
@@ -449,11 +432,12 @@ local okBuild, errBuild = pcall(function()
                 log("equipment manager: the MenuSelection.Garage button wasn't found")
                 return false
             end
-            -- open it the way a player does: a REAL mouse click on the
-            -- menu button, judged by the menu actually appearing
+            -- open it the way a player does — by calling the game's OWN
+            -- button handler (NO mouse: user rule) — judged by the menu
+            -- actually appearing
             if not menu.Enabled then
                 if not clickEffect(garageBtn, function() return menu.Enabled end) then
-                    log("equipment manager: the menu button didn't open GarageMenu (real click + the game's own handlers + :Activate() all tried)")
+                    log("equipment manager: the menu button didn't open GarageMenu (the game's own handlers + :Activate() all tried — no mouse)")
                     return false
                 end
                 task.wait(0.4) -- let the card list populate
@@ -492,49 +476,108 @@ local okBuild, errBuild = pcall(function()
                 if card then break end
                 task.wait(0.25)
             end
-            if not card then
-                -- log the cards the menu DOES show (honest diagnosing)
-                local shown = {}
-                for _, d in ipairs(cards:GetDescendants()) do
-                    if #shown >= 12 then break end
-                    if d:IsA("TextLabel") and d.Name == "EquipmentName" and d.Text ~= "" then
-                        shown[#shown + 1] = d.Text:match("[^\n<]+") or d.Text
+            -- ▸ DIAGNOSTIC (user: "the seeder respawn does not work. we
+            --   might need more debugging"): EVERY attempt prints what the
+            --   manager actually shows right now — the tabs and every
+            --   card name — so a miss explains itself in one run instead
+            --   of needing a second capture run.
+            do
+                local tabs = content:FindFirstChild("Tabs")
+                if tabs then
+                    local tn = {}
+                    for _, t in ipairs(tabs:GetChildren()) do
+                        if t:IsA("GuiButton") then
+                            tn[#tn + 1] = t.Name
+                        end
+                    end
+                    if #tn > 0 then
+                        log("equipment manager: tabs: "
+                            .. table.concat(tn, " · "))
                     end
                 end
-                log("equipment manager: no card for " .. vehicleName .. ". it shows: "
-                    .. (#shown > 0 and table.concat(shown, " · ") or "no cards"))
+                local cn = {}
+                for _, d in ipairs(cards:GetDescendants()) do
+                    if d:IsA("TextLabel") and d.Name == "EquipmentName"
+                        and d.Text ~= "" then
+                        cn[#cn + 1] = (d.Text:match("[^\n<]+") or d.Text)
+                    end
+                end
+                log(string.format(
+                    "equipment manager: looking for '%s' — %d card(s) showing right now: %s",
+                    vehicleName, #cn,
+                    (#cn > 0 and table.concat(cn, " · ") or "none")))
+            end
+            if not card then
+                log("equipment manager: no card for " .. vehicleName
+                    .. " — it is not among the cards listed above")
                 closeManager(menu, garageBtn)
                 return false
             end
-            -- click the card (REAL click, judged by the ExpandedCard
-            -- naming THIS vehicle) — fills the card's detail view. The
-            -- video showed cards can sit clipped below the scroll
-            -- viewport — scroll it into view first, else a click at its
-            -- centre hits nothing.
+            -- select the card by calling the game's OWN handler (NO mouse;
+            -- user rule), judged by the ExpandedCard naming THIS vehicle
+            -- — that fills the card's detail view. The video showed cards
+            -- can sit clipped below the scroll viewport, and the game
+            -- places the ExpandedCard from the clicked card's position,
+            -- so it is scrolled into view first.
             if not ensureVisible(cards, card) then
                 log("equipment manager: the " .. vehicleName .. " card is outside the visible list even after scrolling — clicking nothing")
                 closeManager(menu, garageBtn)
                 return false
             end
-            local expanded = cards:FindFirstChild("ExpandedCard")
-            local expContent = expanded and expanded:FindFirstChild("Content")
-            local info = expContent and expContent:FindFirstChild("Info")
-            local expName = info and info:FindFirstChild("EquipmentName")
+            -- ▸ THE EXPANDED CARD IS NESTED (user's capture: the real path
+            --   is Cards.1.ExpandedCard.Content.Actions.Spawn — NOT a
+            --   direct child of Cards; the bare Cards.ExpandedCard that
+            --   exists before any card is clicked is a placeholder whose
+            --   GetViewedEquipment errors "Unable to find referenced
+            --   equipment card"). The detail view is therefore
+            --   RE-RESOLVED recursively on EVERY check, preferring the
+            --   nested copy that really names a card — never captured
+            --   once (that was why the respawn never opened a card).
+            local function findExpanded()
+                local nested, named, blank
+                for _, d in ipairs(cards:GetDescendants()) do
+                    if d.Name == "ExpandedCard" then
+                        local c = d:FindFirstChild("Content")
+                        local i = c and c:FindFirstChild("Info")
+                        local n = i and i:FindFirstChild("EquipmentName")
+                        if n and n:IsA("TextLabel") and n.Text ~= "" then
+                            if d.Parent ~= cards then
+                                nested = nested or d
+                            else
+                                named = named or d
+                            end
+                        else
+                            blank = blank or d
+                        end
+                    end
+                end
+                return nested or named or blank
+            end
+            local function expandedName()
+                local ex = findExpanded()
+                local c = ex and ex:FindFirstChild("Content")
+                local i = c and c:FindFirstChild("Info")
+                local n = i and i:FindFirstChild("EquipmentName")
+                if not (n and n:IsA("TextLabel")) then return nil end
+                return n.Text:gsub("^%s+", ""):gsub("%s+$", "")
+            end
             local function expandedShows()
-                if not (expName and expName:IsA("TextLabel")) then return false end
-                local t = expName.Text:gsub("^%s+", ""):gsub("%s+$", "")
-                return t:sub(1, #vehicleName) == vehicleName
+                local t = expandedName()
+                return (t ~= nil and t ~= ""
+                    and t:sub(1, #vehicleName) == vehicleName)
             end
             clickEffect(card, expandedShows)
             if not expandedShows() then
                 -- log what the detail view DOES name, so a structure
                 -- surprise is diagnosable from the Console alone
-                local t = expName and expName:IsA("TextLabel") and expName.Text or ""
+                local t = expandedName()
                 log(string.format("equipment manager: clicking the %s card didn't open its detail view (it shows '%s') — clicking nothing",
-                    vehicleName, t:match("[^\n<]+") or (t ~= "" and t or "nothing")))
+                    vehicleName, t and (t:match("[^\n<]+") or t) or "nothing"))
                 closeManager(menu, garageBtn)
                 return false
             end
+            local expanded = findExpanded()
+            local expContent = expanded and expanded:FindFirstChild("Content")
             local actions = expContent and expContent:FindFirstChild("Actions")
             local spawnBtn = actions and actions:FindFirstChild("Spawn")
             if not (spawnBtn and spawnBtn:IsA("GuiButton")) then
@@ -559,33 +602,21 @@ local okBuild, errBuild = pcall(function()
             -- does: the game fetches the vehicle itself, so there is no
             -- remote name or args to guess and nothing to spoof. It also
             -- sidesteps the clip problem entirely: the button only needs
-            -- to EXIST in the tree, not be visible — a real click at a
-            -- clipped centre hits nothing, but a handler call cannot miss.
+            -- to EXIST in the tree, not be visible — a handler call can
+            -- never miss (and no mouse is involved anywhere any more).
             local handled, how = invokeHandlers(spawnBtn)
-            if not handled then
-                log("equipment manager: no readable Spawn handler (getconnections) — falling back to a real click")
-            end
             if handled then
                 log(string.format("equipment manager: called the game's own Spawn handler for %s (%s — instant, no clip risk)", vehicleName, tostring(how)))
                 task.wait(1) -- let the game process the respawn
                 closeManager(menu, garageBtn)
                 return true
             end
-            -- FALLBACK: no handler readable → the video's real-click path,
-            -- still guarded by ensureVisible so a clipped click never lands
-            if not ensureVisible(cards, spawnBtn) then
-                log(string.format("equipment manager: the Spawn button of %s is outside the visible list even after scrolling — clicking nothing", vehicleName))
-                closeManager(menu, garageBtn)
-                return false
-            end
-            log(string.format("equipment manager: clicking 'Spawn' to respawn %s", vehicleName))
-            -- a REAL click (the caller's ~15 s re-find poll is the effect
-            -- check — it either comes back or the honest abort fires)
-            local clicked, cerr = pcall(realClick, spawnBtn)
-            if not clicked then
-                log("real click failed on 'Spawn': " .. tostring(cerr))
-                pcall(function() spawnBtn:Activate() end)
-            end
+            -- FALLBACK: no handler readable → :Activate() only. NO MOUSE
+            -- anywhere (user rule) — :Activate() fires just this one
+            -- button's Activated signal, so it cannot hit anything else.
+            -- The caller's ~15 s re-find poll is the effect check.
+            log(string.format("equipment manager: no readable Spawn handler for %s (getconnections) — trying :Activate() instead", vehicleName))
+            pcall(function() spawnBtn:Activate() end)
             task.wait(1) -- let the game process the respawn
             closeManager(menu, garageBtn)
             return true
@@ -622,7 +653,10 @@ local okBuild, errBuild = pcall(function()
             impl.Name, verb,
             stored and "IN STORAGE"
                 or string.format("%.0f studs away (>%d)", dist, RESPAWN_RANGE)))
-        respawnViaManager(impl.Name)
+        local respawned = respawnViaManager(impl.Name)
+        if respawned == false then
+            log(string.format("equipment manager: the respawn for %s failed — see the lines above for why", impl.Name))
+        end
         for _ = 1, 30 do -- ~15 s for the respawn to land
             if stopping() then return nil end
             local impl2, dist2, basis2 =
