@@ -1552,6 +1552,32 @@ local okBuild, errBuild = pcall(function()
         return count, cap, kind
     end
 
+    -- how many cells across ALL my fields still need seeding (cells at
+    -- "Cultivated"), and across how many fields — the yardstick for the
+    -- user's re-seed rule: "if the seeder has seeds in it and the fields
+    -- are missing some seeding i want it to go back and seed on that
+    -- plot of field"
+    local function seedNeedLeft(nearPos)
+        local crops = findMyFields(nearPos)
+        local cells, fields = 0, 0
+        for _, m in ipairs(crops) do
+            local st = countStages(m.d)
+            if st and st.total > 0 and (st.Cultivated or 0) > 0 then
+                cells += st.Cultivated
+                fields += 1
+            end
+        end
+        return cells, fields
+    end
+
+    -- the seeder's CURRENT seed count right now (nil when unreadable)
+    local function seederSeeds(tr)
+        local seeder = findImplement("Planter", tr:GetPivot().Position, tr)
+        if not seeder then return nil end
+        local count = seederSeedState(seeder)
+        return count
+    end
+
     -- ▸ SEEDER STEP 1 — the seed check (user: "first thing from the seeder:
     --   we need to know if it has seeds in it or not. if it does stay in
     --   tractor. if it does not get out of the tractor"). Runs on EVERY
@@ -2175,9 +2201,43 @@ local okBuild, errBuild = pcall(function()
         --   Seeded on drive-over (the game fires it, never spoofed).
         --   Empty/unreadable → F out (step 1), no pass.
         if seedCheck(tr, hum) then
-            seedHitchStep(tr)
-            if stopping() then return end
-            runPass(JOBS[3])
+            -- ▸ the user's RE-SEED rule: "if the seeder has seeds in it and
+            --   the fields are missing some seeding i want it to go back
+            --   and seed on that plot of field" — so after a seeding pass,
+            --   if any field STILL has cells at Cultivated AND the seeder
+            --   still holds seeds, hitch it again and go back to those
+            --   fields. Stops when: nothing is left to seed · the seeder
+            --   ran empty (logged honestly — it needs a refill) · a pass
+            --   changed nothing (so it can never ping-pong) · 6 rounds.
+            local rounds = 0
+            while true do
+                rounds += 1
+                if stopping() then return end
+                seedHitchStep(tr)
+                if stopping() then return end
+                local before = seedNeedLeft(tr:GetPivot().Position)
+                runPass(JOBS[3])
+                if stopping() then return end
+                local after, afields = seedNeedLeft(tr:GetPivot().Position)
+                if after == 0 then
+                    log("✅ seeding complete — no field is missing seed any more")
+                    break
+                end
+                local seeds = seederSeeds(tr)
+                if not seeds or seeds <= 0 then
+                    log(string.format("seeder is EMPTY and %d cell(s) across %d field(s) still need seeding — refill it (Fill Seeder), then run the loop again", after, afields))
+                    break
+                end
+                if rounds >= 6 then
+                    log(string.format("re-seeded %d times and %d cell(s) still need seed — stopping instead of looping", rounds, after))
+                    break
+                end
+                if before and after >= before then
+                    log(string.format("the seeding pass didn't change the fields (%d cell(s) still need it) — stopping instead of looping", after))
+                    break
+                end
+                log(string.format("seeder still has %d seed(s) and %d cell(s) across %d field(s) still need seeding — going back to seed them", seeds, after, afields))
+            end
         end
     end
 
