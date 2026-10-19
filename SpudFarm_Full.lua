@@ -2565,6 +2565,56 @@ local okBuild, errBuild = pcall(function()
         storeUnusedTools()
     end
 
+    -- ▸ SEED PICKER (user: "in the farming section i want a dropdown menu
+    --   with all the seeds in the game, this will be used for buying seeds
+    --   also. let's start with that"). This step is ONLY the picker —
+    --   nothing reads the choice yet. The list is read from the GAME
+    --   (FieldHelper.SEED_TYPE — dump §26: 76 entries, bidirectional
+    --   id↔name) instead of being hardcoded, so it can never drift from the
+    --   game's own vocabulary; "None" is dropped (not a seed you can buy or
+    --   plant). If the module can't be read, the picker is simply not
+    --   created and the console says so instead of inventing a list.
+    local seedChoice
+    do
+        local ok, names = pcall(function()
+            local mods = game:GetService("ReplicatedStorage"):FindFirstChild("Modules")
+            local F = mods and mods:FindFirstChild("FieldHelper")
+            assert(F, "FieldHelper missing")
+            F = require(F)
+            local t = F.SEED_TYPE
+            assert(type(t) == "table", "SEED_TYPE missing")
+            local set = {}
+            for k, v in pairs(t) do -- bidirectional: names live on both sides
+                if type(k) == "string" then set[k] = true end
+                if type(v) == "string" then set[v] = true end
+            end
+            set.None = nil
+            local out = {}
+            for n in pairs(set) do out[#out + 1] = n end
+            table.sort(out)
+            return out
+        end)
+        local list = ok and names or nil
+        if list and #list > 0 then
+            seedChoice = list[1]
+            log("seed list: " .. #list .. " seed(s) read from the game — "
+                .. table.concat(list, ", "))
+            Tabs.Farm:CreateDropdown("seedChoice", {
+                Title = "Seed",
+                Values = list,
+                Multi = false,
+                Default = list[1],
+                Callback = function(v)
+                    seedChoice = v
+                    log("seed: " .. tostring(v))
+                end,
+            })
+        else
+            log("seed list: FieldHelper.SEED_TYPE unreadable (" .. tostring(names)
+                .. ") — no seed picker this session")
+        end
+    end
+
     -- ON = spawn the loop on its own thread; OFF = clear the thread id so
     -- stopping() flips true everywhere and the loop dies at its next step.
     -- (coroutine identity, not a bool: a zombie loop can never be revived
