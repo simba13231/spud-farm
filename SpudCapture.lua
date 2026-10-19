@@ -24,7 +24,7 @@
 -- press COPY → paste it back. Rejoin NOT required (no hooks).
 --------------------------------------------------------------------
 
-print("[SpudCapture] boot v7.4 — hook-free capture (gcSweep nil-call fixed + FireServer wrapper sweep)")
+print("[SpudCapture] boot v7.5 — hook-free capture (nil-call fixed + FireServer wrapper sweep + GetViewedEquipment probe)")
 
 local lines = _G.SpudCaptureLog or {}
 _G.SpudCaptureLog = lines
@@ -468,7 +468,64 @@ local function analyzeSpawn(btn)
     -- the handler above was a shallow wrapper (sound + timestamp); go find
     -- the actual respawn remote directly in the heap so we don't miss it
     gcSweep()
+    -- fallback: if the sweep printed nothing, re-read the Spawn [3] inner
+    -- closure and probe the menu-state module (GetViewedEquipment) directly
+    probeMenuState()
 end
+
+-- ▸ MENU-STATE PROBE: from the deep read we know `.3[2]` holds
+-- GetViewedEquipment / ActionCompleted (the menu controller) and
+-- `.3[4]` holds FireServer (the remote wrapper). getgc may be flaky in
+-- Delta, so if the sweep found nothing we RE-READ the Spawn [3] inner
+-- function here, grab whichever upvalue exposes GetViewedEquipment,
+-- CALL it to learn the vehicle id, and dump its full contents.
+probeMenuState = function()
+    if not (hasGetConn and hasDebug) then return end
+    -- locate the Spawn button again (menu may still be open)
+    local pg = Players.LocalPlayer:FindFirstChild("PlayerGui")
+    local gv = pg and pg:FindFirstChild("GuiViews")
+    local menus = gv and gv:FindFirstChild("Menus")
+    local menu = menus and menus:FindFirstChild("GarageMenu")
+    local content = menu and menu:FindFirstChild("Background")
+        and menu.Background:FindFirstChild("Content")
+    local spawnBtn = content and content:FindFirstChild("Spawn", true)
+    if not spawnBtn then return end
+
+    local conns = getconnections(spawnBtn.Activated)
+    for _, c in ipairs(conns) do
+        local f = c.Function
+        local uvs = readUpvalues(f)
+        local inner = uvs[3] and uvs[3].value
+        if type(inner) == "function" then
+            local iuvs = readUpvalues(inner)
+            for i, u in ipairs(iuvs) do
+                if type(u.value) == "table" and u.value.GetViewedEquipment then
+                    pushLine("[PROBE] menu-state module at inner upvalue [" .. i .. "]")
+                    -- call GetViewedEquipment() to see the vehicle id it returns
+                    local okCall, viewed = pcall(u.value.GetViewedEquipment)
+                    if okCall then
+                        pushLine("[PROBE] GetViewedEquipment() = " .. desc(viewed))
+                    else
+                        pushLine("[PROBE] GetViewedEquipment() errored: " .. tostring(viewed))
+                    end
+                    -- dump the whole module's Instance keys
+                    for k, vv in pairs(u.value) do
+                        if typeof(vv) == "Instance" then
+                            local okF, full = pcall(function() return vv:GetFullName() end)
+                            pushLine("[PROBE]   ." .. tostring(k) .. " = "
+                                .. (okF and full or vv.Name))
+                        end
+                    end
+                    return
+                end
+            end
+        end
+    end
+end
+
+-- ▸ MENU-STATE PROBE (stub — real body defined after analyzeSpawn;
+-- forward-declared so the call resolves without a nil-value error)
+local function probeMenuState() end
 
 -- ▸ GC SWEEP: hunt the respawn remote(s) by name across every live object.
 -- This is the guaranteed path if the button handler is a shallow wrapper
@@ -646,7 +703,7 @@ baseText = "READY (hook-free)"
 baseColor = Color3.fromRGB(60, 200, 110)
 restoreBase()
 
-print("══════ SPAWN ARGS CAPTURE (§29 v7.4) ══════")
+print("══════ SPAWN ARGS CAPTURE (§29 v7.5) ══════")
 print("holder:       " .. holderName)
 print("capabilities: getconnections=" .. (hasGetConn and "yes" or "NO")
     .. "  debug.upvalues=" .. (hasDebug and "yes" or "NO"))
