@@ -1415,19 +1415,20 @@ local okBuild, errBuild = pcall(function()
     end
 
     -- ▸ ALIGN DRIVER (user: "is there not a away we can force it to follow the
-    --   line" → "number 2 i think we can try that alignPosition"): instead of
-    --   wiggling WASD, attach the game's OWN physics constraints. AlignPosition
-    --   pulls the chassis onto the route line (a carrot ALIGN_AIM studs ahead
-    --   on the current leg), AlignOrientation turns the nose onto the leg
-    --   tangent with a capped yaw rate, so the tractor ARCS onto the line
-    --   instead of spinning. No key is held. MaxForce/MaxTorque stay finite so
-    --   a real collision still stops it; MaxVelocity caps the speed; the speed
-    --   also drops while the nose is still turning (creep while correcting,
-    --   the same rule the key driver used). Note: writing the chassis CFrame
-    --   every frame was REJECTED — physics dies and the towed tool jackknifes.
+    --   line" → "number 2 i think we can try that alignPosition" → "why dont we
+    --   make it tween to align so it just has to go forward"): instead of
+    --   wiggling WASD, attach the game's OWN physics constraints. AlignOrientation
+    --   rotates the chassis toward a point ON the leg, rate-capped, which IS the
+    --   "tween to align" — and AlignPosition then pushes only ALONG THE NOSE, so
+    --   the tractor simply drives forward once it is lined up and can never slide
+    --   sideways. MaxForce/MaxTorque stay finite so a real collision still stops
+    --   it; MaxVelocity caps the speed and drops while the nose is still turning
+    --   (creep while correcting, the key driver's rule). Note: writing the
+    --   chassis CFrame every frame was REJECTED — physics dies and the towed
+    --   tool jackknifes.
     local ALIGN_MAXVEL = 24 -- studs/s
     local ALIGN_YAW = 70    -- deg/s — arcs, not pivots (a pivot drags the towed tool sideways)
-    local ALIGN_AIM = 14    -- how far up the leg the carrot sits
+    local ALIGN_AIM = 14    -- how far up the leg the aim point sits
     local function alignDriveStart(tr)
         local part = tr.PrimaryPart or tr:FindFirstChildWhichIsA("BasePart", true)
         if not part then return nil, "no BasePart" end
@@ -1457,14 +1458,18 @@ local okBuild, errBuild = pcall(function()
         ori.Responsiveness = 20
         ori.Parent = part
         -- start the targets where the tractor IS, or the first physics step
-        -- would yank it toward the world origin
+        -- would yank it toward the world origin. Heading is carried as a
+        -- direction VECTOR and written with CFrame.lookAt — no hand-rolled
+        -- yaw-to-Euler conversion, so no 180° convention trap.
         local cf = part.CFrame
         local look = cf.LookVector
-        local yaw = math.atan2(look.X, look.Z)
+        local flat = Vector3.new(look.X, 0, look.Z)
+        if flat.Magnitude < 0.1 then flat = Vector3.new(0, 0, -1) end
+        flat = flat.Unit
         pos.Position = cf.Position
-        ori.CFrame = CFrame.Angles(0, yaw, 0)
+        ori.CFrame = CFrame.lookAt(Vector3.zero, flat)
         return {
-            part = part, a0 = a0, pos = pos, ori = ori, mass = mass, yaw = yaw,
+            part = part, a0 = a0, pos = pos, ori = ori, mass = mass, dir = flat,
         }
     end
 
@@ -1475,22 +1480,38 @@ local okBuild, errBuild = pcall(function()
         end
     end
 
-    -- one tick: carrot on the line toward `to`, nose eased toward its tangent
-    local function alignDriveStep(h, tr, to, dt)
+    -- one tick: pure pursuit on the leg being driven + FORWARD-ONLY thrust.
+    -- The nose eases toward a point ON the leg (ALIGN_AIM studs ahead of our
+    -- projection onto it), so a parallel offset converges the way a real
+    -- driver corrects it. Aiming at the leg DIRECTION instead is the old bug
+    -- that settled into a parallel line beside it. ALIGN_YAW caps how fast the
+    -- nose may swing — that is the "tween to align": the chassis rotates
+    -- smoothly instead of snapping. The pull is always along the NOSE: a
+    -- wheeled tractor pushes forward, it never slides sideways.
+    local function alignDriveStep(h, tr, ax, az, bx, bz, dt)
         local p = tr:GetPivot().Position
-        local d = Vector3.new(to.X - p.X, 0, to.Z - p.Z)
-        local dist = d.Magnitude
-        if dist < 0.5 then return end
-        local dir = d.Unit
-        local carrot = p + dir * math.min(dist, ALIGN_AIM)
-        h.pos.Position = Vector3.new(carrot.X, p.Y, carrot.Z)
-        local want = math.atan2(dir.X, dir.Z)
-        local diff = (want - h.yaw + math.pi) % (2 * math.pi) - math.pi
-        h.pos.MaxVelocity = math.clamp(ALIGN_MAXVEL * (1 - math.abs(diff) / 1.6),
+        local A = Vector3.new(ax, 0, az)
+        local B = Vector3.new(bx, 0, bz)
+        local leg = B - A
+        local legLen = leg.Magnitude
+        if legLen < 0.5 then return end
+        local dir = leg / legLen
+        local along = (Vector3.new(p.X, 0, p.Z) - A):Dot(dir)
+        local aim = A + dir * math.clamp(along + ALIGN_AIM, 0, legLen)
+        local want = Vector3.new(aim.X - p.X, 0, aim.Z - p.Z)
+        if want.Magnitude < 0.5 then return end
+        want = want.Unit
+        local ang = math.acos(math.clamp(h.dir:Dot(want), -1, 1))
+        if ang > 1e-4 then
+            local t = math.min(1, math.rad(ALIGN_YAW) * (dt or 0.12) / ang)
+            h.dir = (h.dir * (1 - t) + want * t).Unit
+        end
+        -- creep while the nose is still turning (the key driver's rule)
+        h.pos.MaxVelocity = math.clamp(ALIGN_MAXVEL * (1 - ang / 1.6),
             ALIGN_MAXVEL * 0.15, ALIGN_MAXVEL)
-        local step = math.rad(ALIGN_YAW) * (dt or 0.12)
-        h.yaw += math.clamp(diff, -step, step)
-        h.ori.CFrame = CFrame.Angles(0, h.yaw, 0)
+        h.ori.CFrame = CFrame.lookAt(Vector3.zero, h.dir)
+        local goal = p + h.dir * math.min((aim - p).Magnitude, ALIGN_AIM)
+        h.pos.Position = Vector3.new(goal.X, p.Y, goal.Z)
     end
 
     -- to the NEAREST CORNER of the field (user: start at a corner, not the
@@ -1613,7 +1634,7 @@ local okBuild, errBuild = pcall(function()
                     telePrev, teleClock = p, now
                     teleSum, teleN = 0, 0
                 end
-                alignDriveStep(ah, tr, Vector3.new(g[1], p.Y, g[2]), 0.12)
+                alignDriveStep(ah, tr, a1[1], a1[2], g[1], g[2], 0.12)
             elseif useKeys then
                 local res = driveLegKeys(tr, seat, p, Vector3.new(g[1], p.Y, g[2]), 6)
                 if res == nil then alignDriveStop(ah) return nil end
