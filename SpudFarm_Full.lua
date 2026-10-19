@@ -1531,6 +1531,10 @@ local okBuild, errBuild = pcall(function()
             log("route: align driver unavailable (" .. tostring(alignWhy) .. ") — driving with keys")
         end
         local alignClock, alignMark = os.clock(), tr:GetPivot().Position
+        -- telemetry: measured with the game's own positions, not our intent —
+        -- the first run then says WHICH number is wrong instead of guessing
+        local telePrev, teleClock = tr:GetPivot().Position, os.clock()
+        local teleMax, teleSum, teleN = 0, 0, 0
         local li, lastPlan, pass = 2, 0, 0
         local deadline = os.clock() + 120
         while os.clock() < deadline do
@@ -1573,10 +1577,42 @@ local okBuild, errBuild = pcall(function()
                     g = legs[li]
                 else
                     local dg = (Vector3.new(p.X, 0, p.Z) - Vector3.new(goal.X, 0, goal.Z)).Magnitude
-                    if dg <= 8 then alignDriveStop(ah) return true, pass end
+                    if dg <= 8 then
+                        if useAlign then
+                            log(string.format("route: arrived in %d ticks — worst line error %.1f studs",
+                                pass, teleMax))
+                        end
+                        alignDriveStop(ah)
+                        return true, pass
+                    end
                 end
             end
             if useAlign then
+                -- cross-track error vs the leg we are on, once a second
+                local a1 = legs[math.max(li - 1, 1)]
+                local lx, lz = g[1] - a1[1], g[2] - a1[2]
+                local ll = math.sqrt(lx * lx + lz * lz)
+                if ll > 0.5 then
+                    lx, lz = lx / ll, lz / ll
+                    local off = math.abs((p.X - a1[1]) * lz - (p.Z - a1[2]) * lx)
+                    teleMax = math.max(teleMax, off)
+                    teleSum, teleN = teleSum + off, teleN + 1
+                end
+                local now = os.clock()
+                if now - teleClock >= 1 then
+                    local spd = (p - telePrev).Magnitude / (now - teleClock)
+                    local nose = seat and seat.CFrame.LookVector or Vector3.new(0, 0, 1)
+                    local want = Vector3.new(g[1] - p.X, 0, g[2] - p.Z)
+                    local n2 = Vector3.new(nose.X, 0, nose.Z)
+                    local ang = 0
+                    if n2.Magnitude > 0.1 and want.Magnitude > 0.5 then
+                        ang = math.deg(math.acos(math.clamp(n2.Unit:Dot(want.Unit), -1, 1)))
+                    end
+                    log(string.format("route: line %.1f studs off · %.0f studs/s · nose %.0f° off · leg %d/%d",
+                        teleSum / math.max(teleN, 1), spd, ang, li, #legs))
+                    telePrev, teleClock = p, now
+                    teleSum, teleN = 0, 0
+                end
                 alignDriveStep(ah, tr, Vector3.new(g[1], p.Y, g[2]), 0.12)
             elseif useKeys then
                 local res = driveLegKeys(tr, seat, p, Vector3.new(g[1], p.Y, g[2]), 6)
