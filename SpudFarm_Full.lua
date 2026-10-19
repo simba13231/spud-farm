@@ -2029,8 +2029,11 @@ local okBuild, errBuild = pcall(function()
         local realDrive -- nil = not probed yet; true = seat driving; false = glide
         local function doLeg(from, goal, tol)
             if stopping() then return nil end
+            -- never accept more than half a leg early (the short step onto
+            -- the next ring would get cut otherwise)
+            tol = math.min(tol or 7, (goal - from).Magnitude * 0.5)
             if realDrive ~= false then
-                local res = driveLegKeys(tr, seat, from, goal, tol or 7)
+                local res = driveLegKeys(tr, seat, from, goal, tol)
                 if res == nil then return nil end
                 if realDrive == nil then
                     realDrive = res == true
@@ -2059,15 +2062,19 @@ local okBuild, errBuild = pcall(function()
         for k = 0, rings - 1 do
             local ax = driveHalf - 10 * k -- along half-extent of this lap
             local sx = rowHalf - 10 * k   -- step half-extent (20, 10, ...)
+            -- tol 10 on the lap legs (user: the harvester swings wide at
+            -- corners) = the end counts as reached 10 studs early, so the
+            -- turn starts sooner and the arc stays inside the lap. The
+            -- short step onto the next ring is capped back down by doLeg.
             if sx > 0 then -- full closed lap
-                map[#map + 1] = { pt( E * ax,  S * sx), 7, nil }   -- side +
-                map[#map + 1] = { pt(-E * ax,  S * sx), 7, nil }   -- far end
-                map[#map + 1] = { pt(-E * ax, -S * sx), 7, nil }   -- side -
-                map[#map + 1] = { pt( E * ax, -S * sx), 7, nil }   -- near end
-                map[#map + 1] = { pt( E * ax,  S * sx), 7, k + 1 } -- lap closed
+                map[#map + 1] = { pt( E * ax,  S * sx), 10, nil }   -- side +
+                map[#map + 1] = { pt(-E * ax,  S * sx), 10, nil }   -- far end
+                map[#map + 1] = { pt(-E * ax, -S * sx), 10, nil }   -- side -
+                map[#map + 1] = { pt( E * ax, -S * sx), 10, nil }   -- near end
+                map[#map + 1] = { pt( E * ax,  S * sx), 10, k + 1 } -- lap closed
             else -- final ring: one center-line pass from the entry end
-                map[#map + 1] = { pt( E * (ax + 10), 0), 7, nil }
-                map[#map + 1] = { pt(-E * ax, 0), 7, rings }
+                map[#map + 1] = { pt( E * (ax + 10), 0), 10, nil }
+                map[#map + 1] = { pt(-E * ax, 0), 10, rings }
             end
         end
         dbgShow(tr, map, at) -- glowing bars on the field; bright = active leg
