@@ -1708,20 +1708,26 @@ local okBuild, errBuild = pcall(function()
     end
 
     -- ▸ THE SEED SHOP (user: "if the seeder is empty at it's run, we need it
-    --   to tp to the shop and buy the spesific seed"): seeds are bought from
-    --   the FarmCo Owner NPC inside FarmCo. Dump-confirmed anchors:
-    --   Stores.NPCs = {FarmCo Owner, …} (§5), Markers.GotoLocations has a
-    --   FarmCo waypoint (§24), the context key next to an NPC is
-    --   InteractWithNPC=F (context-key dump, the same key system F already
-    --   uses for ExitEquipment), and coins are live at
-    --   GuiViews.HUD.MainHUD.TopRightBar.CoinsDisplay.Contents.Balance (§17).
-    --   Which seed = the Farm tab picker (seedChoice, read from the game's own
-    --   FieldHelper.SEED_TYPE). Buying follows the ONE click rule this whole
-    --   script uses: the button's OWN handlers are called (never a mouse,
-    --   never a spoofed remote) and the purchase is VERIFIED (the balance
-    --   drops / a box of that seed lands next to us). If the menu doesn't
-    --   list the seed, every button it DID show is logged — a miss stays
-    --   diagnosable instead of silent.
+    --   to tp to the shop and buy the spesific seed" + the real flow they
+    --   spelled out: "tp to crate > place crate on counter > talk the the guy
+    --   (alr does) > pick it back up > go to seeder"). Seeds are bought from
+    --   the FarmCo Owner NPC inside FarmCo, and the thing you buy is a CRATE
+    --   off the shelf (the locked draggables — their context key is
+    --   LockedCarry=E). Dump-confirmed anchors: Stores.NPCs = {FarmCo Owner,
+    --   …} (§5), Markers.GotoLocations has a FarmCo waypoint (§24), the
+    --   context keys are InteractWithNPC=F / Carry=E / Drop=X / FillSeeder=V
+    --   (context-key dump — the same key system F already uses for
+    --   ExitEquipment), and coins are live at GuiViews.HUD.MainHUD.
+    --   TopRightBar.CoinsDisplay.Contents.Balance (§17). Which seed = the Farm
+    --   tab picker (seedChoice, read from the game's own FieldHelper.SEED_TYPE).
+    --   The trip, stage by stage, exactly as the user described: find the crate
+    --   labelled with that seed → tp to it → E (carry) → tp to the counter →
+    --   X (put it down) → F at the owner (buy; the menu's Buy button is called
+    --   through its OWN handlers if there is one — never a mouse, never a
+    --   spoofed remote) → VERIFY with the balance → E (pick it back up) → tp to
+    --   the seeder → V (FillSeeder) → VERIFY the seeder's seed count. Every
+    --   stage logs the game's own context-action list, and a miss logs the
+    --   shelf / the menu's buttons, so nothing fails silently.
     local seedChoice -- the Farm tab picker writes this (declared up here
                      -- because the seed check below reads it)
 
@@ -1769,7 +1775,88 @@ local okBuild, errBuild = pcall(function()
         return nil
     end
 
-    local function buySeed(seedName)
+    -- tp the CHARACTER anywhere (heading kept). On foot nothing is towed, so
+    -- a straight CFrame set is safe — the "never snap a tractor" rule is
+    -- about vehicles, not the player.
+    local function tpChar(p)
+        local ch = LocalPlayer.Character
+        local r = ch and ch:FindFirstChild("HumanoidRootPart")
+        if not r then return false end
+        r.CFrame = CFrame.new(p + Vector3.new(0, 3, 0)) * (r.CFrame - r.CFrame.Position)
+        return true
+    end
+
+    -- the game's OWN "what can I do right now" list (PCGP_ContextActions.
+    -- Buttons, the context-key dump). It is proximity-driven, so logging it
+    -- also says whether the game thinks we're at the crate / counter / seeder.
+    local function contextActions()
+        local out = {}
+        local ok = pcall(function()
+            local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+            local btns = pg.GuiViews.HUD.PCGP_ContextActions.Buttons
+            for _, b in ipairs(btns:GetChildren()) do
+                if b:IsA("GuiObject") and b.Visible then out[#out + 1] = b.Name end
+            end
+        end)
+        if not ok then return nil end
+        return out
+    end
+
+    local function crateLabel(m) -- whatever the crate itself shows (crop? price?)
+        local texts = {}
+        for _, t in ipairs(m:GetDescendants()) do
+            if (t:IsA("TextLabel") or t:IsA("TextButton")) and t.Text ~= "" then
+                texts[#texts + 1] = t.Text
+                if #texts >= 3 then break end
+            end
+        end
+        return table.concat(texts, " | ")
+    end
+
+    local function crateOwner(m)
+        local conf = m:FindFirstChild("Configurations")
+        local o = conf and conf:FindFirstChild("Owner")
+        if o and o:IsA("ObjectValue") and o.Value then return o.Value.Name end
+        if o and o:IsA("StringValue") then return o.Value end
+        return nil
+    end
+
+    -- The crate for the picked seed: a seedbox/crate model that is NOT
+    -- someone else's and whose own label names the seed (crates for sale are
+    -- locked draggables — context key LockedCarry=E). Returns the nearest hit
+    -- plus every candidate, so a miss can log the whole shelf.
+    local function findSeedCrate(seedName)
+        local want = (seedName:lower():gsub("%s+", ""))
+        local root = LocalPlayer.Character
+            and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        local cands = {}
+        for _, d in ipairs(workspace:GetDescendants()) do
+            if d:IsA("Model") and d ~= LocalPlayer.Character then
+                local n = d.Name:lower()
+                if n:find("seedbox", 1, true) or n:find("crate", 1, true) then
+                    local p = d:FindFirstChildWhichIsA("BasePart", true)
+                    if p then
+                        local owner = crateOwner(d)
+                        cands[#cands + 1] = {
+                            m = d, pos = p.Position, label = crateLabel(d), owner = owner,
+                            other = owner ~= nil and owner ~= LocalPlayer.Name,
+                            d = root and (p.Position - root.Position).Magnitude or 0,
+                        }
+                    end
+                end
+            end
+        end
+        local hit
+        for _, c in ipairs(cands) do
+            local t = (c.label:lower():gsub("%s+", ""))
+            if not c.other and t ~= "" and t:find(want, 1, true) then
+                if not hit or c.d < hit.d then hit = c end
+            end
+        end
+        return hit, cands
+    end
+
+    local function buySeedAndFill(seedName)
         if not seedName then
             log("seed shop: nothing is picked in the Farm tab's Seed dropdown — nothing bought")
             return false
@@ -1784,18 +1871,10 @@ local okBuild, errBuild = pcall(function()
         end
         log(string.format("seed shop: FarmCo at %s (%.0f studs) — tp'ing there for %s",
             where, (root.Position - pos).Magnitude, seedName))
-        local function tpTo(p)
-            local ch = LocalPlayer.Character
-            local r = ch and ch:FindFirstChild("HumanoidRootPart")
-            if not r then return end
-            -- keep the heading, just move (the character is on foot: no
-            -- towed tool, nothing to whip)
-            r.CFrame = CFrame.new(p + Vector3.new(0, 3, 0)) * (r.CFrame - r.CFrame.Position)
-        end
-        tpTo(pos)
+        tpChar(pos)
         task.wait(1.5) -- let the shop stream in
         if stopping() then return false end
-        -- land right at the owner: the interaction has a range
+        -- where the counter is (the owner NPC — the crate gets put down here)
         local stores = workspace:FindFirstChild("Stores")
         local npcs = stores and stores:FindFirstChild("NPCs")
         local owner
@@ -1805,13 +1884,49 @@ local okBuild, errBuild = pcall(function()
             end
         end
         local oPart = owner and owner:FindFirstChildWhichIsA("BasePart", true)
+        -- ▸ STAGE 1 — THE CRATE (user's flow: "tp to crate"): the crates for
+        --   sale are locked draggables on the shelf, and the right one names
+        --   the picked seed on its own label.
+        local hit, cands = findSeedCrate(seedName)
+        log(string.format("seed crate: %d crate-like model(s) in the world — %s",
+            #cands, hit and ("taking " .. hit.m.Name .. " (label '" .. hit.label .. "')")
+                or "none matches the picked seed"))
+        if not hit then
+            table.sort(cands, function(a, b) return a.d < b.d end)
+            for i = 1, math.min(#cands, 8) do
+                local c = cands[i]
+                log(string.format("  crate %.0f studs away: %s — '%s'%s",
+                    c.d, c.m.Name, c.label ~= "" and c.label or "(no label)",
+                    c.owner and (" owner " .. c.owner) or ""))
+            end
+            log("seed crate: nothing labelled '" .. seedName .. "' is for sale — paste the lines above so the match rule can be fixed")
+            return false
+        end
+        tpChar(hit.pos)
+        task.wait(1.0)
+        if stopping() then return false end
+        local acts = contextActions()
+        log("seed crate: E at the crate to pick it up — the game offers: "
+            .. (acts and (#acts > 0 and table.concat(acts, " · ") or "nothing") or "unreadable"))
+        pressKey(Enum.KeyCode.E)
+        task.wait(1.0)
+        if stopping() then return false end
+        -- ▸ STAGE 2 — PUT IT ON THE COUNTER (user: "place crate on counter"):
+        --   tp to the owner; if the crate rides along, the carry took
         if oPart then
-            tpTo(oPart.Position)
-            task.wait(1.0)
+            tpChar(oPart.Position)
+            task.wait(1.2)
             if stopping() then return false end
             root = LocalPlayer.Character:FindFirstChild("HumanoidRootPart") or root
-            log(string.format("seed shop: standing at %s (%.1f studs)", owner.Name,
-                (root.Position - oPart.Position).Magnitude))
+            local cPart = hit.m:FindFirstChildWhichIsA("BasePart", true)
+            local cD = cPart and (cPart.Position - root.Position).Magnitude or -1
+            log(string.format("seed crate: at the %s — the crate is %.0f studs away (%s)",
+                owner.Name, cD,
+                cD >= 0 and (cD < 15 and "it came with us" or "it did NOT follow the tp")))
+            log("seed crate: X to put it down here")
+            pressKey(Enum.KeyCode.X)
+            task.wait(1.0)
+            if stopping() then return false end
         else
             log("seed shop: the FarmCo Owner NPC isn't in the workspace yet — pressing F anyway")
         end
@@ -1850,7 +1965,11 @@ local okBuild, errBuild = pcall(function()
                 end
             end
         end
+        local target
         if not row then
+            -- no menu row: the owner may simply charge for the crate that's
+            -- sitting on the counter (user's flow: "talk the the guy"). Never
+            -- stop here — the balance check below is the judge.
             local seen = {}
             for _, g in ipairs(views:GetDescendants()) do
                 if g:IsA("TextButton") and isShown(g) then
@@ -1859,37 +1978,37 @@ local okBuild, errBuild = pcall(function()
                     if #seen >= 25 then break end
                 end
             end
-            log("seed shop: no row for '" .. seedName .. "' — the menu's visible buttons were: "
-                .. (#seen > 0 and table.concat(seen, " · ")
-                    or "none (F didn't open the menu — was the owner reached?)"))
-            return false
+            log("seed shop: no seed row in the menu — the owner may charge for the crate directly; the visible buttons were: "
+                .. (#seen > 0 and table.concat(seen, " · ") or "none (no menu opened)"))
         end
         -- the Buy button: its own row first, then up to 5 ancestors up
-        local target, node = nil, row
-        for _ = 1, 6 do
-            for _, d in ipairs(node:GetDescendants()) do
-                if d:IsA("GuiButton") and isShown(d) then
-                    local t = (guiTextOf(d) .. " " .. d.Name):lower()
-                    if t:find("buy", 1, true) or t:find("purchase", 1, true) then
-                        target = d
-                        break
+        local node = row
+        if node then
+            for _ = 1, 6 do
+                for _, d in ipairs(node:GetDescendants()) do
+                    if d:IsA("GuiButton") and isShown(d) then
+                        local t = (guiTextOf(d) .. " " .. d.Name):lower()
+                        if t:find("buy", 1, true) or t:find("purchase", 1, true) then
+                            target = d
+                            break
+                        end
                     end
                 end
+                if target or node == views then break end
+                node = node.Parent
             end
-            if target or node == views then break end
-            node = node.Parent
-        end
-        target = target or (row:IsA("GuiButton") and row or nil)
-        if not target then
-            log("seed shop: the '" .. seedName .. "' row has no Buy button in it — nothing clicked")
-            return false
-        end
-        log(string.format("seed shop: clicking %s ('%s') for %s",
-            target:GetFullName(), guiTextOf(target), seedName))
-        local handled = invokeHandlers(target)
-        if not handled then
-            log("seed shop: no readable handler on that button (getconnections) — trying :Activate()")
-            pcall(function() target:Activate() end)
+            target = target or (row:IsA("GuiButton") and row or nil)
+            if target then
+                log(string.format("seed shop: clicking %s ('%s') for %s",
+                    target:GetFullName(), guiTextOf(target), seedName))
+                local handled = invokeHandlers(target)
+                if not handled then
+                    log("seed shop: no readable handler on that button (getconnections) — trying :Activate()")
+                    pcall(function() target:Activate() end)
+                end
+            else
+                log("seed shop: the '" .. seedName .. "' row has no Buy button in it — nothing clicked in the menu")
+            end
         end
         -- verify: the balance drops, or a box of that seed appears next to us
         local after, box
@@ -1933,12 +2052,54 @@ local okBuild, errBuild = pcall(function()
         end
         if not closed then pressKey(Enum.KeyCode.F) end
         task.wait(0.6)
-        if bought then
-            log("✅ bought " .. seedName .. " — getting the box into the seeder is the next step")
-        else
-            log("⚠ the " .. seedName .. " purchase could NOT be confirmed (balance didn't move) — check the shop by hand")
+        if not bought then
+            log("⚠ the " .. seedName .. " purchase could NOT be confirmed (the balance didn't move) — check the shop by hand")
+            return false
         end
-        return bought
+        log("✅ " .. seedName .. " bought (balance " .. tostring(before) .. " → " .. tostring(after) .. ")")
+        -- ▸ STAGE 3 — PICK IT BACK UP (user: "pick it back up")
+        log("seed crate: E to pick it back up")
+        pressKey(Enum.KeyCode.E)
+        task.wait(1.0)
+        if stopping() then return false end
+        local cPart = hit.m:FindFirstChildWhichIsA("BasePart", true)
+        -- ▸ STAGE 4 — GO TO THE SEEDER (user: "go to seeder") and fill it:
+        --   V = FillSeeder, the same proximity-context rule as the crate
+        local seeder = findImplement("Planter", root.Position, nil)
+        if not seeder then
+            log("seeder fill: no seeder (KADL) found — the " .. seedName .. " crate is with you; fill the seeder by hand (V)")
+            return true
+        end
+        if seeder:GetAttribute("InStorage") then
+            log("seeder fill: the seeder is IN STORAGE — respawn it, then fill it by hand (V); the crate is with you")
+            return true
+        end
+        tpChar(seeder:GetPivot().Position)
+        task.wait(1.2)
+        if stopping() then return false end
+        root = LocalPlayer.Character:FindFirstChild("HumanoidRootPart") or root
+        local cD = cPart and cPart.Parent and (cPart.Position - root.Position).Magnitude or -1
+        log(string.format("seeder fill: at the %s — the crate is %.0f studs away (%s)",
+            seeder.Name, cD, cD >= 0 and (cD < 15 and "it came with us" or "it did NOT follow") or "gone"))
+        local n0 = seederSeedState(seeder)
+        log("seeder fill: V (FillSeeder) — the seeder had " .. tostring(n0) .. " seeds")
+        pressKey(Enum.KeyCode.V)
+        task.wait(1.0)
+        if stopping() then return false end
+        local n1, cap1, kind1
+        for _ = 1, 8 do -- ~4 s
+            if stopping() then break end
+            n1, cap1, kind1 = seederSeedState(seeder)
+            if n1 and n0 and n1 > n0 then break end
+            task.wait(0.5)
+        end
+        if n1 and n0 and n1 > n0 then
+            log(string.format("✅ seeder now holds %d%s seeds%s — run the loop again (or turn it back on) to seed the fields",
+                n1, cap1 and ("/" .. cap1) or "", kind1 and (" (" .. kind1 .. ")") or ""))
+            return true
+        end
+        log("⚠ the fill could NOT be confirmed (the seeder still reads " .. tostring(n1) .. ") — the crate is with you; fill it by hand (V)")
+        return true
     end
 
     -- ▸ SEEDER STEP 1 — the seed check (user: "first thing from the seeder:
@@ -2000,7 +2161,7 @@ local okBuild, errBuild = pcall(function()
         if needCells > 0 then
             log(string.format("%d cell(s) still need seed — going to buy %s",
                 needCells, tostring(seedChoice or "? (nothing picked in the Farm tab)")))
-            buySeed(seedChoice)
+            buySeedAndFill(seedChoice)
         else
             log("the seeder is empty but no field needs seed — not going shopping")
         end
