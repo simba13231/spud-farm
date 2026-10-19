@@ -24,7 +24,7 @@
 -- press COPY → paste it back. Rejoin NOT required (no hooks).
 --------------------------------------------------------------------
 
-print("[SpudCapture] boot v7.5 — hook-free capture (nil-call fixed + FireServer wrapper sweep + GetViewedEquipment probe)")
+print("[SpudCapture] boot v7.6 — hook-free capture (expanded-card data dump + FireServer wrapper constants)")
 
 local lines = _G.SpudCaptureLog or {}
 _G.SpudCaptureLog = lines
@@ -516,6 +516,40 @@ probeMenuState = function()
                                 .. (okF and full or vv.Name))
                         end
                     end
+                    -- the error "Unable to find referenced equipment card"
+                    -- means GetViewedEquipment reads the selection from the
+                    -- Cards instance (.3[5]) — dump the expanded card's own
+                    -- data so we get the vehicle id directly.
+                    local cards = u.value.Cards
+                        or (u.value.ScreenGui
+                            and u.value.ScreenGui:FindFirstChild("Background")
+                            and u.value.ScreenGui.Background:FindFirstChild("Content")
+                            and u.value.ScreenGui.Background.Content
+                                :FindFirstChild("Cards"))
+                    if cards then
+                        local exp = cards:FindFirstChild("ExpandedCard")
+                        if exp then
+                            pushLine("[PROBE] ExpandedCard " .. exp:GetFullName())
+                            for _, d in ipairs(exp:GetDescendants()) do
+                                if d:IsA("AttributeValue") then
+                                    pushLine("[PROBE]   attr " .. d.Name
+                                        .. " = " .. tostring(d.Value))
+                                end
+                            end
+                            local info = exp:FindFirstChild("Content")
+                                and exp.Content:FindFirstChild("Info")
+                            if info then
+                                for _, ch in ipairs(info:GetChildren()) do
+                                    if ch:IsA("TextLabel") then
+                                        pushLine("[PROBE]   Info." .. ch.Name
+                                            .. " = " .. tostring(ch.Text))
+                                    end
+                                end
+                            end
+                        else
+                            pushLine("[PROBE] no ExpandedCard under Cards right now")
+                        end
+                    end
                     return
                 end
             end
@@ -617,6 +651,51 @@ function gcSweep()
             pushLine("[SWEEP]   w" .. i .. " " .. w)
         end
     end
+    -- THIRD PASS: the wrapper is an indirection (FireServer is a plain
+    -- function here). Dump each FireServer-bearing table's keys, and for
+    -- its FireServer/InvokeServer functions, dump the bytecode CONSTANTS —
+    -- that's where a hidden remote NAME lives if it isn't an Instance key.
+    pcall(function()
+        for _, v in ipairs(getgc(true)) do
+            if typeof(v) == "table" then
+                local hasFS = false
+                for _, vv in pairs(v) do
+                    if typeof(vv) == "function" then
+                        local okS, src = pcall(function() return debug.info(vv, "s") end)
+                        if okS and type(src) == "string"
+                            and (src:find("FireServer", 1, true)
+                                or src:find("InvokeServer", 1, true)) then
+                            hasFS = true
+                        end
+                    end
+                end
+                if hasFS then
+                    local allKeys = {}
+                    for kk, vv in pairs(v) do
+                        allKeys[#allKeys + 1] = tostring(kk) .. ":" .. typeof(vv)
+                    end
+                    pushLine("[WRAP] table keys: " .. table.concat(allKeys, ", "))
+                    for kk, vv in pairs(v) do
+                        if typeof(vv) == "function" then
+                            local okB, bc = pcall(function() return debug.info(vv, "c") end)
+                            if okB and type(bc) == "table" and bc.Constants then
+                                local consts = {}
+                                for _, c in ipairs(bc.Constants) do
+                                    if type(c) == "string" and #c > 1 then
+                                        consts[#consts + 1] = string.format("%q", c)
+                                    end
+                                end
+                                if #consts > 0 then
+                                    pushLine("[WRAP]   " .. tostring(kk)
+                                        .. "() consts: " .. table.concat(consts, ", "))
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end)
 end
 
 -- ▸ MENU WATCHER: card count flash + Spawn-button reader -----------
@@ -703,7 +782,7 @@ baseText = "READY (hook-free)"
 baseColor = Color3.fromRGB(60, 200, 110)
 restoreBase()
 
-print("══════ SPAWN ARGS CAPTURE (§29 v7.5) ══════")
+print("══════ SPAWN ARGS CAPTURE (§29 v7.6) ══════")
 print("holder:       " .. holderName)
 print("capabilities: getconnections=" .. (hasGetConn and "yes" or "NO")
     .. "  debug.upvalues=" .. (hasDebug and "yes" or "NO"))
