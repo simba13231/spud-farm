@@ -929,18 +929,45 @@ local okBuild, errBuild = pcall(function()
     -- ▸ step 1: MOUNT the tractor — walk to it if needed, F, verify seated.
     --   Extracted verbatim from the loop so the seeder-hitch path on an
     --   idle run reuses the exact same proven code. Returns true=seated.
-    local function mountTractor(char, hum, tr, seat, dist)
+    local function mountTractor(char, hum, tr, seat, dist, label)
+        label = label or "tractor"
+        -- ▸ SWITCHING RIDES: seated in ANY other vehicle (the tractor, or
+        --   the harvester the harvester step just entered) → press the
+        --   game's own exit key and wait to actually stand, THEN walk
+        --   over. Never teleport seat-to-seat.
         if hum.SeatPart and not hum.SeatPart:IsDescendantOf(tr) then
-            log("seated in another vehicle — stand up first")
-            return false
+            local from = hum.SeatPart.Parent
+            log(string.format("seated in %s — getting out to reach the %s",
+                from and from.Name or "another vehicle", label))
+            pressKey(Enum.KeyCode.F) -- dump: ExitEquipment = F
+            for _ = 1, 8 do -- ~2 s to stand up
+                if stopping() then return false end
+                if not hum.SeatPart then break end
+                task.wait(0.25)
+            end
+            if hum.SeatPart then
+                -- that seat didn't take the key → the humanoid's own stand
+                pcall(function() hum.Sit = false end)
+                for _ = 1, 4 do
+                    if stopping() then return false end
+                    if not hum.SeatPart then break end
+                    task.wait(0.25)
+                end
+            end
+            if hum.SeatPart then
+                log(string.format("still seated in %s — couldn't get out to reach the %s",
+                    hum.SeatPart.Parent and hum.SeatPart.Parent.Name or "it", label))
+                return false
+            end
+            task.wait(0.3)
         end
         if not hum.SeatPart then
             if dist > 10 then
-                log(string.format("moving to tractor (%.0f studs)…", dist))
+                log(string.format("moving to %s (%.0f studs)…", label, dist))
                 local reached = moveTo(seat.Position + Vector3.new(0, 3, 0))
                 if stopping() then return false end
                 if not reached then
-                    log("couldn't reach the tractor")
+                    log("couldn't reach the " .. label)
                     return false
                 end
                 local root = char:FindFirstChild("HumanoidRootPart")
@@ -948,7 +975,7 @@ local okBuild, errBuild = pcall(function()
             end
             if stopping() then return false end
             if dist > 10 then log("still too far after moving") return false end
-            log("pressing F to mount…")
+            log("pressing F to mount the " .. label .. "…")
             pressKey(Enum.KeyCode.F)
             task.wait(0.7)
             if stopping() then return false end
@@ -2095,14 +2122,36 @@ local okBuild, errBuild = pcall(function()
             log(string.format("✅ tractor respawned — %.0f studs away now", dist))
         end
 
-        -- ▸ THE HARVESTER (user: "the harvester is a seperate tool from
-        --   the tractor. just make it spawn and we will work from
-        --   there."): NO hitch and no pass — this only makes sure the
-        --   harvester is OUT and near the plot instead of sitting in
-        --   storage, through the exact proven path (Equipment Manager →
-        --   the game's own Spawn handler). Already out and near → it does
-        --   nothing at all. Harvesting comes later, one step at a time.
-        ensureToolNearby(tr, "Harvester", "harvester")
+        -- ▸ THE HARVESTER — SPAWN IT, THEN TRAVEL TO IT AND GET IN
+        --   (user: "the harvester is a seperate tool from the tractor.
+        --   just make it spawn and we will work from there." → "now make
+        --   it travel and get into the harvester"). NO hitch and NO
+        --   harvest pass yet: the tool is brought out of storage through
+        --   the proven Equipment Manager path, then the player walks to
+        --   it and sits in its driver seat with the SAME proven mount
+        --   sequence the tractor uses (moveTo → F → seated check; it gets
+        --   out of any other ride first). Already out and near → it just
+        --   walks over and climbs in.
+        local hv = ensureToolNearby(tr, "Harvester", "harvester")
+        if stopping() then return end
+        if hv then
+            local hseat = hv:FindFirstChildWhichIsA("VehicleSeat", true)
+                or hv:FindFirstChildWhichIsA("Seat", true)
+            if not hseat then
+                log("the harvester has no driver seat — can't get in")
+            elseif hum.SeatPart and hum.SeatPart:IsDescendantOf(hv) then
+                log("already in the harvester (" .. hv.Name .. ")")
+            else
+                local root = char:FindFirstChild("HumanoidRootPart")
+                local hdist = root
+                    and (hseat.Position - root.Position).Magnitude or 0
+                log(string.format("traveling to the harvester (%s, %.0f studs)…",
+                    hv.Name, hdist))
+                if not mountTractor(char, hum, hv, hseat, hdist, "harvester") then
+                    log("couldn't get into the harvester — carrying on without it")
+                end
+            end
+        end
         if stopping() then return end
 
         -- ▸ step 0: what work is left? (ALL of my fields are scanned —
