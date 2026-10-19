@@ -507,11 +507,47 @@ local okBuild, errBuild = pcall(function()
                 closeManager(menu, garageBtn)
                 return false
             end
-            -- THE VIDEO'S KEY STEP: the expanded card grows downward, so
-            -- Spawn sits half-clipped below the Cards viewport until the
-            -- list scrolls — a real click at a clipped centre hits
-            -- nothing. ScrollIntoView + verify it's inside the visible
-            -- list, THEN click.
+            -- THE GAME'S OWN SPAWN HANDLER (capture v7.6, entry 9j): the
+            -- Spawn button's Activated handler is itself the spawn action —
+            -- it closes over the menu controller, the viewed-equipment
+            -- STATE (its GetViewedEquipment resolves the vehicle LIVE from
+            -- this card) and the remote wrapper. Calling it = what a click
+            -- does: the game fetches the vehicle itself, so there is no
+            -- remote name or args to guess and nothing to spoof. It also
+            -- sidesteps the clip problem entirely: the button only needs
+            -- to EXIST in the tree, not be visible — a real click at a
+            -- clipped centre hits nothing, but a direct handler call
+            -- cannot miss.
+            local handled = false
+            if type(getconnections) == "function" then
+                local okH, conns = pcall(function()
+                    return getconnections(spawnBtn.Activated)
+                end)
+                if okH and conns and #conns > 0 then
+                    for _, c in ipairs(conns) do
+                        if type(c.Function) == "function" then
+                            local okF, errF = pcall(c.Function)
+                            if not okF then
+                                log("equipment manager: the game's Spawn handler errored: " .. tostring(errF))
+                            else
+                                handled = true
+                            end
+                        end
+                    end
+                else
+                    log("equipment manager: getconnections found no Activated handler on Spawn — falling back to a real click")
+                end
+            else
+                log("equipment manager: getconnections unavailable — falling back to a real click")
+            end
+            if handled then
+                log(string.format("equipment manager: called the game's own Spawn handler for %s (instant, no clip risk)", vehicleName))
+                task.wait(1) -- let the game process the respawn
+                closeManager(menu, garageBtn)
+                return true
+            end
+            -- FALLBACK: no handler readable → the video's real-click path,
+            -- still guarded by ensureVisible so a clipped click never lands
             if not ensureVisible(cards, spawnBtn) then
                 log(string.format("equipment manager: the Spawn button of %s is outside the visible list even after scrolling — clicking nothing", vehicleName))
                 closeManager(menu, garageBtn)
