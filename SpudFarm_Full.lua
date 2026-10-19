@@ -1926,6 +1926,13 @@ local okBuild, errBuild = pcall(function()
                 setKey(KEY_A, false) setKey(KEY_D, false)    -- dead straight
             end
             local tDuty = math.abs(err) > 0.3 and 1 or 2 -- creep while correcting
+            -- ▸ ease off into the END of the leg: over the last 15% of it the
+            --   throttle drops to the creep duty, so the corner is taken at
+            --   low speed instead of carrying full speed into the turn.
+            --   Proportional to the leg, so the short A*-route legs (a few
+            --   studs) are effectively untouched and only the long field
+            --   laps slow down.
+            if legLen - along < legLen * 0.15 then tDuty = 1 end
             setKey(KEY_W, slot < tDuty)
             task.wait(0.12)
             if tick == 15 then -- ~1.8 s probe: keys must produce motion
