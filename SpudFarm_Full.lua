@@ -1414,6 +1414,85 @@ local okBuild, errBuild = pcall(function()
         return pts, counter.n
     end
 
+    -- ▸ ALIGN DRIVER (user: "is there not a away we can force it to follow the
+    --   line" → "number 2 i think we can try that alignPosition"): instead of
+    --   wiggling WASD, attach the game's OWN physics constraints. AlignPosition
+    --   pulls the chassis onto the route line (a carrot ALIGN_AIM studs ahead
+    --   on the current leg), AlignOrientation turns the nose onto the leg
+    --   tangent with a capped yaw rate, so the tractor ARCS onto the line
+    --   instead of spinning. No key is held. MaxForce/MaxTorque stay finite so
+    --   a real collision still stops it; MaxVelocity caps the speed; the speed
+    --   also drops while the nose is still turning (creep while correcting,
+    --   the same rule the key driver used). Note: writing the chassis CFrame
+    --   every frame was REJECTED — physics dies and the towed tool jackknifes.
+    local ALIGN_MAXVEL = 24 -- studs/s
+    local ALIGN_YAW = 70    -- deg/s — arcs, not pivots (a pivot drags the towed tool sideways)
+    local ALIGN_AIM = 14    -- how far up the leg the carrot sits
+    local function alignDriveStart(tr)
+        local part = tr.PrimaryPart or tr:FindFirstChildWhichIsA("BasePart", true)
+        if not part then return nil, "no BasePart" end
+        local mass = 0
+        for _, d in ipairs(tr:GetDescendants()) do
+            if d:IsA("BasePart") then mass += d:GetMass() end
+        end
+        if mass <= 0 then return nil, "no mass" end
+        local a0 = Instance.new("Attachment")
+        a0.Name = "SpudAlign"
+        a0.Parent = part
+        local pos = Instance.new("AlignPosition")
+        pos.Name = "SpudAlignPos"
+        pos.Mode = Enum.PositionAlignmentMode.OneAttachment
+        pos.Attachment0 = a0
+        pos.MaxForce = Vector3.new(mass * 30, 0, mass * 30) -- horizontal only
+        pos.ApplyAtCenterOfMass = true -- no stray tipping torque
+        pos.MaxVelocity = ALIGN_MAXVEL
+        pos.Responsiveness = 30
+        pos.Parent = part
+        local ori = Instance.new("AlignOrientation")
+        ori.Name = "SpudAlignOri"
+        ori.Mode = Enum.OrientationAlignmentMode.OneAttachment
+        ori.Attachment0 = a0
+        ori.MaxTorque = mass * 10
+        ori.MaxAngularVelocity = math.rad(ALIGN_YAW * 1.5)
+        ori.Responsiveness = 20
+        ori.Parent = part
+        -- start the targets where the tractor IS, or the first physics step
+        -- would yank it toward the world origin
+        local cf = part.CFrame
+        local look = cf.LookVector
+        local yaw = math.atan2(look.X, look.Z)
+        pos.Position = cf.Position
+        ori.CFrame = CFrame.Angles(0, yaw, 0)
+        return {
+            part = part, a0 = a0, pos = pos, ori = ori, mass = mass, yaw = yaw,
+        }
+    end
+
+    local function alignDriveStop(h)
+        if not h then return end
+        for _, c in ipairs({ h.pos, h.ori, h.a0 }) do
+            pcall(function() c:Destroy() end)
+        end
+    end
+
+    -- one tick: carrot on the line toward `to`, nose eased toward its tangent
+    local function alignDriveStep(h, tr, to, dt)
+        local p = tr:GetPivot().Position
+        local d = Vector3.new(to.X - p.X, 0, to.Z - p.Z)
+        local dist = d.Magnitude
+        if dist < 0.5 then return end
+        local dir = d.Unit
+        local carrot = p + dir * math.min(dist, ALIGN_AIM)
+        h.pos.Position = Vector3.new(carrot.X, p.Y, carrot.Z)
+        local want = math.atan2(dir.X, dir.Z)
+        local diff = (want - h.yaw + math.pi) % (2 * math.pi) - math.pi
+        h.pos.MaxVelocity = math.clamp(ALIGN_MAXVEL * (1 - math.abs(diff) / 1.6),
+            ALIGN_MAXVEL * 0.15, ALIGN_MAXVEL)
+        local step = math.rad(ALIGN_YAW) * (dt or 0.12)
+        h.yaw += math.clamp(diff, -step, step)
+        h.ori.CFrame = CFrame.Angles(0, h.yaw, 0)
+    end
+
     -- to the NEAREST CORNER of the field (user: start at a corner, not the
     -- center) — 4 studs inside the edge; arrive within 8 studs of it. The
     -- route comes from A* around everything parked on the farm and is
@@ -1443,16 +1522,39 @@ local okBuild, errBuild = pcall(function()
             log(string.format("path: %d legs around %d obstacles", #legs - 1, info))
         end
         local useKeys = driveLegKeys ~= nil
-        local li, lastPlan = 2, 0
-        for pass = 1, 40 do
-            if stopping() then return nil end
+        local ah, alignWhy = alignDriveStart(tr)
+        local useAlign = ah ~= nil
+        if useAlign then
+            log(string.format("route: ALIGN driver on (mass %.0f, maxvel %d, aim %d) — physics follows the line",
+                ah.mass, ALIGN_MAXVEL, ALIGN_AIM))
+        else
+            log("route: align driver unavailable (" .. tostring(alignWhy) .. ") — driving with keys")
+        end
+        local alignClock, alignMark = os.clock(), tr:GetPivot().Position
+        local li, lastPlan, pass = 2, 0, 0
+        local deadline = os.clock() + 120
+        while os.clock() < deadline do
+            pass += 1
+            if stopping() then alignDriveStop(ah) return nil end
             local p = tr:GetPivot().Position
+            -- stuck probe: 3 s without 3 studs of progress = the constraint is
+            -- losing to the game's controller (or we are jammed) — hand back
+            -- to the key driver instead of grinding
+            if useAlign then
+                if (p - alignMark).Magnitude >= 3 then
+                    alignMark, alignClock = p, os.clock()
+                elseif os.clock() - alignClock > 3 then
+                    useAlign = false
+                    alignDriveStop(ah)
+                    log("align driver stalled (3 s without progress) — falling back to keys")
+                end
+            end
             -- re-plan ~once a second: parked tools shift around, and the
             -- fresh A* always re-picks the quickest current route
             if os.clock() - lastPlan > 1 then
                 lastPlan = os.clock()
                 local newLegs, n = pathfindAround(p, goal, tr, impl)
-                if stopping() then return nil end
+                if stopping() then alignDriveStop(ah) return nil end
                 if newLegs then
                     if info ~= n then
                         log(string.format("re-routed: %d legs around %d obstacles", #newLegs - 1, n))
@@ -1471,25 +1573,28 @@ local okBuild, errBuild = pcall(function()
                     g = legs[li]
                 else
                     local dg = (Vector3.new(p.X, 0, p.Z) - Vector3.new(goal.X, 0, goal.Z)).Magnitude
-                    if dg <= 8 then return true, pass end
+                    if dg <= 8 then alignDriveStop(ah) return true, pass end
                 end
             end
-            if useKeys then
+            if useAlign then
+                alignDriveStep(ah, tr, Vector3.new(g[1], p.Y, g[2]), 0.12)
+            elseif useKeys then
                 local res = driveLegKeys(tr, seat, p, Vector3.new(g[1], p.Y, g[2]), 6)
-                if res == nil then return nil end
+                if res == nil then alignDriveStop(ah) return nil end
                 if res == false then
                     useKeys = false
                     log("keys didn't drive to the field — falling back to glide")
                 end
             end
-            if not useKeys then
+            if not useAlign and not useKeys then
                 glideTractor(tr, Vector3.new(g[1], p.Y, g[2]))
             end
-            task.wait(0.2)
+            task.wait(0.12)
         end
+        alignDriveStop(ah)
         local p = tr:GetPivot().Position
         local d = (Vector3.new(p.X, 0, p.Z) - Vector3.new(goal.X, 0, goal.Z)).Magnitude
-        if d <= 8 then return true, 40 end
+        if d <= 8 then return true, pass end
         return false, "still " .. math.floor(d) .. " studs short"
     end
 
