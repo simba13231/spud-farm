@@ -298,16 +298,18 @@ local okBuild, errBuild = pcall(function()
         return btn.Name
     end
 
-    -- ▸ REAL CLICKS (user test: ":Activate() didn't open the manager" —
-    --   the game doesn't act on the Activated event alone; a player's
-    --   click fires the WHOLE pipeline: InputBegan → MouseButton1Down/
-    --   Up/Click → Activated). So every manager button is now clicked
-    --   FOR REAL: a mouse down+up at the button's on-screen centre
-    --   through VirtualInputManager (the same engine that already
-    --   proven-drives the WASD keys). clickEffect() fires the real
-    --   click, polls for the button's VISIBLE effect, and only falls
-    --   back to :Activate() when the click didn't take — so exactly
-    --   one effective action ever lands (never a double-toggle).
+    -- ▸ CLICKING (user test: the manager's menu button "didn't open
+    --   GarageMenu (real click + :Activate() both tried)") — in this
+    --   executor the game does NOT act on synthetic mouse events and
+    --   NOT on :Activate(); it acts on the functions the game ITSELF
+    --   connected to the button. The v7.6 capture proved it: the Spawn
+    --   button only respawns when its own Activated handler is called.
+    --   So a "click" is now, in order: a REAL mouse click (most
+    --   faithful) → the button's OWN connected handlers (its
+    --   MouseButton1Click/Activated/MouseButton1Down, walking up to 4
+    --   parents exactly like the capture did) → :Activate() as the
+    --   last resort. The effect poll after each attempt means exactly
+    --   ONE effective action can ever land (never a double-toggle).
     local function realClick(btn)
         local p = btn.AbsolutePosition + btn.AbsoluteSize / 2
         VIM:SendMouseButtonEvent(p.X, p.Y, 0, true, game, 1)
@@ -315,18 +317,60 @@ local okBuild, errBuild = pcall(function()
         VIM:SendMouseButtonEvent(p.X, p.Y, 0, false, game, 1)
     end
 
+    -- call the game's OWN connections for a button (capture-proven).
+    -- Prefers one event's set (the first non-empty), never mixing events
+    -- — so the game's logic can't run twice.
+    local function invokeHandlers(btn)
+        if type(getconnections) ~= "function" then return false end
+        local evs = { "MouseButton1Click", "Activated", "MouseButton1Down" }
+        local obj, hop = btn, 0
+        while obj and hop < 4 do
+            for _, ev in ipairs(evs) do
+                local okC, conns =
+                    pcall(function() return getconnections(obj[ev]) end)
+                if okC and conns and #conns > 0 then
+                    local called = false
+                    for _, c in ipairs(conns) do
+                        if type(c.Function) == "function" then
+                            if pcall(c.Function) then called = true end
+                        end
+                    end
+                    if called then
+                        return true, ev .. (hop > 0 and ("@" .. obj.Name) or "")
+                    end
+                end
+            end
+            obj = obj.Parent
+            hop += 1
+        end
+        return false
+    end
+
     local function clickEffect(btn, effect)
         if effect and effect() then return true end -- already there
+        -- attempt 1: a REAL mouse click at the button's centre
         local ok, err = pcall(realClick, btn)
         if not ok then
             log("real click failed on '" .. btn.Name .. "': " .. tostring(err))
         end
-        for _ = 1, 8 do -- ~2 s for the effect to show
+        for _ = 1, 6 do -- ~1.5 s for the effect to show
             if stopping() then return false end
             if effect and effect() then return true end
             task.wait(0.25)
         end
-        pcall(function() btn:Activate() end) -- fallback: Activated-only
+        -- attempt 2: the game's OWN connected handlers (capture-proven —
+        -- this is what makes the manager open in this executor)
+        local called, how = invokeHandlers(btn)
+        if called then
+            log("clicked '" .. btn.Name .. "' via the game's own handler (" .. tostring(how) .. ")")
+            for _ = 1, 8 do -- ~2 s
+                if stopping() then return false end
+                if effect and effect() then return true end
+                task.wait(0.25)
+            end
+        end
+        -- attempt 3: :Activate() (Activated-only)
+        pcall(function() btn:Activate() end)
         for _ = 1, 8 do
             if stopping() then return false end
             if effect and effect() then return true end
@@ -409,7 +453,7 @@ local okBuild, errBuild = pcall(function()
             -- menu button, judged by the menu actually appearing
             if not menu.Enabled then
                 if not clickEffect(garageBtn, function() return menu.Enabled end) then
-                    log("equipment manager: the menu button didn't open GarageMenu (real click + :Activate() both tried)")
+                    log("equipment manager: the menu button didn't open GarageMenu (real click + the game's own handlers + :Activate() all tried)")
                     return false
                 end
                 task.wait(0.4) -- let the card list populate
@@ -508,40 +552,21 @@ local okBuild, errBuild = pcall(function()
                 return false
             end
             -- THE GAME'S OWN SPAWN HANDLER (capture v7.6, entry 9j): the
-            -- Spawn button's Activated handler is itself the spawn action —
-            -- it closes over the menu controller, the viewed-equipment
-            -- STATE (its GetViewedEquipment resolves the vehicle LIVE from
-            -- this card) and the remote wrapper. Calling it = what a click
+            -- Spawn button's own handler is the spawn action itself — it
+            -- closes over the menu controller, the viewed-equipment STATE
+            -- (its GetViewedEquipment resolves the vehicle LIVE from this
+            -- card) and the remote wrapper. Calling it = what a click
             -- does: the game fetches the vehicle itself, so there is no
             -- remote name or args to guess and nothing to spoof. It also
             -- sidesteps the clip problem entirely: the button only needs
             -- to EXIST in the tree, not be visible — a real click at a
-            -- clipped centre hits nothing, but a direct handler call
-            -- cannot miss.
-            local handled = false
-            if type(getconnections) == "function" then
-                local okH, conns = pcall(function()
-                    return getconnections(spawnBtn.Activated)
-                end)
-                if okH and conns and #conns > 0 then
-                    for _, c in ipairs(conns) do
-                        if type(c.Function) == "function" then
-                            local okF, errF = pcall(c.Function)
-                            if not okF then
-                                log("equipment manager: the game's Spawn handler errored: " .. tostring(errF))
-                            else
-                                handled = true
-                            end
-                        end
-                    end
-                else
-                    log("equipment manager: getconnections found no Activated handler on Spawn — falling back to a real click")
-                end
-            else
-                log("equipment manager: getconnections unavailable — falling back to a real click")
+            -- clipped centre hits nothing, but a handler call cannot miss.
+            local handled, how = invokeHandlers(spawnBtn)
+            if not handled then
+                log("equipment manager: no readable Spawn handler (getconnections) — falling back to a real click")
             end
             if handled then
-                log(string.format("equipment manager: called the game's own Spawn handler for %s (instant, no clip risk)", vehicleName))
+                log(string.format("equipment manager: called the game's own Spawn handler for %s (%s — instant, no clip risk)", vehicleName, tostring(how)))
                 task.wait(1) -- let the game process the respawn
                 closeManager(menu, garageBtn)
                 return true
