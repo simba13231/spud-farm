@@ -1514,6 +1514,68 @@ local okBuild, errBuild = pcall(function()
         h.pos.Position = Vector3.new(goal.X, p.Y, goal.Z)
     end
 
+    -- ▸ ONE STRAIGHT LEG ON THE ALIGN MOVER (user: "we got to change the way
+    --   the harvester moves on the feild. it needs to stay on the line not
+    --   wiggle everywhere"): the same pure-pursuit mover that drives to the
+    --   field now drives the sweep — one leg at a time, so a stuck corner
+    --   only costs that leg. Returns true = arrived, false = gave up (caller
+    --   drives this leg with keys), nil = user stopped. `stats` collects how
+    --   far off the line it got and how often it crossed it, so a run says
+    --   whether it really held the line.
+    local function alignDriveLeg(tr, from, goal, tol, stats)
+        local A = Vector3.new(from.X, 0, from.Z)
+        local B = Vector3.new(goal.X, 0, goal.Z)
+        local leg = B - A
+        local legLen = leg.Magnitude
+        if legLen < 1 then return true end
+        local dir = leg / legLen
+        local perp = Vector3.new(-dir.Z, 0, dir.X)
+        local h = alignDriveStart(tr)
+        if not h then return false end
+        local mark, markT = tr:GetPivot().Position, os.clock()
+        local deadline = os.clock() + 8 + legLen / 6
+        local t0 = os.clock()
+        local ok, prevSide = false, nil
+        while os.clock() < deadline do
+            if stopping() then alignDriveStop(h) return nil end
+            local p = tr:GetPivot().Position
+            local rel = Vector3.new(p.X, 0, p.Z) - A
+            local cross = rel:Dot(perp)
+            -- stats skip the first 1.5 s of a leg: that is the corner entry,
+            -- where being far off the new line is expected, not a wiggle
+            if stats and os.clock() - t0 > 1.5 then
+                stats.worst = math.max(stats.worst or 0, math.abs(cross))
+                local side = cross > 0.5 and 1 or (cross < -0.5 and -1 or prevSide)
+                if side and prevSide and side ~= prevSide then
+                    stats.flips = (stats.flips or 0) + 1
+                end
+                prevSide = side
+            end
+            if rel:Dot(dir) >= legLen - tol and math.abs(cross) <= 8 then
+                ok = true
+                break
+            end
+            -- 3 s without 3 studs = the constraint is losing to the seat
+            -- controller (or the vehicle is jammed): stop and let keys try
+            if (p - mark).Magnitude >= 3 then
+                mark, markT = p, os.clock()
+            elseif os.clock() - markT > 3 then
+                break
+            end
+            alignDriveStep(h, tr, A.X, A.Z, B.X, B.Z, 0.1)
+            -- ease off into the leg end (the key driver's rule): the corner
+            -- starts slow instead of carrying full speed into the turn
+            local left = legLen - rel:Dot(dir)
+            if left < legLen * 0.15 then
+                h.pos.MaxVelocity = math.max(
+                    h.pos.MaxVelocity * math.clamp(left / (legLen * 0.15), 0.2, 1), 2)
+            end
+            task.wait(0.1)
+        end
+        alignDriveStop(h)
+        return ok
+    end
+
     -- to the NEAREST CORNER of the field (user: start at a corner, not the
     -- center) — 4 studs inside the edge; arrive within 8 studs of it. The
     -- route comes from A* around everything parked on the farm and is
@@ -2733,11 +2795,25 @@ local okBuild, errBuild = pcall(function()
                 or "cell read unavailable"))
         local realDrive -- nil = not probed yet; true = seat driving; false = glide
         local sellTries = 0
+        -- field driving starts on the ALIGN mover: binary WASD hunts across the
+        -- line, the mover holds it. One fallback per sweep if it gets stuck.
+        local useAlign = true
+        local lineStats = { worst = 0, flips = 0 }
         local function doLeg(from, goal, tol)
             if stopping() then return nil end
             -- never accept more than half a leg early (the short step onto
             -- the next ring would get cut otherwise)
             tol = math.min(tol or 7, (goal - from).Magnitude * 0.5)
+            if useAlign then
+                local res = alignDriveLeg(tr, from, goal, tol, lineStats)
+                if res == nil then return nil end
+                if res then
+                    task.wait(0.05)
+                    return true
+                end
+                useAlign = false
+                log("align mover couldn't finish a field leg — keys take over for this sweep")
+            end
             if realDrive ~= false then
                 local res = driveLegKeys(tr, seat, from, goal, tol)
                 if res == nil then return nil end
@@ -2848,6 +2924,10 @@ local okBuild, errBuild = pcall(function()
             dbgClear()
             task.wait(1) -- let the server register the drive-overs before recounting
             if stopping() then return nil end
+        end
+        if lineStats.flips > 0 or lineStats.worst > 0 then
+            log(string.format("field line: %d crossings, worst %.1f studs off%s",
+                lineStats.flips, lineStats.worst, useAlign and "" or " (keys after the fallback)"))
         end
         local st1 = countStages(field)
         if st1 then
