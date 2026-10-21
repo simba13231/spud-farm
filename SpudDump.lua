@@ -2023,6 +2023,148 @@ pcall(function()
     w("  matches: " .. found)
 end)
 
+------------------------------------------------------------------
+-- 18. SEED CRATE PICKUP (live) — user: "it isnt picking up anything".
+--     Measures the crate the shop trip tps to: how far it really is,
+--     its carry tags, who holds it, and what the game offers there.
+--     Presses E ONCE (a real key press) to see if that carries it.
+--     Wrapped so it can never break the rest of the dump.
+------------------------------------------------------------------
+pcall(function()
+    header("SEED CRATE PICKUP (live — distance, tags, what E does)")
+    local lp = game:GetService("Players").LocalPlayer
+    local vim = game:GetService("VirtualInputManager")
+    local ch = lp.Character
+    local r0 = ch and ch:FindFirstChild("HumanoidRootPart")
+    local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+    if not r0 then w("  no HumanoidRootPart — skipped") return end
+
+    local function enabledActs()
+        local o = {}
+        pcall(function()
+            local pg = lp:FindFirstChildOfClass("PlayerGui")
+            for _, b in ipairs(pg.GuiViews.HUD.PCGP_ContextActions.Buttons:GetChildren()) do
+                if b:IsA("GuiObject") and b.Visible then o[#o + 1] = b.Name end
+            end
+        end)
+        return o
+    end
+    local function enabledBills()
+        local o = {}
+        pcall(function()
+            local pg = lp:FindFirstChildOfClass("PlayerGui")
+            local bb = pg.GuiViews.HUD.PCGP_ContextActions.Billboards
+            for _, b in ipairs(bb:GetChildren()) do
+                if b:IsA("BillboardGui") and b.Enabled then
+                    o[#o + 1] = b.Name .. " -> " .. (b.Adornee and b.Adornee:GetFullName() or "?")
+                end
+            end
+        end)
+        return o
+    end
+
+    w(string.format("  character at (%.1f, %.1f, %.1f)  seated=%s  state=%s",
+        r0.Position.X, r0.Position.Y, r0.Position.Z,
+        tostring(hum and hum.SeatPart ~= nil), tostring(hum and hum:GetState())))
+
+    local crates = {}
+    local walked = 0
+    for _, d in ipairs(workspace:GetDescendants()) do
+        walked += 1
+        if d.Name == "SeedType" then
+            local m = d.Parent and d.Parent.Parent
+            if m and m:IsA("Model") then
+                local p = m:FindFirstChild("Primary") or m:FindFirstChildWhichIsA("BasePart", true)
+                if p then
+                    local seed = "?"
+                    pcall(function() seed = tostring(d.Value) end)
+                    crates[#crates + 1] = { m = m, p = p, seed = seed, d = (p.Position - r0.Position).Magnitude }
+                end
+            end
+        end
+    end
+    w("  walked " .. walked .. " workspace instance(s) — seed-tagged crates: " .. #crates)
+
+    table.sort(crates, function(a, b) return a.d < b.d end)
+    for i = 1, math.min(#crates, 8) do
+        local c = crates[i]
+        local m = c.m
+        local cfg = m:FindFirstChild("Configurations")
+        local function val(name)
+            local v = cfg and cfg:FindFirstChild(name)
+            if not v then return "nil" end
+            local ok2, x = pcall(function() return v.Value end)
+            if not ok2 then return "?" end
+            if typeof(x) == "Instance" then return x.Name end
+            return tostring(x)
+        end
+        w(string.format("  #%d seed='%s' %.1f studs away (dY %.1f) part='%s' %s",
+            i, c.seed, c.d, c.p.Position.Y - r0.Position.Y, c.p.Name, m:GetFullName()))
+        w(string.format("     CarryCategory=%s CarryWeight=%s Precedence=%s PreventCarry=%s",
+            tostring(m:GetAttribute("CarryCategory")), tostring(m:GetAttribute("CarryWeight")),
+            tostring(m:GetAttribute("CarryPrecedence")), tostring(m:GetAttribute("PreventCarry"))))
+        w(string.format("     Owner=%s CurrentHolder=%s StoreClaim=%s Capacity=%s",
+            val("Owner"), val("CurrentHolder"), val("StoreClaim"), val("Capacity")))
+    end
+
+    local a0 = enabledActs()
+    local b0 = enabledBills()
+    w("  context actions NOW: " .. (#a0 > 0 and table.concat(a0, " · ") or "NONE"))
+    w("  billboards NOW: " .. (#b0 > 0 and table.concat(b0, " · ") or "NONE"))
+
+    if #crates == 0 then
+        w("  no crate in the workspace — the shelf is not streamed in here")
+        return
+    end
+
+    local near = crates[1]
+    local function stateOf()
+        local p = near.m:FindFirstChild("Primary") or near.m:FindFirstChildWhichIsA("BasePart", true)
+        local links = ch:FindFirstChild("CarryLinks")
+        local nm = {}
+        if links then for _, v in ipairs(links:GetChildren()) do nm[#nm + 1] = v.Name end end
+        return string.format("crate %.1f studs from you (dY %.1f) CarryLinks=[%s]",
+            p and (p.Position - r0.Position).Magnitude or -1,
+            p and (p.Position.Y - r0.Position.Y) or 0,
+            table.concat(nm, ","))
+    end
+    w("  BEFORE E: " .. stateOf())
+    local okE, errE = pcall(function()
+        vim:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+        task.wait(0.12)
+        vim:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+    end)
+    w("  E press: " .. (okE and "sent" or ("FAILED " .. tostring(errE))))
+    task.wait(1.0)
+    w("  AFTER E: " .. stateOf())
+    local a1 = enabledActs()
+    w("  context actions AFTER: " .. (#a1 > 0 and table.concat(a1, " · ") or "NONE"))
+    w("  billboards AFTER: " .. (#enabledBills() > 0 and table.concat(enabledBills(), " · ") or "NONE"))
+
+    -- if the key did nothing, try the game's own PickupSeedBox button
+    local p2 = near.m:FindFirstChild("Primary") or near.m:FindFirstChildWhichIsA("BasePart", true)
+    if p2 and (p2.Position - r0.Position).Magnitude > 12 then
+        w("  E did not carry it — trying the game's own PickupSeedBox button")
+        local btn
+        pcall(function()
+            local pg = lp:FindFirstChildOfClass("PlayerGui")
+            btn = pg.GuiViews.HUD.PCGP_ContextActions.Buttons:FindFirstChild("PickupSeedBox")
+        end)
+        w("  PickupSeedBox button: " .. (btn and ("Visible=" .. tostring(btn.Visible)) or "MISSING"))
+        local okB, errB = pcall(function()
+            if getconnections then
+                local cs = getconnections(btn.Activated)
+                if #cs > 0 then cs[1]:Fire() return end
+            end
+            btn:Activate()
+        end)
+        w("  button attempt: " .. (okB and "fired" or ("FAILED " .. tostring(errB))))
+        task.wait(1.0)
+        w("  AFTER button: " .. stateOf())
+    end
+    w("  DO NOW: run this while standing at the crate the shop trip picks")
+end)
+
 local text = table.concat(out, "\n")
 
 ------------------------------------------------------------------
