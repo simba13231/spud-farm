@@ -2949,15 +2949,40 @@ local okBuild, errBuild = pcall(function()
 
     -- ▸ WHEN IT'S DONE — PUT THE TOOLS AWAY (user: "it should despawn any
     --   unused tools when it's done (when i say despawn i mean store ok)"):
-    --   after the pass chain, the tools that are OUT in the world go back
-    --   into the Equipment Manager's storage, through the SAME proven
-    --   card + action path the respawn uses (no guessed remote, no mouse).
-    --   Skipped, each with an honest line: the ride the player is sitting
-    --   in (nothing can be stored from the seat), a tool that is still
-    --   hitched to the tractor, and anything already in storage. Every
-    --   store is VERIFIED (InStorage flips true) — a card whose Store is
-    --   refused while the tool is out simply won't flip it, and that shows
-    --   up in the log instead of being claimed as done.
+    --   the tools that are OUT in the world go back into the Equipment
+    --   Manager's storage, through the SAME proven card + action path the
+    --   respawn uses (no guessed remote, no mouse). Every store is VERIFIED
+    --   (InStorage flips true) — a card whose Store is refused while the tool
+    --   is out simply won't flip it, and that shows up in the log instead of
+    --   being claimed as done.
+    -- ▸ PUT ONE TOOL AWAY (user: "i want it to have the tool opend ONLY when
+    --   the tool is used just for the pathfinding to be better"): this is the
+    --   one verified store call, reused right after each pass so a finished
+    --   tool stops standing in the way. Refuses the vehicle the player is
+    --   sitting in, and says so instead of claiming it worked.
+    local function storeOne(m)
+        if not m or not m.Parent then return false end
+        if m:GetAttribute("InStorage") then return true end
+        local char = LocalPlayer.Character
+        local hum2 = char and char:FindFirstChildOfClass("Humanoid")
+        if hum2 and hum2.SeatPart and hum2.SeatPart:IsDescendantOf(m) then
+            log("store: you're sitting in the " .. m.Name .. " — not storing it from the seat")
+            return false
+        end
+        log("store: putting the " .. m.Name .. " back in storage…")
+        managerAction(m.Name, "Store")
+        for _ = 1, 10 do -- ~5 s for the store to land
+            if stopping() then return false end
+            if m:GetAttribute("InStorage") then
+                log("✅ " .. m.Name .. " is back in storage")
+                return true
+            end
+            task.wait(0.5)
+        end
+        log("couldn't store the " .. m.Name .. " — store it by hand (its card's Store button may refuse while the tool is out)")
+        return false
+    end
+
     local function storeUnusedTools()
         if stopping() then
             log("store: the loop was stopped by hand — leaving the tools where they are")
@@ -2965,8 +2990,6 @@ local okBuild, errBuild = pcall(function()
         end
         local folder = equipmentFolder()
         if not folder then log("store: Objects.Equipment not found") return end
-        local char = LocalPlayer.Character
-        local hum = char and char:FindFirstChildOfClass("Humanoid")
         local hitched = hitchedImplementName()
         local out = {}
         for _, m in ipairs(folder:GetChildren()) do
@@ -2981,22 +3004,10 @@ local okBuild, errBuild = pcall(function()
                 log("store: stopped by hand — leaving the rest out")
                 return
             end
-            if hum and hum.SeatPart and hum.SeatPart:IsDescendantOf(m) then
-                log("store: you're sitting in the " .. m.Name .. " — not storing it from the seat")
-            elseif hitched and hitched == m.Name then
+            if hitched and hitched == m.Name then
                 log("store: " .. m.Name .. " is still hitched — not storing it from under the hitch")
             else
-                log("store: putting the " .. m.Name .. " back in storage…")
-                managerAction(m.Name, "Store")
-                local stored = false
-                for _ = 1, 10 do -- ~5 s for the store to land
-                    if stopping() then break end
-                    if m:GetAttribute("InStorage") then stored = true break end
-                    task.wait(0.5)
-                end
-                log(stored
-                    and ("✅ " .. m.Name .. " is back in storage")
-                    or ("couldn't store the " .. m.Name .. " — store it by hand (its card's Store button may refuse while the tool is out)"))
+                storeOne(m) -- also refuses the seat, with its own line
             end
         end
     end
@@ -3220,6 +3231,12 @@ local okBuild, errBuild = pcall(function()
             -- A self-propelled ride (the harvester) is never dropped.
             if not job.selfPropelled and impl:IsDescendantOf(workspace) then
                 dropImplementAtOrigin(tr, impl, origin)
+                -- ▸ OUT ONLY WHILE USED (user: "i want it to have the tool
+                --   opend ONLY when the tool is used just for the pathfinding
+                --   to be better"): its pass is over and it is parked, so it
+                --   goes straight back into storage instead of standing in the
+                --   way of the next pass.
+                storeOne(impl)
             end
             return true
         end
@@ -3279,6 +3296,14 @@ local okBuild, errBuild = pcall(function()
         --   when needed; skipped when already in the tractor)
         if not mountTractor(char, hum, tr, seat, dist) then return end
 
+        -- ▸ the harvester's pass is over and we are OUT of it now: back into
+        --   storage, so it stops being a parked obstacle for the tractor
+        --   passes (user: the tool is out only while it is being used).
+        if hv and hv.Parent
+            and not (hum.SeatPart and hum.SeatPart:IsDescendantOf(hv)) then
+            storeOne(hv)
+        end
+
         logEquipment() -- always show the names so we can confirm the pick
 
         -- ▸ steps 3-6: the plow pass (bare cells -> Plowed). Called
@@ -3337,6 +3362,25 @@ local okBuild, errBuild = pcall(function()
                     break
                 end
                 log(string.format("seeder still has %d seed(s) and %d cell(s) across %d field(s) still need seeding — going back to seed them", seeds, after, afields))
+            end
+        end
+
+        -- ▸ STAND UP: the tractor's work is done, but nothing can be stored
+        --   from the seat — get out so the end-of-run store can actually put
+        --   the tractor away (user: the tool is out only while it is used).
+        if hum.SeatPart then
+            local ride = hum.SeatPart.Parent
+            log("done driving — getting out of the " ..
+                (ride and ride.Name or "vehicle") .. " so it can be stored")
+            pressKey(Enum.KeyCode.F) -- dump: ExitEquipment = F
+            for _ = 1, 8 do
+                if stopping() then return end
+                if not hum.SeatPart then break end
+                task.wait(0.25)
+            end
+            if hum.SeatPart then
+                pcall(function() hum.Sit = false end)
+                task.wait(0.6)
             end
         end
     end
