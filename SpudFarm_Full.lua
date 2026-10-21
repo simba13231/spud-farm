@@ -2460,13 +2460,24 @@ local okBuild, errBuild = pcall(function()
         --   and only on foot — the shop is walked into.
         if hum.SeatPart then return false end
         local needCells = seedNeedLeft(tr:GetPivot().Position)
-        if needCells > 0 then
-            log(string.format("%d cell(s) still need seed — going to buy %s",
-                needCells, tostring(seedChoice or "? (nothing picked in the Farm tab)")))
-            buySeedAndFill(seedChoice)
-        else
-            log("the seeder is empty but no field needs seed — not going shopping")
+        if not seedChoice then
+            log("the seeder is empty and nothing is picked in the Farm tab's Seed dropdown — pick a seed and the loop can buy it")
+            return false
         end
+        -- ▸ the user's rule, UNGATED (user: "when i start the loop with no
+        --   seeds in the seeder it does not go to the shop, can you fix
+        --   that"): an EMPTY seeder + a picked seed = go and buy it. The old
+        --   gate ("only if a field needs seed right now") skipped the trip on
+        --   exactly the runs that needed it — fields that still have to be
+        --   plowed/cultivated have no Cultivated cells yet.
+        log(string.format("the seeder is empty — going to buy %s (%d cell(s) need seed right now)",
+            seedChoice, needCells))
+        -- the fill at the shop only works on a seeder that is OUT in the
+        -- world — bring it back from storage first, or the crate gets bought
+        -- and can't be poured
+        ensureToolNearby(tr, "Planter", "seeder")
+        if stopping() then return false end
+        buySeedAndFill(seedChoice)
         return false
     end
 
@@ -3134,6 +3145,15 @@ local okBuild, errBuild = pcall(function()
             end
             log(string.format("✅ tractor respawned — %.0f studs away now", dist))
         end
+
+        -- ▸ EMPTY SEEDER, FIRST THING (user: "when i start the loop with no
+        --   seeds in the seeder it does not go to the shop, can you fix
+        --   that"): the seeder is read BEFORE any field work, so an empty one
+        --   sends the run shopping at the START — instead of only after the
+        --   plow/cultivate passes, where a run that found nothing else to do
+        --   never reached the shop at all.
+        seedCheck(tr, hum)
+        if stopping() then return end
 
         -- ▸ step 0: what work is left? (ALL of my fields are scanned —
         --   including fields placed on my plots — and each field's real
