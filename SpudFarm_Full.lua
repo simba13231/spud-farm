@@ -2202,7 +2202,37 @@ local okBuild, errBuild = pcall(function()
                     c.label ~= "" and c.label or "(no label)",
                     c.owner and (" owner " .. c.owner) or ""))
             end
-            log("seed crate: nothing carries the '" .. seedName .. "' seed tag or label — paste the lines above so the match rule can be fixed")
+            -- what the shelf actually sells, grouped — one line that names the
+            -- seeds you CAN buy here instead of only saying "no match"
+            local shelf = {}
+            for _, c in ipairs(cands) do
+                local k = c.seed or "(no seed tag)"
+                shelf[k] = (shelf[k] or 0) + 1
+            end
+            local parts = {}
+            for k, n in pairs(shelf) do parts[#parts + 1] = k .. " ×" .. n end
+            table.sort(parts)
+            log("seed crate: the shelf has: "
+                .. (#parts > 0 and table.concat(parts, ", ") or "nothing at all"))
+            log("seed crate: nothing sells '" .. seedName
+                .. "' here — pick one of those in the Farm tab's Seed dropdown")
+            return false
+        end
+        -- what it costs (the crate's own price billboard) and whether we can
+        -- pay — cheaper than discovering it at the till
+        local price
+        local cb = hit.m:FindFirstChild("CostBillboard", true)
+        local pl = cb and cb:FindFirstChild("TextLabel", true)
+        if pl and pl:IsA("TextLabel") then
+            price = tonumber((tostring(pl.Text):gsub("[^%d]", "")))
+        end
+        local balNow = coinBalance()
+        log(string.format("seed crate: the %s crate (%s) costs %s — balance %s",
+            seedName, hit.m.Name,
+            price and (price .. " coins") or "an unreadable price",
+            tostring(balNow)))
+        if price and balNow and price > balNow then
+            log("seed crate: that is more than the balance — not buying it (pick a cheaper seed or sell something first)")
             return false
         end
         tpChar(hit.pos)
@@ -3564,14 +3594,27 @@ local okBuild, errBuild = pcall(function()
         end)
         local list = ok and names or nil
         if list and #list > 0 then
-            seedChoice = list[1]
+            -- ▸ DEFAULT (user: "it went to the store like before but not to a
+            --   crate"): the alphabetically first name is an EVENT seed
+            --   ("Alien Tentacle") that FarmCo doesn't sell, so the shop trip
+            --   found no crate at all. Default to the game's FIRST crop
+            --   instead — the lowest SEED_TYPE id (Wheat=2) in its own
+            --   vocabulary. A pick from the dropdown always wins.
+            local bestName, bestId
+            for name2, id2 in pairs(seedIdOf) do
+                if not bestId or id2 < bestId then bestName, bestId = name2, id2 end
+            end
+            local defaultName = bestName or list[1]
+            seedChoice = defaultName
+            log("seed default: " .. defaultName
+                .. " (the game's first crop) — change it in the Farm tab's Seed dropdown")
             log("seed list: " .. #list .. " seed(s) read from the game — "
                 .. table.concat(list, ", "))
             Tabs.Farm:CreateDropdown("seedChoice", {
                 Title = "Seed",
                 Values = list,
                 Multi = false,
-                Default = list[1],
+                Default = defaultName,
                 Callback = function(v)
                     seedChoice = v
                     log("seed: " .. tostring(v))
