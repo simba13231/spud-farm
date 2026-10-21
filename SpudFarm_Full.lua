@@ -1986,6 +1986,10 @@ local okBuild, errBuild = pcall(function()
     --   shelf / the menu's buttons, so nothing fails silently.
     local seedChoice -- the Farm tab picker writes this (declared up here
                      -- because the seed check below reads it)
+    -- the game's own SEED_TYPE table both ways (filled by the Farm tab
+    -- picker's read of FieldHelper): names for the dropdown, ids so a crate
+    -- that keeps the numeric SeedType can still be named.
+    local seedIdOf, seedNameOf = {}, {}
 
     local function coinBalance()
         local ok, n = pcall(function()
@@ -2077,39 +2081,80 @@ local okBuild, errBuild = pcall(function()
         return nil
     end
 
-    -- The crate for the picked seed: a seedbox/crate model that is NOT
-    -- someone else's and whose own label names the seed (crates for sale are
-    -- locked draggables — context key LockedCarry=E). Returns the nearest hit
-    -- plus every candidate, so a miss can log the whole shelf.
+    -- ▸ THE GAME'S OWN SEED TAG (user: "when it goes to the shop make it
+    --   search the game or smth for the spesific seed the user input into the
+    --   thing in the farming tab then make it tp to that seed then carry it"):
+    --   a seed box carries Configurations.SeedType — the seed's NAME as a
+    --   StringValue (dump §27), or the numeric SEED_TYPE id on some boxes.
+    --   That tag is the identity, so nothing is guessed from a model name.
+    --   Returns the seed name it stands for + the raw value (for the log).
+    local function crateSeedType(m)
+        local conf = m:FindFirstChild("Configurations")
+                or m:FindFirstChild("Configurations", true)
+        local v = conf and conf:FindFirstChild("SeedType")
+        if not v then return nil end
+        if v:IsA("StringValue") then
+            return v.Value, v.Value
+        end
+        if v:IsA("NumberValue") or v:IsA("IntValue") then
+            return seedNameOf[v.Value], tostring(v.Value)
+        end
+        if v:IsA("ObjectValue") then
+            local s = v.Value and v.Value.Name or nil
+            return s, s or "?"
+        end
+        return nil, v.ClassName
+    end
+
+    -- The crate for the picked seed: ONE walk of the world for anything that
+    -- carries the game's own SeedType tag, plus anything named like a crate as
+    -- a fallback (a box whose tag can't be read). Someone else's crate is
+    -- never taken. Prefers a SEED-TAG match over a label match, then the
+    -- nearest. Returns the hit plus every candidate, so a miss logs the shelf.
     local function findSeedCrate(seedName)
-        local want = (seedName:lower():gsub("%s+", ""))
+        local want = (tostring(seedName):lower():gsub("%s+", ""))
         local root = LocalPlayer.Character
             and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-        local cands = {}
+        local tagged, models = {}, {}
         for _, d in ipairs(workspace:GetDescendants()) do
-            if d:IsA("Model") and d ~= LocalPlayer.Character then
+            if d.Name == "SeedType" then
+                local m = d.Parent and d.Parent.Parent
+                if m and m:IsA("Model") then tagged[m] = true end
+            elseif d:IsA("Model") and d ~= LocalPlayer.Character then
                 local n = d.Name:lower()
                 if n:find("seedbox", 1, true) or n:find("crate", 1, true) then
-                    local p = d:FindFirstChildWhichIsA("BasePart", true)
-                    if p then
-                        local owner = crateOwner(d)
-                        cands[#cands + 1] = {
-                            m = d, pos = p.Position, label = crateLabel(d), owner = owner,
-                            other = owner ~= nil and owner ~= LocalPlayer.Name,
-                            d = root and (p.Position - root.Position).Magnitude or 0,
-                        }
+                    models[d] = true
+                end
+            end
+        end
+        for m in pairs(tagged) do models[m] = true end
+        local cands, seedHit, labelHit
+        for m in pairs(models) do
+            local p = m:FindFirstChildWhichIsA("BasePart", true)
+            if p then
+                local seed, raw = crateSeedType(m)
+                local owner = crateOwner(m)
+                local c = {
+                    m = m, pos = p.Position, label = crateLabel(m), owner = owner,
+                    seed = seed, raw = raw,
+                    other = owner ~= nil and owner ~= LocalPlayer.Name,
+                    d = root and (p.Position - root.Position).Magnitude or 0,
+                }
+                cands[#cands + 1] = c
+                if not c.other then
+                    local s = seed and (seed:lower():gsub("%s+", ""))
+                    if s and (s == want or s:find(want, 1, true)) then
+                        if not seedHit or c.d < seedHit.d then seedHit = c end
+                    else
+                        local t = (c.label:lower():gsub("%s+", ""))
+                        if t ~= "" and t:find(want, 1, true) then
+                            if not labelHit or c.d < labelHit.d then labelHit = c end
+                        end
                     end
                 end
             end
         end
-        local hit
-        for _, c in ipairs(cands) do
-            local t = (c.label:lower():gsub("%s+", ""))
-            if not c.other and t ~= "" and t:find(want, 1, true) then
-                if not hit or c.d < hit.d then hit = c end
-            end
-        end
-        return hit, cands
+        return seedHit or labelHit, cands
     end
 
     local function buySeedAndFill(seedName)
@@ -2144,18 +2189,20 @@ local okBuild, errBuild = pcall(function()
         --   sale are locked draggables on the shelf, and the right one names
         --   the picked seed on its own label.
         local hit, cands = findSeedCrate(seedName)
-        log(string.format("seed crate: %d crate-like model(s) in the world — %s",
-            #cands, hit and ("taking " .. hit.m.Name .. " (label '" .. hit.label .. "')")
+        log(string.format("seed crate: %d candidate(s) in the world — %s",
+            #cands, hit and string.format("taking %s (seed tag '%s', label '%s')",
+                hit.m.Name, hit.seed or "unreadable", hit.label)
                 or "none matches the picked seed"))
         if not hit then
             table.sort(cands, function(a, b) return a.d < b.d end)
             for i = 1, math.min(#cands, 8) do
                 local c = cands[i]
-                log(string.format("  crate %.0f studs away: %s — '%s'%s",
-                    c.d, c.m.Name, c.label ~= "" and c.label or "(no label)",
+                log(string.format("  crate %.0f studs away: %s — seed '%s', label '%s'%s",
+                    c.d, c.m.Name, c.seed or "unreadable",
+                    c.label ~= "" and c.label or "(no label)",
                     c.owner and (" owner " .. c.owner) or ""))
             end
-            log("seed crate: nothing labelled '" .. seedName .. "' is for sale — paste the lines above so the match rule can be fixed")
+            log("seed crate: nothing carries the '" .. seedName .. "' seed tag or label — paste the lines above so the match rule can be fixed")
             return false
         end
         tpChar(hit.pos)
@@ -2281,9 +2328,8 @@ local okBuild, errBuild = pcall(function()
             for _, m in ipairs(dobjs:GetChildren()) do
                 local p = m:FindFirstChildWhichIsA("BasePart", true)
                 if p and (p.Position - root.Position).Magnitude < 80 then
-                    local conf = m:FindFirstChild("Configurations")
-                    local k = conf and conf:FindFirstChild("SeedType")
-                    if k and k:IsA("StringValue") and k.Value:lower() == seedName:lower() then
+                    local s2 = crateSeedType(m)
+                    if s2 and s2:lower() == seedName:lower() then
                         box = string.format("%s box %.0f studs away", seedName,
                             (p.Position - root.Position).Magnitude)
                         break
@@ -3485,6 +3531,10 @@ local okBuild, errBuild = pcall(function()
             for k, v in pairs(t) do -- bidirectional: names live on both sides
                 if type(k) == "string" then set[k] = true end
                 if type(v) == "string" then set[v] = true end
+                -- keep the id ↔ name pairs so a crate tagged with the numeric
+                -- SeedType can still be named (the shop search)
+                if type(k) == "string" and type(v) == "number" then seedIdOf[k] = v end
+                if type(k) == "number" and type(v) == "string" then seedNameOf[k] = v end
             end
             set.None = nil
             local out = {}
