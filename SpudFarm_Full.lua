@@ -680,7 +680,7 @@ local okBuild, errBuild = pcall(function()
         if respawned == false then
             log(string.format("equipment manager: the respawn for %s failed — see the lines above for why", impl.Name))
         end
-        for _ = 1, 30 do -- ~15 s for the respawn to land
+        for i = 1, 30 do -- ~15 s for the respawn to land
             if stopping() then return nil end
             local impl2, dist2, basis2 =
                 findImplement(typeName, tr:GetPivot().Position, tr)
@@ -689,6 +689,16 @@ local okBuild, errBuild = pcall(function()
                 log(string.format("✅ %s respawned — %.0f studs away now",
                     impl2.Name, dist2))
                 return impl2, dist2, basis2
+            end
+            -- say so once, halfway: a respawn that never lands used to look
+            -- like the run silently stopping right after the manager closed
+            if i == 10 then
+                log(string.format("still waiting for %s to come out (%s)…",
+                    impl.Name,
+                    impl2 and (impl2:GetAttribute("InStorage")
+                        and "it still reads in storage"
+                        or string.format("%.0f studs away", dist2 or 0))
+                        or "it isn't in the folder"))
             end
             task.wait(0.5)
         end
@@ -2776,10 +2786,15 @@ local okBuild, errBuild = pcall(function()
         log(string.format("the seeder is empty — going to buy %s (%d cell(s) need seed right now)",
             seedChoice, needCells))
         -- the fill at the shop only works on a seeder that is OUT in the
-        -- world — bring it back from storage first, or the crate gets bought
-        -- and can't be poured
-        ensureToolNearby(tr, "Planter", "seeder")
+        -- world — bring it back from storage first. If that fails, do NOT
+        -- buy: the crate would land on the counter with nothing to pour it
+        -- into.
+        local seederOut = ensureToolNearby(tr, "Planter", "seeder")
         if stopping() then return false end
+        if not seederOut then
+            log("the seeder couldn't be brought out of storage — not buying a crate it can't be poured into")
+            return false
+        end
         buySeedAndFill(seedChoice)
         return false
     end
