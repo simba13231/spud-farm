@@ -1521,18 +1521,11 @@ local okBuild, errBuild = pcall(function()
     -- most useful and quickest path every second"). REAL keys drive it
     -- (true physics — the old glide WHIPPED the towed tool); the glide
     -- stays only as the fallback when keys can't move the tractor.
-    local function driveToField(tr, field, seat, impl)
-        local baseCF, baseSize = fieldFrame(field)
-        if not baseCF then return false, "no bounds" end
-        local c = baseCF.Position
-        local rx = Vector3.new(baseCF.RightVector.X, 0, baseCF.RightVector.Z).Unit
-        local rz = Vector3.new(baseCF.LookVector.X, 0, baseCF.LookVector.Z).Unit
-        local p0 = tr:GetPivot().Position - c
-        -- nearest corner along the plate's OWN axes, 4 studs inside
-        local goal = c
-            + rx * math.max(baseSize.X / 2 - 4, 2) * (p0:Dot(rx) >= 0 and 1 or -1)
-            + rz * math.max(baseSize.Z / 2 - 4, 2) * (p0:Dot(rz) >= 0 and 1 or -1)
-        log(string.format("field corner target: (%.0f, %.0f)", goal.X, goal.Z))
+    -- ▸ THE ROUTE FOLLOWER: everything below was driveToField's body — A*
+    --   legs re-planned about once a second, then the align driver (or real
+    --   keys, or the glide fallback) drives them. Shared now, because the
+    --   sell trip drives the harvester to a pad and back the same way.
+    local function driveRoute(tr, seat, goal, impl)
         local startPos = tr:GetPivot().Position
         local legs, info = pathfindAround(startPos, goal, tr, impl)
         if not legs then
@@ -1653,6 +1646,21 @@ local okBuild, errBuild = pcall(function()
         local d = (Vector3.new(p.X, 0, p.Z) - Vector3.new(goal.X, 0, goal.Z)).Magnitude
         if d <= 8 then return true, pass end
         return false, "still " .. math.floor(d) .. " studs short"
+    end
+
+    local function driveToField(tr, field, seat, impl)
+        local baseCF, baseSize = fieldFrame(field)
+        if not baseCF then return false, "no bounds" end
+        local c = baseCF.Position
+        local rx = Vector3.new(baseCF.RightVector.X, 0, baseCF.RightVector.Z).Unit
+        local rz = Vector3.new(baseCF.LookVector.X, 0, baseCF.LookVector.Z).Unit
+        local p0 = tr:GetPivot().Position - c
+        -- nearest corner along the plate's OWN axes, 4 studs inside
+        local goal = c
+            + rx * math.max(baseSize.X / 2 - 4, 2) * (p0:Dot(rx) >= 0 and 1 or -1)
+            + rz * math.max(baseSize.Z / 2 - 4, 2) * (p0:Dot(rz) >= 0 and 1 or -1)
+        log(string.format("field corner target: (%.0f, %.0f)", goal.X, goal.Z))
+        return driveRoute(tr, seat, goal, impl)
     end
 
     -- honest per-cell read via the game's OWN FieldHelper module (dump §26:
@@ -2578,6 +2586,121 @@ local okBuild, errBuild = pcall(function()
         table.clear(dbgParts)
     end
 
+    -- ▸ SELL WHEN FULL (user: "when the harvester is full it will go to
+    --   (position showed in dump) … it does not need to pour the contents it
+    --   just needs to sell and go back to the loop"). The load comes from the
+    --   game's OWN Configurations on the harvester (Capacity / MaxCapacity —
+    --   the same pattern the seeder and the trailer use; never a HUD label),
+    --   and the sale is the game's OWN drive-on pad: nothing is called by
+    --   hand. Park the full harvester, wait for the game to sell, VERIFY with
+    --   Capacity + the coin balance, then drive back and carry on sweeping.
+    local function harvesterLoad(ride)
+        local ok, cur, max = pcall(function()
+            local conf = ride:FindFirstChild("Configurations")
+            if not conf then return nil end
+            local c = conf:FindFirstChild("Capacity")
+            if not (c and c:IsA("IntValue")) then return nil end
+            local m = conf:FindFirstChild("MaxCapacity")
+            return c.Value, (m and m:IsA("IntValue")) and m.Value or nil
+        end)
+        if not ok then return nil end
+        return cur, max
+    end
+
+    -- the sell pads, found live and never hardcoded (same rule as the shop):
+    -- the GameplayVisuals.SellArea pad first, then the store DropOff parts.
+    -- Every candidate is logged, so the first run names the real one.
+    local function findSellSpots()
+        local out = {}
+        local function add(p, what)
+            if not p then return end
+            for _, q in ipairs(out) do
+                if (q.p - p).Magnitude < 12 then return end
+            end
+            out[#out + 1] = { p = p, what = what }
+        end
+        pcall(function()
+            local gv = workspace:FindFirstChild("GameplayVisuals")
+            local sa = gv and gv:FindFirstChild("SellArea")
+            if not sa then return end
+            local best, area
+            for _, d in ipairs(sa:GetDescendants()) do
+                if d:IsA("BasePart") then
+                    local a = d.Size.X * d.Size.Z
+                    if not area or a > area then best, area = d, a end
+                end
+            end
+            if best then add(best.Position, "SellArea." .. best.Name) end
+        end)
+        pcall(function()
+            local stores = workspace:FindFirstChild("Stores")
+            local dr = stores and stores:FindFirstChild("DropOffs")
+            if not dr then return end
+            local ps = {}
+            for _, d in ipairs(dr:GetChildren()) do
+                if d:IsA("BasePart") then ps[#ps + 1] = d end
+            end
+            -- biggest first: the drive-on pads are the big ones
+            table.sort(ps, function(a, b) return a.Size.X * a.Size.Z > b.Size.X * b.Size.Z end)
+            for i = 1, math.min(#ps, 2) do
+                add(ps[i].Position, "DropOffs." .. ps[i].Name)
+            end
+        end)
+        return out
+    end
+
+    -- park and wait for the game to sell: true once the load drops
+    local function trySellAt(ride, what)
+        local cap0 = harvesterLoad(ride)
+        local coins0 = coinBalance()
+        local deadline = os.clock() + 8
+        while os.clock() < deadline do
+            if stopping() then return false end
+            local cur = harvesterLoad(ride)
+            if cur and cap0 and cur < cap0 then
+                log(string.format("sold at %s — load %d → %d, coins %s → %s",
+                    what, cap0, cur, tostring(coins0), tostring(coinBalance())))
+                return true
+            end
+            task.wait(0.4)
+        end
+        log(string.format("no sale at %s after 8 s (load %s, coins %s → %s) — next pad",
+            what, tostring(cap0), tostring(coins0), tostring(coinBalance())))
+        return false
+    end
+
+    -- the whole trip: drive to a pad, sell, drive back to the field
+    local function sellHarvester(ride, seat, field)
+        local cur, max = harvesterLoad(ride)
+        if not cur then
+            log("harvester load unreadable — sell trip skipped")
+            return false
+        end
+        log(string.format("harvester FULL (%d/%s) — going to sell", cur, tostring(max)))
+        local spots = findSellSpots()
+        if #spots == 0 then
+            log("⚠ no sell pad found (GameplayVisuals.SellArea / Stores.DropOffs) — sell skipped")
+            return false
+        end
+        for i, s in ipairs(spots) do
+            if stopping() then return false end
+            log(string.format("sell point %d/%d: %s at (%.0f, %.0f)", i, #spots,
+                s.what, s.p.X, s.p.Z))
+            local ok, why = driveRoute(ride, seat, s.p, ride)
+            if not ok then
+                log("couldn't reach " .. s.what .. " (" .. tostring(why) .. ")")
+            elseif trySellAt(ride, s.what) then
+                if field and field.Parent then
+                    log("back to " .. field.Name .. " to finish the harvest")
+                    driveToField(ride, field, seat, ride)
+                end
+                return true
+            end
+        end
+        log("⚠ still full — none of the pads sold the load")
+        return false
+    end
+
     local function sweepField(tr, field, seat, job)
         local baseCF, baseSize = fieldFrame(field)
         if not baseCF then return false, "no bounds" end
@@ -2609,6 +2732,7 @@ local okBuild, errBuild = pcall(function()
             st0 and string.format("%d/%d cells still need %s", need0, st0.total, job.prog)
                 or "cell read unavailable"))
         local realDrive -- nil = not probed yet; true = seat driving; false = glide
+        local sellTries = 0
         local function doLeg(from, goal, tol)
             if stopping() then return nil end
             -- never accept more than half a leg early (the short step onto
@@ -2662,6 +2786,16 @@ local okBuild, errBuild = pcall(function()
         dbgShow(tr, map, at) -- glowing bars on the field; bright = active leg
         for i, leg in ipairs(map) do
             dbgLeg(i)
+            -- full harvester: sell and come back (the user's loop). The spiral
+            -- is already computed, so after the trip the sweep just resumes at
+            -- THIS leg — from where the vehicle actually is now.
+            if job.selfPropelled and sellTries < 2 then
+                local cur, max = harvesterLoad(tr)
+                if cur and max and max > 0 and cur >= max then
+                    sellTries += 1
+                    if sellHarvester(tr, seat, field) then at = tr:GetPivot().Position end
+                end
+            end
             if not doLeg(at, leg[1], leg[2]) then dbgClear() return nil end
             at = leg[1]
             if leg[3] then log(string.format("ring %d/%d done", leg[3], rings)) end
