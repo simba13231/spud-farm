@@ -2116,7 +2116,9 @@ local okBuild, errBuild = pcall(function()
         local root = LocalPlayer.Character
             and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
         local tagged, models = {}, {}
+        local walked = 0
         for _, d in ipairs(workspace:GetDescendants()) do
+            walked += 1
             if d.Name == "SeedType" then
                 local m = d.Parent and d.Parent.Parent
                 if m and m:IsA("Model") then tagged[m] = true end
@@ -2128,6 +2130,14 @@ local okBuild, errBuild = pcall(function()
             end
         end
         for m in pairs(tagged) do models[m] = true end
+        -- ▸ DIAGNOSTIC (user: "it isnt going to the crate"): the walk itself
+        --   says what it saw, so a streamed-out shelf or an unreadable tag is
+        --   visible in the console instead of guessed at.
+        local nTag, nMod = 0, 0
+        for _ in pairs(tagged) do nTag += 1 end
+        for _ in pairs(models) do nMod += 1 end
+        log(string.format("seed crate: walked %d workspace instance(s) — %d crate-like model(s), %d with a seed tag",
+            walked, nMod, nTag))
         local cands, seedHit, labelHit
         for m in pairs(models) do
             local p = m:FindFirstChildWhichIsA("BasePart", true)
@@ -2188,18 +2198,21 @@ local okBuild, errBuild = pcall(function()
         -- ▸ STAGE 1 — THE CRATE (user's flow: "tp to crate"): the crates for
         --   sale are locked draggables on the shelf, and the right one names
         --   the picked seed on its own label.
+        log("seed crate: the picked seed is '" .. tostring(seedName) .. "'")
         local hit, cands = findSeedCrate(seedName)
         log(string.format("seed crate: %d candidate(s) in the world — %s",
-            #cands, hit and string.format("taking %s (seed tag '%s', label '%s')",
-                hit.m.Name, hit.seed or "unreadable", hit.label)
+            #cands, hit and string.format("taking %s (seed tag '%s', label '%s') at (%.0f, %.0f, %.0f), %.0f studs away",
+                hit.m.Name, hit.seed or "unreadable", hit.label,
+                hit.pos.X, hit.pos.Y, hit.pos.Z, hit.d)
                 or "none matches the picked seed"))
         if not hit then
             table.sort(cands, function(a, b) return a.d < b.d end)
             for i = 1, math.min(#cands, 8) do
                 local c = cands[i]
-                log(string.format("  crate %.0f studs away: %s — seed '%s', label '%s'%s",
+                log(string.format("  crate %.0f studs away: %s — seed '%s', label '%s' at (%.0f, %.0f, %.0f)%s",
                     c.d, c.m.Name, c.seed or "unreadable",
                     c.label ~= "" and c.label or "(no label)",
+                    c.pos.X, c.pos.Y, c.pos.Z,
                     c.owner and (" owner " .. c.owner) or ""))
             end
             -- what the shelf actually sells, grouped — one line that names the
