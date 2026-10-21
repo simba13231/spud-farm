@@ -2994,16 +2994,27 @@ local okBuild, errBuild = pcall(function()
             return false
         end
         log("store: putting the " .. m.Name .. " back in storage…")
-        managerAction(m.Name, "Store")
-        for _ = 1, 10 do -- ~5 s for the store to land
+        -- ▸ RETRY (user: "can you make it retry to put it in storage 5 times
+        --   then give up to the next"): each attempt re-opens the manager,
+        --   asks the same card to Store and waits ~5 s for InStorage to flip.
+        --   After 5 refused attempts it stops trying THIS tool and returns —
+        --   the caller moves on to the next one.
+        for attempt = 1, 5 do
             if stopping() then return false end
-            if m:GetAttribute("InStorage") then
-                log("✅ " .. m.Name .. " is back in storage")
-                return true
+            if attempt > 1 then
+                log(string.format("store: retrying the %s (%d/5)…", m.Name, attempt))
             end
-            task.wait(0.5)
+            managerAction(m.Name, "Store")
+            for _ = 1, 10 do -- ~5 s for the store to land
+                if stopping() then return false end
+                if m:GetAttribute("InStorage") then
+                    log("✅ " .. m.Name .. " is back in storage")
+                    return true
+                end
+                task.wait(0.5)
+            end
         end
-        log("couldn't store the " .. m.Name .. " — store it by hand (its card's Store button may refuse while the tool is out)")
+        log("couldn't store the " .. m.Name .. " after 5 tries — giving up on it and moving to the next (its card's Store button may refuse while the tool is out)")
         return false
     end
 
