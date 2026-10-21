@@ -1179,6 +1179,30 @@ local okBuild, errBuild = pcall(function()
         return order
     end
 
+    -- ▸ ONE GO, BEST ORDER (user: "i want it to do a path to every feild in
+    --   one go not each feild at once" → "combine A+B+C to make the most
+    --   eficient path"): every field in ONE flat route, nearest-neighbour —
+    --   each hop is measured from the field just finished, not from the
+    --   start — so the machine takes the shortest way round the whole farm
+    --   instead of restarting the order inside each land-type group.
+    local function tourOrder(nearPos)
+        local pool, out = {}, {}
+        for _, m in ipairs(findMyFields(nearPos)) do pool[#pool + 1] = m end
+        local cur = nearPos
+        while #pool > 0 do
+            local bi, bd
+            for i, m in ipairs(pool) do
+                local p = m.d:GetPivot().Position
+                local d = (Vector3.new(p.X, 0, p.Z) - Vector3.new(cur.X, 0, cur.Z)).Magnitude
+                if not bd or d < bd then bi, bd = i, d end
+            end
+            local m = table.remove(pool, bi)
+            out[#out + 1] = m
+            cur = m.d:GetPivot().Position
+        end
+        return out
+    end
+
     -- forward-declared so driveToField below can use it (defined later)
     local driveLegKeys
 
@@ -3127,12 +3151,16 @@ local okBuild, errBuild = pcall(function()
         local function runPass(job, ride, rideSeat)
             ride = ride or tr
             rideSeat = rideSeat or hum.SeatPart
-            -- ▸ the TOUR (user request): walk EVERY field of mine, grouped
-            --   by land type, nearest-first per group — work the fields
-            --   that still need this job, log-and-skip the rest. One
-            --   hitch for the whole tour; only mount-hitch when at least
-            --   ONE field still needs the job.
-            local groups = fieldTour(ride:GetPivot().Position)
+            -- ▸ the TOUR (user request: “combine A+B+C to make the most
+            --   eficient path then check back after”): ONE flat route over
+            --   EVERY field of mine, nearest-neighbour (see tourOrder) —
+            --   work the fields that still need this job, log-and-skip the
+            --   rest. One hitch for the whole tour; the tour is only driven
+            --   when at least ONE field still needs the job.
+            local tour = tourOrder(ride:GetPivot().Position)
+            -- kept in the same {fields=…} shape the two loops below use, but
+            -- it is now ONE list in one order: the whole farm in one go
+            local groups = { { typeName = "my fields", fields = tour } }
             local anyNeed = false
             for _, grp in ipairs(groups) do
                 for _, m in ipairs(grp.fields) do
@@ -3183,8 +3211,12 @@ local okBuild, errBuild = pcall(function()
             -- ▸ the tour: every field, in order — skip the finished ones,
             --   sweep the rest; the tool stays hitched across the whole
             --   tour and goes home at the end
+            -- the whole path, logged once: this is the order it will drive
+            local tourNames = {}
+            for _, m in ipairs(tour) do tourNames[#tourNames + 1] = m.d.Name end
+            log(string.format("tour (%d field(s), one go): %s", #tour,
+                table.concat(tourNames, " → ")))
             for _, grp in ipairs(groups) do
-                log("— " .. grp.typeName .. " land —")
                 for _, m in ipairs(grp.fields) do
                     if stopping() then return false end
                     local st = countStages(m.d)
@@ -3325,7 +3357,10 @@ local okBuild, errBuild = pcall(function()
         --   field tour + SAME outside-in spiral + touch-up, Cultivated →
         --   Seeded on drive-over (the game fires it, never spoofed).
         --   Empty/unreadable → F out (step 1), no pass.
-        if seedCheck(tr, hum) then
+        --   Pulled into one call because the check-back below reuses it.
+        local function seedPasses()
+            if stopping() then return end
+            if not seedCheck(tr, hum) then return end
             -- ▸ the user's RE-SEED rule: "if the seeder has seeds in it and
             --   the fields are missing some seeding i want it to go back
             --   and seed on that plot of field" — so after a seeding pass,
@@ -3363,6 +3398,28 @@ local okBuild, errBuild = pcall(function()
                 end
                 log(string.format("seeder still has %d seed(s) and %d cell(s) across %d field(s) still need seeding — going back to seed them", seeds, after, afields))
             end
+        end
+        seedPasses()
+        if stopping() then return end
+
+        -- ▸ CHECK BACK (user: "then check back after"): after the whole tour,
+        --   re-read every field and run whatever is STILL missing once more —
+        --   two bounded rounds, and the log says what was left instead of
+        --   pretending the farm is finished.
+        for round = 1, 2 do
+            if stopping() then return end
+            local np, nc, ns = probeWork(tr:GetPivot().Position)
+            if not (np or nc or ns) then
+                log("✅ check-back: every field is plowed, cultivated and seeded")
+                break
+            end
+            log(string.format("check-back %d: still to do — plow:%s cultivate:%s seed:%s",
+                round, np and "yes" or "no", nc and "yes" or "no", ns and "yes" or "no"))
+            if np then runPass(JOBS[1]) end
+            if stopping() then return end
+            if nc then runPass(JOBS[2]) end
+            if stopping() then return end
+            if ns then seedPasses() end
         end
 
         -- ▸ STAND UP: the tractor's work is done, but nothing can be stored
