@@ -1227,31 +1227,65 @@ local okBuild, errBuild = pcall(function()
         return nil
     end
 
-    -- ▸ PATHFINDER (user request): A* on a coarse 10-stud grid over the
-    --   area between here and the goal, avoiding everything parked on the
-    --   farm — equipment, buildings, draggables and plot trees. The old
-    --   single far-side corridor waypoint "kind of struggled"; this finds
-    --   the genuinely quickest way around and re-plans while moving.
-    --   Marks grid cells covered by each obstacle's fat bounding square.
-    local function obstacleCells(x0, z0, x1, z1, cell, blocked, ignore1, ignore2, counter)
-        local pad = 6 -- keep at least THIS far from any equipment/building
-        local function scan(folder)
-            if not folder then return end
-            for _, m in ipairs(folder:GetChildren()) do
-                if m:IsA("Model") and m ~= ignore1 and m ~= ignore2 then
-                    local ok, cf, sz = pcall(function() return m:GetBoundingBox() end)
-                    if ok and cf then
-                        local r = math.max(sz.X, sz.Z) / 2 + pad
-                        local minX, maxX = cf.Position.X - r, cf.Position.X + r
-                        local minZ, maxZ = cf.Position.Z - r, cf.Position.Z + r
-                        if maxX >= x0 and minX <= x1 and maxZ >= z0 and minZ <= z1 then
+    -- ▸ PATHFINDER (user request): A* on a grid over the area between here
+    --   and the goal, avoiding everything parked on the farm — equipment,
+    --   buildings, draggables, fences, animals, store buildings and plot
+    --   trees. The old single far-side corridor waypoint "kind of
+    --   struggled"; this finds the genuinely quickest way around and
+    --   re-plans while moving.
+    -- ▸ WHAT ACTUALLY BLOCKS A TRACTOR: every CanCollide PART's oriented
+    --   footprint, expanded by pad + hull. The old version marked the
+    --   MODEL's axis-aligned bounding SQUARE of max(size.X, size.Z) — a
+    --   60×20 barn became a 72×72 phantom block, and a rotated building
+    --   blocked the wrong ground. `hull` is extra clearance kept on every
+    --   side while a tool is TOWED behind the ride (the trailer is wider
+    --   than the nose, and swings wide on turns — the old planner only
+    --   ever saw the ride's pivot, which is how a plow clipped what the
+    --   tractor had just steered around).
+    local function obstacleCells(x0, z0, x1, z1, cell, blocked, ignore1, ignore2, counter, hull)
+        local pad = 6 + (hull or 0)
+        local function mark(minX, maxX, minZ, maxZ)
+            if maxX < x0 or minX > x1 or maxZ < z0 or minZ > z1 then return end
+            -- clamp to the grid: a big part must not mark cells outside it
+            -- (the old loop walked the part's whole extent, so one oversized
+            -- baseplate cost thousands of dead writes per plan)
+            local ixA = math.max(0, math.floor((minX - x0) / cell))
+            local ixB = math.min(math.floor((x1 - x0) / cell),
+                math.floor((maxX - x0) / cell))
+            local izA = math.max(0, math.floor((minZ - z0) / cell))
+            local izB = math.min(math.floor((z1 - z0) / cell),
+                math.floor((maxZ - z0) / cell))
+            for ix = ixA, ixB do
+                for iz = izA, izB do
+                    blocked[ix * 100000 + iz] = true
+                end
+            end
+        end
+        -- ground extent of a ROTATED box: project its three axes onto world
+        -- X/Z, so only the ground it really covers gets marked
+        local function markPart(p)
+            local cf, sz = p.CFrame, p.Size
+            local rx, uy, rz = cf.RightVector, cf.UpVector, cf.LookVector
+            local ex = math.abs(rx.X) * sz.X + math.abs(uy.X) * sz.Y
+                + math.abs(rz.X) * sz.Z
+            local ez = math.abs(rx.Z) * sz.X + math.abs(uy.Z) * sz.Y
+                + math.abs(rz.Z) * sz.Z
+            mark(cf.Position.X - ex / 2 - pad, cf.Position.X + ex / 2 + pad,
+                 cf.Position.Z - ez / 2 - pad, cf.Position.Z + ez / 2 + pad)
+        end
+        local function scan(container, depth)
+            if not container then return end
+            for _, m in ipairs(container:GetChildren()) do
+                if m ~= ignore1 and m ~= ignore2 then
+                    if m:IsA("BasePart") then
+                        if m.CanCollide then -- a sign can't stop a wheel
                             counter.n += 1
-                            for ix = math.floor((minX - x0) / cell), math.floor((maxX - x0) / cell) do
-                                for iz = math.floor((minZ - z0) / cell), math.floor((maxZ - z0) / cell) do
-                                    blocked[ix * 100000 + iz] = true
-                                end
-                            end
+                            markPart(m)
                         end
+                    elseif m:IsA("Model") or m:IsA("Folder") then
+                        -- nested categories (Buildings.<type>.<building>)
+                        -- count too; a real barn isn't always a direct child
+                        if (depth or 0) < 2 then scan(m, (depth or 0) + 1) end
                     end
                 end
             end
@@ -1260,6 +1294,10 @@ local okBuild, errBuild = pcall(function()
         scan(objects and objects:FindFirstChild("Equipment"))
         scan(objects and objects:FindFirstChild("Buildings"))
         scan(objects and objects:FindFirstChild("DraggableObjects"))
+        scan(objects and objects:FindFirstChild("Fences"))   -- dump: Objects.Fences
+        scan(objects and objects:FindFirstChild("Animals"))  -- a cow is solid
+        local stores = workspace:FindFirstChild("Stores")
+        scan(stores and stores:FindFirstChild("Buildings"))  -- dump: Stores.Buildings
         local plots = workspace:FindFirstChild("Plots")
         for _, plot in ipairs(plots and plots:GetChildren() or {}) do
             if plot:IsA("Model") then scan(plot:FindFirstChild("Foliage")) end
@@ -1329,9 +1367,10 @@ local okBuild, errBuild = pcall(function()
         local dirs = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 },
                        { 1, 1 }, { 1, -1 }, { -1, 1 }, { -1, -1 } }
         local guard = 0
+        local maxPops = math.max(4000, nx * nz) -- scale with the grid, not a flat cap
         while #open > 0 do
             guard += 1
-            if guard > 8000 then return nil end -- give up on absurd areas
+            if guard > maxPops then return nil end
             local bi = 1
             for i = 2, #open do
                 if open[i].f < open[bi].f then bi = i end
@@ -1343,6 +1382,18 @@ local okBuild, errBuild = pcall(function()
                 while came[k] do
                     k = came[k]
                     path[#path + 1] = { math.floor(k / 100000), k % 100000 }
+                end
+                -- ▸ GOAL → START becomes START → GOAL. The walk above starts
+                --   at the goal and follows `came` backwards, but every
+                --   consumer (nodeWorld, the string-pull) indexes grid[1]
+                --   as where we stand. Returning it unreversed made the
+                --   string-pull build its route from the wrong end: it
+                --   produced loops that came back to the START and then
+                --   drove straight at the goal through whatever was in the
+                --   way.
+                local n = #path
+                for i = 1, math.floor(n / 2) do
+                    path[i], path[n - i + 1] = path[n - i + 1], path[i]
                 end
                 return path
             end
@@ -1373,31 +1424,113 @@ local okBuild, errBuild = pcall(function()
         return nil -- no path
     end
 
-    -- plan a route around everything: trip bbox + 50 studs margin, A* on
-    -- the grid, then string-pulled (only direction changes survive). The
-    -- first point is where we stand, the last is the exact goal. Returns
-    -- world waypoints { {x,z}, ... } + obstacle count, or nil + reason.
-    local function pathfindAround(startPos, goalPos, ignore1, ignore2)
-        local cell, margin = 6, 50 -- 6-stud grid: shaves no corners around gear
+    -- plan a route around everything: trip bbox + 50 studs margin, A* on a
+    -- grid whose RESOLUTION follows the trip, then string-pulled (only
+    -- direction changes survive) and corner-rounded. The first point is
+    -- where we stand, the last is the exact goal. Returns world waypoints
+    -- { {x,z}, ... } + obstacle count, or nil + reason + whether the
+    -- straight line is at least clear of mapped obstacles.
+    local function pathfindAround(startPos, goalPos, ignore1, ignore2, hull)
+        local margin = 50
         local x0 = math.min(startPos.X, goalPos.X) - margin
         local x1 = math.max(startPos.X, goalPos.X) + margin
         local z0 = math.min(startPos.Z, goalPos.Z) - margin
         local z1 = math.max(startPos.Z, goalPos.Z) + margin
-        local nx = math.floor((x1 - x0) / cell) + 1
-        local nz = math.floor((z1 - z0) / cell) + 1
-        if nx * nz > 12000 then return nil, "area too big" end
-        local blocked, counter = {}, { n = 0 }
-        obstacleCells(x0, z0, x1, z1, cell, blocked, ignore1, ignore2, counter)
-        local function cellOf(v, o) return math.floor((v - o) / cell) end
-        local sx, sz = cellOf(startPos.X, x0), cellOf(startPos.Z, z0)
-        local gx, gz = cellOf(goalPos.X, x0), cellOf(goalPos.Z, z0)
-        -- we're standing at the start and the goal must be enterable even
-        -- when their cells got inflated-marked by a nearby obstacle
-        blocked[sx * 100000 + sz] = nil
-        blocked[gx * 100000 + gz] = nil
-        local clearDist = clearanceField(nx, nz, blocked) -- AFTER the force-clears
-        local grid = astarPath(cell, nx, nz, blocked, clearDist, sx, sz, gx, gz)
-        if not grid then return nil, "no path" end
+        local trip = (Vector3.new(goalPos.X - startPos.X, 0,
+            goalPos.Z - startPos.Z)).Magnitude
+        -- ▸ RESOLUTION FOLLOWS DISTANCE: the fixed 6-stud grid made the
+        --   search area grow with the square of the trip and then bail
+        --   ("area too big") on anything past ~600 studs — the long hauls
+        --   (sell pad, town) fell back to a straight line through the farm.
+        --   A 900-stud trip now plans on a ~16-stud grid, and the ~1 s
+        --   replan tightens it automatically as the ride closes in.
+        local baseCell = math.clamp(trip / 55, 6, 24)
+        local tries = {
+            { c = baseCell,       hull = hull or 0 },
+            { c = baseCell * 1.5, hull = (hull or 0) * 0.5 }, -- boxed in
+            { c = baseCell * 2.2, hull = 0 },                 -- last resort
+        }
+
+        -- one plan on one grid; a table without .grid = A* found no path
+        local function planAt(cell, hullNow)
+            local nx = math.floor((x1 - x0) / cell) + 1
+            local nz = math.floor((z1 - z0) / cell) + 1
+            if nx * nz > 30000 then return nil, "area too big" end
+            local blocked, counter = {}, { n = 0 }
+            obstacleCells(x0, z0, x1, z1, cell, blocked, ignore1, ignore2,
+                counter, hullNow)
+            local function cellOf(v, o) return math.floor((v - o) / cell) end
+            local function k(ix, iz) return ix * 100000 + iz end
+            local sx, sz = cellOf(startPos.X, x0), cellOf(startPos.Z, z0)
+            local gx, gz = cellOf(goalPos.X, x0), cellOf(goalPos.Z, z0)
+            local m = { cell = cell, nx = nx, nz = nz, blocked = blocked,
+                        cellOf = cellOf, count = counter.n }
+            -- we are already standing on the start cell: never call it blocked
+            blocked[k(sx, sz)] = nil
+            -- ▸ THE GOAL CAN SIT INSIDE A FOOTPRINT (a pad beside a shed):
+            --   walk out to the nearest free cell instead of forcing the
+            --   blocked cell open — forcing it planned a route into the wall.
+            if blocked[k(gx, gz)] then
+                local found
+                for r = 1, 4 do
+                    for dx = -r, r do
+                        for dz = -r, r do
+                            local ix, iz = gx + dx, gz + dz
+                            if ix >= 0 and iz >= 0 and ix < nx and iz < nz
+                                and not blocked[k(ix, iz)] then
+                                found = { ix, iz }
+                                break
+                            end
+                        end
+                        if found then break end
+                    end
+                    if found then break end
+                end
+                if not found then return nil, "goal boxed in" end
+                gx, gz = found[1], found[2]
+            end
+            local clearDist = clearanceField(nx, nz, blocked) -- AFTER the clears
+            local grid = astarPath(cell, nx, nz, blocked, clearDist, sx, sz, gx, gz)
+            m.clearDist = clearDist
+            m.grid = grid
+            if not grid then return m end -- keep the map for the straight-line check
+            return m
+        end
+
+        local map, why, lastMap
+        for _, t in ipairs(tries) do
+            map, why = planAt(t.c, t.hull)
+            if map then
+                if map.grid then break end
+                lastMap = map
+            end
+        end
+        if not (map and map.grid) then
+            -- ▸ NO BLIND FALLBACK: say whether a straight line is at least
+            --   free of mapped obstacles. The old caller drove straight at
+            --   the goal no matter what was in the way.
+            local direct = false
+            if lastMap then
+                direct = true
+                local steps = math.ceil(math.max(math.abs(goalPos.X - startPos.X),
+                    math.abs(goalPos.Z - startPos.Z)) / (lastMap.cell * 0.5))
+                for i = 0, steps do
+                    local t = i / math.max(steps, 1)
+                    local ix = lastMap.cellOf(startPos.X + (goalPos.X - startPos.X) * t, x0)
+                    local iz = lastMap.cellOf(startPos.Z + (goalPos.Z - startPos.Z) * t, z0)
+                    if ix >= 0 and iz >= 0 and ix < lastMap.nx and iz < lastMap.nz
+                        and lastMap.blocked[ix * 100000 + iz] then
+                        direct = false
+                        break
+                    end
+                end
+            end
+            return nil, why or "no path", direct
+        end
+
+        local cell, nx, nz = map.cell, map.nx, map.nz
+        local blocked, clearDist, grid = map.blocked, map.clearDist, map.grid
+        local cellOf = map.cellOf
         local function nodeWorld(i)
             if i == 1 then return startPos.X, startPos.Z end
             return x0 + grid[i][1] * cell + cell / 2, z0 + grid[i][2] * cell + cell / 2
@@ -1442,7 +1575,49 @@ local okBuild, errBuild = pcall(function()
             pts[#pts + 1] = { bx, bz }
         end
         pts[#pts + 1] = { goalPos.X, goalPos.Z }
-        return pts, counter.n
+
+        -- ▸ ROUND THE CORNERS, DROP DUPLICATES. A raw A* polyline turns in
+        --   place, so the align driver has to swing the nose through the
+        --   whole angle at every corner (and the towed tool swings wider
+        --   still). Each sharp vertex becomes a short chamfer — and the
+        --   chamfer is only used when it is ITSELF clear, so a rounded
+        --   corner can never clip what the polyline avoided.
+        local out = { pts[1] }
+        for i = 2, #pts - 1 do
+            local p, q, r = pts[i - 1], pts[i], pts[i + 1]
+            local d1x, d1z = q[1] - p[1], q[2] - p[2]
+            local d2x, d2z = r[1] - q[1], r[2] - q[2]
+            local l1 = math.sqrt(d1x * d1x + d1z * d1z)
+            local l2 = math.sqrt(d2x * d2x + d2z * d2z)
+            local rounded = false
+            if l1 > 8 and l2 > 8 then
+                local cosang = (d1x * d2x + d1z * d2z) / (l1 * l2)
+                if cosang < 0.7 then -- a turn sharper than ~45°
+                    local d = math.min(10, l1 * 0.35, l2 * 0.35)
+                    local q1 = { q[1] - d1x / l1 * d, q[2] - d1z / l1 * d }
+                    local q2 = { q[1] + d2x / l2 * d, q[2] + d2z / l2 * d }
+                    if lineClear(q1[1], q1[2], q2[1], q2[2]) then
+                        out[#out + 1] = q1
+                        out[#out + 1] = q2
+                        rounded = true
+                    end
+                end
+            end
+            if not rounded then out[#out + 1] = q end
+        end
+        out[#out + 1] = pts[#pts]
+        local final = { out[1] }
+        for i = 2, #out do
+            local px, pz = final[#final][1], final[#final][2]
+            local ddx, ddz = out[i][1] - px, out[i][2] - pz
+            if ddx * ddx + ddz * ddz >= 9 then final[#final + 1] = out[i] end
+        end
+        -- the exact goal is never dropped by the merge
+        local lx, lz = final[#final][1], final[#final][2]
+        if lx ~= goalPos.X or lz ~= goalPos.Z then
+            final[#final + 1] = { goalPos.X, goalPos.Z }
+        end
+        return final, map.count
     end
 
     -- ▸ ALIGN DRIVER (user: "is there not a away we can force it to follow the
@@ -1607,6 +1782,19 @@ local okBuild, errBuild = pcall(function()
         return ok
     end
 
+    -- ▸ HOW MUCH EXTRA ROOM A TOWED TOOL NEEDS. The planner used to see
+    --   only the ride's pivot, so a hitched plow — wider than the nose and
+    --   swinging on every turn — clipped whatever the tractor had just
+    --   steered around. The tool's narrow side is its width across travel;
+    --   half of that, plus a little swing allowance, becomes extra obstacle
+    --   padding. 0 when nothing is towed (the harvester is its own tool).
+    local function towMargin(ride, impl)
+        if not impl or impl == ride or not impl.Parent then return 0 end
+        local ok, _, sz = pcall(function() return impl:GetBoundingBox() end)
+        if not ok or not sz then return 6 end
+        return math.clamp(math.min(sz.X, sz.Z) / 2 + 2, 4, 14)
+    end
+
     -- to the NEAREST CORNER of the field (user: start at a corner, not the
     -- center) — 4 studs inside the edge; arrive within 8 studs of it. The
     -- route comes from A* around everything parked on the farm and is
@@ -1620,13 +1808,27 @@ local okBuild, errBuild = pcall(function()
     --   sell trip drives the harvester to a pad and back the same way.
     local function driveRoute(tr, seat, goal, impl)
         local startPos = tr:GetPivot().Position
-        local legs, info = pathfindAround(startPos, goal, tr, impl)
+        local hull = towMargin(tr, impl)
+        local legs, info, direct = pathfindAround(startPos, goal, tr, impl, hull)
         if not legs then
-            log("⚠ pathfinding failed (" .. tostring(info) .. ") — driving straight at the corner")
-            legs = { { goal.X, goal.Z } }
-            info = 0
+            if direct then
+                -- no plan, but nothing mapped stands on the straight line:
+                -- drive it as a real two-point route (legs[1] = we are here)
+                log("⚠ pathfinding failed (" .. tostring(info) .. ") — the straight line is clear, driving it")
+                legs = { { startPos.X, startPos.Z }, { goal.X, goal.Z } }
+                info = 0
+            else
+                -- ▸ NEVER DRIVE BLIND: the old fallback was a single point
+                --   (so the follower had no leg to drive) and then a straight
+                --   line through whatever was mapped. Stopping with a
+                --   readable reason beats a route through the barn.
+                log("⚠ no safe route to the target (" .. tostring(info)
+                    .. ") — stopping instead of driving through the farm")
+                return false, "no safe route (" .. tostring(info) .. ")"
+            end
         else
-            log(string.format("path: %d legs around %d obstacles", #legs - 1, info))
+            log(string.format("path: %d legs, %d obstacle part(s) mapped (tool margin %d)",
+                #legs - 1, info, hull))
         end
         local useKeys = driveLegKeys ~= nil
         local ah, alignWhy = alignDriveStart(tr)
@@ -1664,17 +1866,20 @@ local okBuild, errBuild = pcall(function()
             -- fresh A* always re-picks the quickest current route
             if os.clock() - lastPlan > 1 then
                 lastPlan = os.clock()
-                local newLegs, n = pathfindAround(p, goal, tr, impl)
+                local newLegs, n = pathfindAround(p, goal, tr, impl, hull)
                 if stopping() then alignDriveStop(ah) return nil end
                 if newLegs then
                     if info ~= n then
-                        log(string.format("re-routed: %d legs around %d obstacles", #newLegs - 1, n))
+                        log(string.format("re-routed: %d legs, %d obstacle part(s) mapped", #newLegs - 1, n))
                     end
                     legs, info = newLegs, n
+                    -- follow the FRESH path from here (legs[1] = now). On a
+                    -- failed replan the old legs keep their old first point,
+                    -- so the cursor must not be reset to it.
+                    li = 2
                 else
                     log("re-plan failed (" .. tostring(n) .. ") — keeping the last path")
                 end
-                li = 2 -- follow the fresh path from here (legs[1] = now)
             end
             local g = legs[math.min(li, #legs)]
             local d = (Vector3.new(p.X, 0, p.Z) - Vector3.new(g[1], 0, g[2])).Magnitude
@@ -1993,6 +2198,9 @@ local okBuild, errBuild = pcall(function()
     --   shelf / the menu's buttons, so nothing fails silently.
     local seedChoice -- the Farm tab picker writes this (declared up here
                      -- because the seed check below reads it)
+    -- one shop trip per run, max: a failed purchase must never send the
+    -- character teleporting again later in the same run
+    local seedShopTried = false
     -- the game's own SEED_TYPE table both ways (filled by the Farm tab
     -- picker's read of FieldHelper): names for the dropdown, ids so a crate
     -- that keeps the numeric SeedType can still be named.
@@ -2175,7 +2383,7 @@ local okBuild, errBuild = pcall(function()
         for _ in pairs(models) do nMod += 1 end
         log(string.format("seed crate: walked %d workspace instance(s) — %d crate-like model(s), %d with a seed tag",
             walked, nMod, nTag))
-        local cands, seedHit, labelHit
+        local cands, seedHit, labelHit = {}, nil, nil
         for m in pairs(models) do
             local p = m:FindFirstChildWhichIsA("BasePart", true)
             if p then
@@ -2488,16 +2696,19 @@ local okBuild, errBuild = pcall(function()
 
     -- ▸ SEEDER STEP 1 — the seed check (user: "first thing from the seeder:
     --   we need to know if it has seeds in it or not. if it does stay in
-    --   tractor. if it does not get out of the tractor"). Runs on EVERY
-    --   loop run (user: "check everytime after the cultivating") — right
-    --   after the cultivate pass AND on the idle path, with no field-need
-    --   gate. Returns true=FULL (the caller then hitches the seeder —
-    --   step 2); false=empty/unreadable (the step-1 dismount runs). The
-    --   check itself stays read-only — no fill/drive/seeding yet. F =
-    --   ExitEquipment (context-key dump), pressed ONLY while seated — on
-    --   foot the honest log is all it does (F next to the tractor would
-    --   MOUNT it, the opposite of the intent).
-    local function seedCheck(tr, hum)
+    --   tractor. if it does not get out of the tractor"). Runs at the start
+    --   of a run (a read-only report), on the idle path, and in the
+    --   PLANTING stage. Returns true=FULL (the caller then hitches the
+    --   seeder — step 2); false=empty/unreadable.
+    --   `allowBuy` is the ONLY thing that lets this function spend coins:
+    --   the planting stage passes true, everything else leaves it off.
+    --   Without it the empty case is reported and that is all — no F press,
+    --   no teleport (user: "why does when i start it, it just teleports to
+    --   the store even when it's not time to buy seeds … it should only buy
+    --   seeds when it is at the planting loop"). At most ONE shop trip per
+    --   run (seedShopTried). F = ExitEquipment (context-key dump), pressed
+    --   ONLY while seated.
+    local function seedCheck(tr, hum, allowBuy)
         if stopping() then return false end
         log("— seed check —")
         local seated = hum.SeatPart ~= nil
@@ -2505,8 +2716,11 @@ local okBuild, errBuild = pcall(function()
             findImplement("Planter", tr:GetPivot().Position, tr)
         local count, cap, kind
         if seeder then count, cap, kind = seederSeedState(seeder) end
-        local exitIntent = seated and "getting out of the tractor"
-            or "already out of the tractor"
+        -- the state lines must not promise a dismount this call won't do
+        local exitIntent = allowBuy
+            and (seated and "getting out of the tractor"
+                or "already out of the tractor")
+            or "no action — this isn't the planting stage"
         if seeder and count then
             local label = string.format("%d%s seeds%s%s", count,
                 cap and ("/" .. cap) or "",
@@ -2524,6 +2738,9 @@ local okBuild, errBuild = pcall(function()
             log("seed state unreadable (" .. tostring(basis) ..
                 ") — treating as empty — " .. exitIntent)
         end
+        -- ▸ READ-ONLY OUTSIDE THE PLANTING STAGE. No dismount (F there would
+        --   kick the driver out of the tractor for nothing) and no shop trip.
+        if not allowBuy then return false end
         if seated then
             pressKey(Enum.KeyCode.F)
             task.wait(0.8)
@@ -2546,12 +2763,16 @@ local okBuild, errBuild = pcall(function()
             log("the seeder is empty and nothing is picked in the Farm tab's Seed dropdown — pick a seed and the loop can buy it")
             return false
         end
-        -- ▸ the user's rule, UNGATED (user: "when i start the loop with no
-        --   seeds in the seeder it does not go to the shop, can you fix
-        --   that"): an EMPTY seeder + a picked seed = go and buy it. The old
-        --   gate ("only if a field needs seed right now") skipped the trip on
-        --   exactly the runs that needed it — fields that still have to be
-        --   plowed/cultivated have no Cultivated cells yet.
+        if seedShopTried then
+            log("the seeder is still empty and the shop was already tried this run — not teleporting again (pick a different seed, or fill it by hand)")
+            return false
+        end
+        seedShopTried = true
+        -- ▸ Only reachable with allowBuy (the PLANT stage), and the caller
+        --   only passes it when Cultivated cells are actually waiting — an
+        --   EMPTY seeder + a picked seed + real planting to do = buy it.
+        --   The old start-of-run call is now report-only (user: "it should
+        --   only buy seeds when it is at the planting loop").
         log(string.format("the seeder is empty — going to buy %s (%d cell(s) need seed right now)",
             seedChoice, needCells))
         -- the fill at the shop only works on a seeder that is OUT in the
@@ -3190,6 +3411,7 @@ local okBuild, errBuild = pcall(function()
     -- stopping() is checked at every wait/step so switching the toggle off
     -- kills the loop at its next step instead of letting it run on.
     local function runFarmingBody()
+        seedShopTried = false -- each run gets at most one seed-shop trip
         local char = LocalPlayer.Character
         local hum = char and char:FindFirstChildOfClass("Humanoid")
         if not hum then log("no character") return end
@@ -3228,12 +3450,11 @@ local okBuild, errBuild = pcall(function()
             log(string.format("✅ tractor respawned — %.0f studs away now", dist))
         end
 
-        -- ▸ EMPTY SEEDER, FIRST THING (user: "when i start the loop with no
-        --   seeds in the seeder it does not go to the shop, can you fix
-        --   that"): the seeder is read BEFORE any field work, so an empty one
-        --   sends the run shopping at the START — instead of only after the
-        --   plow/cultivate passes, where a run that found nothing else to do
-        --   never reached the shop at all.
+        -- ▸ THE SEEDER, FIRST THING — REPORT ONLY. This used to BUY here, so
+        --   every run with an empty seeder teleported to FarmCo before any
+        --   field work (user: "it should only buy seeds when it is at the
+        --   planting loop"). Buying now happens in seedPasses, the PLANT
+        --   stage, and only when a field actually has cells waiting.
         seedCheck(tr, hum)
         if stopping() then return end
 
@@ -3519,7 +3740,12 @@ local okBuild, errBuild = pcall(function()
         --   Pulled into one call because the check-back below reuses it.
         local function seedPasses()
             if stopping() then return end
-            if not seedCheck(tr, hum) then return end
+            -- ▸ THE ONLY PLACE COINS ARE SPENT: the planting stage, and only
+            --   when a field really has Cultivated cells waiting (the same
+            --   count the pass is about to work). An empty seeder with
+            --   nothing to plant never sends the run shopping.
+            local needCells = seedNeedLeft(tr:GetPivot().Position)
+            if not seedCheck(tr, hum, needCells > 0) then return end
             -- ▸ the user's RE-SEED rule: "if the seeder has seeds in it and
             --   the fields are missing some seeding i want it to go back
             --   and seed on that plot of field" — so after a seeding pass,
@@ -3606,7 +3832,14 @@ local okBuild, errBuild = pcall(function()
     --   the end of the body, so EVERY exit of the body — a finished run or
     --   an honest stop — gets the cleanup.
     local function runFarmingLoop()
-        runFarmingBody()
+        -- ▸ AN ERROR STILL CLEANS UP. A crash inside the body used to kill
+        --   the thread with the toggle frozen ON and every tool left
+        --   standing in the world; now the tools go back to storage and the
+        --   caller clears the thread id.
+        local okRun, errRun = pcall(runFarmingBody)
+        if not okRun then
+            log("⚠ farming loop error: " .. tostring(errRun))
+        end
         storeUnusedTools()
     end
 
@@ -3692,7 +3925,13 @@ local okBuild, errBuild = pcall(function()
                 log("farming loop: on")
                 task.spawn(function()
                     loopThread = coroutine.running()
-                    runFarmingLoop()
+                    -- ▸ AN ERROR MUST NEVER LEAVE loopThread SET: that froze
+                    --   the toggle ON with nothing running (and the toggle
+                    --   handler refuses to start a new loop while it is set).
+                    local okRun, errRun = pcall(runFarmingLoop)
+                    if not okRun then
+                        log("⚠ farming loop crashed during cleanup: " .. tostring(errRun))
+                    end
                     if loopThread == coroutine.running() then
                         -- ended on its own (success or honest failure)
                         loopThread = nil
@@ -3747,6 +3986,7 @@ local okBuild, errBuild = pcall(function()
                 return
             end
             log("running latest build…")
+            loopThread = nil -- stop the old loop before the new build starts
             destroyUI()
             local ok2, err2 = pcall(function()
                 local chunk, lerr = loadstring(src)
@@ -3760,6 +4000,7 @@ local okBuild, errBuild = pcall(function()
     Tabs.Settings:CreateButton({
         Title = "⏏ Unload",
         Callback = function()
+            loopThread = nil -- stopping() flips true → a running loop dies
             destroyUI()
             print("[spud] unloaded")
         end,
