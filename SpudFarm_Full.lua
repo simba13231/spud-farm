@@ -67,6 +67,13 @@ local okBuild, errBuild = pcall(function()
         table.insert(LOG, tostring(msg))
         if #LOG > 24 then table.remove(LOG, 1) end
         print("[spud] " .. tostring(msg))
+        -- ▸ TRACE FOR THE DUMP: keep the last 400 lines in this game session
+        --   so SpudDump can print what the loop actually did (the user runs
+        --   dumps, not console copies — this is how one run names the fault).
+        local t = _G.SPUD_TRACE
+        if type(t) ~= "table" then t = {}; _G.SPUD_TRACE = t end
+        t[#t + 1] = tostring(msg)
+        if #t > 400 then table.remove(t, 1) end
         pcall(function() logPara:SetValue(table.concat(LOG, "\n")) end)
     end
 
@@ -2062,6 +2069,36 @@ local okBuild, errBuild = pcall(function()
         return out
     end
 
+    -- ▸ IS THE CHARACTER HOLDING ANYTHING? (dump §18: a successful crate
+    --   pickup fills the character's CarryLinks folder; empty = bare hands.)
+    local function carrying()
+        local ch = LocalPlayer.Character
+        local links = ch and ch:FindFirstChild("CarryLinks")
+        if not links then return false end
+        return #links:GetChildren() > 0
+    end
+
+    -- ▸ PICK A CRATE UP (dump §18: standing at a seed box lights the plain
+    --   "Carry" prompt, bound to E — NOT PickupSeedBox). One key press is not
+    --   proof: press E until the game actually carries it, and log each miss
+    --   with the game's own action list so a failure is readable.
+    local function carryCrate(what)
+        for attempt = 1, 3 do
+            if stopping() then return false end
+            pressKey(Enum.KeyCode.E) -- Carry = E
+            task.wait(0.9)
+            if carrying() then
+                log("✅ carrying the " .. what .. " (E, attempt " .. attempt .. ")")
+                return true
+            end
+            local acts = contextActions()
+            log("the " .. what .. " didn't come up on attempt " .. attempt
+                .. " (hands still empty) — the game offers: "
+                .. (acts and (#acts > 0 and table.concat(acts, " · ") or "nothing") or "unreadable"))
+        end
+        return false
+    end
+
     local function crateLabel(m) -- whatever the crate itself shows (crop? price?)
         local texts = {}
         for _, t in ipairs(m:GetDescendants()) do
@@ -2254,9 +2291,10 @@ local okBuild, errBuild = pcall(function()
         local acts = contextActions()
         log("seed crate: E at the crate to pick it up — the game offers: "
             .. (acts and (#acts > 0 and table.concat(acts, " · ") or "nothing") or "unreadable"))
-        pressKey(Enum.KeyCode.E)
-        task.wait(1.0)
-        if stopping() then return false end
+        if not carryCrate("seed crate") then
+            log("seed crate: couldn't pick it up after 3 tries — stopping the shop trip here (nothing bought)")
+            return false
+        end
         -- ▸ STAGE 2 — PUT IT ON THE COUNTER (user: "place crate on counter"):
         --   tp to the owner; if the crate rides along, the carry took
         if oPart then
@@ -2403,10 +2441,11 @@ local okBuild, errBuild = pcall(function()
         end
         log("✅ " .. seedName .. " bought (balance " .. tostring(before) .. " → " .. tostring(after) .. ")")
         -- ▸ STAGE 3 — PICK IT BACK UP (user: "pick it back up")
-        log("seed crate: E to pick it back up")
-        pressKey(Enum.KeyCode.E)
-        task.wait(1.0)
-        if stopping() then return false end
+        log("seed crate: picking the bought crate back up")
+        if not carryCrate("bought crate") then
+            log("seed crate: the bought crate stayed on the counter — pick it up by hand (E) and the seeder fill is next time")
+            return true
+        end
         local cPart = hit.m:FindFirstChildWhichIsA("BasePart", true)
         -- ▸ STAGE 4 — GO TO THE SEEDER (user: "go to seeder") and fill it:
         --   V = FillSeeder, the same proximity-context rule as the crate

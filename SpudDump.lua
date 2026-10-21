@@ -2165,6 +2165,25 @@ pcall(function()
     w("  DO NOW: run this while standing at the crate the shop trip picks")
 end)
 
+------------------------------------------------------------------
+-- 19. SPUD SCRIPT TRACE — the farming loop's own log, kept in
+--     _G.SPUD_TRACE by SpudFarm_Full.lua so the dump carries it.
+--     Run the loop until it goes wrong, then run this dump: the
+--     reason is in these lines without copying the GUI console.
+------------------------------------------------------------------
+pcall(function()
+    header("SPUD SCRIPT TRACE (what the farming loop logged, newest last)")
+    local t = _G.SPUD_TRACE
+    if type(t) ~= "table" or #t == 0 then
+        w("  empty — the main script hasn't run since this game session started")
+        w("  (run SpudFarm_Full.lua once, let it reach the step that fails, then run this dump)")
+        return
+    end
+    local from = math.max(1, #t - 150)
+    for i = from, #t do w("  " .. tostring(t[i])) end
+    w("  shown: " .. (#t - from + 1) .. " of " .. #t .. " line(s)")
+end)
+
 local text = table.concat(out, "\n")
 
 ------------------------------------------------------------------
