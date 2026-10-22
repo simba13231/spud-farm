@@ -2584,14 +2584,15 @@ local okBuild, errBuild = pcall(function()
     --   ExitEquipment), and coins are live at GuiViews.HUD.MainHUD.
     --   TopRightBar.CoinsDisplay.Contents.Balance (§17). Which seed = the Farm
     --   tab picker (seedChoice, read from the game's own FieldHelper.SEED_TYPE).
-    --   The trip, stage by stage, exactly as the user described: find the crate
-    --   labelled with that seed → tp to it → E (carry) → tp to the counter →
-    --   X (put it down) → F at the owner (buy; the menu's Buy button is called
-    --   through its OWN handlers if there is one — never a mouse, never a
-    --   spoofed remote) → VERIFY with the balance → E (pick it back up) → tp to
-    --   the seeder → V (FillSeeder) → VERIFY the seeder's seed count. Every
-    --   stage logs the game's own context-action list, and a miss logs the
-    --   shelf / the menu's buttons, so nothing fails silently.
+    --   The trip, stage by stage (user's latest: "you can just take the box,
+    --   talk to the guy, then buy it like that. no need to place it on the
+    --   countser"): find the crate labelled with that seed → tp to it → E
+    --   (carry) → tp to the owner STILL HOLDING IT → F (buy; the menu's Buy
+    --   button is called through its OWN handlers if there is one — never a
+    --   mouse, never a spoofed remote) → VERIFY with the balance → tp to the
+    --   seeder → V (FillSeeder) → VERIFY the seeder's seed count. No put-down,
+    --   no counter. Every stage logs the game's own context-action list, and a
+    --   miss logs the shelf / the menu's buttons, so nothing fails silently.
     local seedChoice -- the Farm tab picker writes this (declared up here
                      -- because the seed check below reads it)
     -- one shop trip per run, max: a failed purchase must never send the
@@ -2925,23 +2926,20 @@ local okBuild, errBuild = pcall(function()
             log("seed crate: couldn't pick it up after 3 tries — stopping the shop trip here (nothing bought)")
             return false
         end
-        -- ▸ STAGE 2 — PUT IT ON THE COUNTER (user: "place crate on counter"):
-        --   tp to the owner; if the crate rides along, the carry took
+        -- ▸ STAGE 2 — TALK TO THE GUY WITH THE CRATE STILL IN HAND (user: "you
+        --   can just take the box, talk to the guy, then buy it like that. no
+        --   need to place it on the countser"). The put-down (X) stage is gone.
         if oPart then
-            setStage("shop trip: putting the crate on the FarmCo counter")
+            setStage("shop trip: taking the crate to the FarmCo Owner")
             tpChar(oPart.Position)
             task.wait(1.2)
             if stopping() then return false end
             root = LocalPlayer.Character:FindFirstChild("HumanoidRootPart") or root
             local cPart = hit.m:FindFirstChildWhichIsA("BasePart", true)
             local cD = cPart and (cPart.Position - root.Position).Magnitude or -1
-            log(string.format("seed crate: at the %s — the crate is %.0f studs away (%s)",
+            log(string.format("seed crate: at the %s — the crate is %.0f studs away (%s), still in hand",
                 owner.Name, cD,
                 cD >= 0 and (cD < 15 and "it came with us" or "it did NOT follow the tp")))
-            log("seed crate: X to put it down here")
-            pressKey(Enum.KeyCode.X)
-            task.wait(1.0)
-            if stopping() then return false end
         else
             log("seed shop: the FarmCo Owner NPC isn't in the workspace yet — pressing F anyway")
         end
@@ -3088,10 +3086,12 @@ local okBuild, errBuild = pcall(function()
             return false
         end
         log("✅ " .. seedName .. " bought (balance " .. tostring(before) .. " → " .. tostring(after) .. ")")
-        -- ▸ STAGE 3 — PICK IT BACK UP (user: "pick it back up")
-        log("seed crate: picking the bought crate back up")
-        if not carryCrate("bought crate") then
-            log("seed crate: the bought crate stayed on the counter — pick it up by hand (E) and the seeder fill is next time")
+        -- ▸ STAGE 3 — the crate is ALREADY IN HAND (nothing was put down), so
+        --   only pick something up if the game swapped it out during the buy
+        if carrying() then
+            log("seed crate: still carrying the crate — straight to the seeder")
+        elseif not carryCrate("bought crate") then
+            log("seed crate: the bought crate didn't come to hand — pick it up by hand (E) and the seeder fill is next time")
             return true
         end
         local cPart = hit.m:FindFirstChildWhichIsA("BasePart", true)
