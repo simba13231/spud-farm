@@ -3178,14 +3178,34 @@ local okBuild, errBuild = pcall(function()
             local gv = workspace:FindFirstChild("GameplayVisuals")
             local sa = gv and gv:FindFirstChild("SellArea")
             if not sa then return end
-            local best, area
+            -- ▸ THE PAD IS THE RAISED ONE (README: "drive onto the elevated
+            --   platform"). Picking simply the BIGGEST part in the folder can
+            --   land on the ground-level trigger, and then the trip parks
+            --   somewhere that never opens the sell menu. Score by NAME
+            --   first (platform/pad/ramp/load/sell), then by how HIGH the
+            --   part sits, then by area — and log what was in there.
+            local best, bestScore, seen = nil, nil, {}
             for _, d in ipairs(sa:GetDescendants()) do
                 if d:IsA("BasePart") then
+                    local n = d.Name:lower()
+                    local named = n:find("platform", 1, true) or n:find("pad", 1, true)
+                        or n:find("ramp", 1, true) or n:find("load", 1, true)
+                        or n:find("sell", 1, true)
                     local a = d.Size.X * d.Size.Z
-                    if not area or a > area then best, area = d, a end
+                    local score = (named and 1e9 or 0) + d.Position.Y * 100 + a
+                    if #seen < 10 then
+                        seen[#seen + 1] = string.format("%s (y=%.0f, area=%.0f%s)",
+                            d.Name, d.Position.Y, a, named and ", named" or "")
+                    end
+                    if not bestScore or score > bestScore then best, bestScore = d, score end
                 end
             end
-            if best then add(best.Position, "SellArea." .. best.Name) end
+            if best then
+                add(best.Position, "SellArea." .. best.Name)
+                log("sell pad candidates: " .. table.concat(seen, " · "))
+                log(string.format("sell pad picked: %s at (%.0f, %.0f, %.0f)",
+                    best.Name, best.Position.X, best.Position.Y, best.Position.Z))
+            end
         end)
         pcall(function()
             local stores = workspace:FindFirstChild("Stores")
@@ -3204,23 +3224,99 @@ local okBuild, errBuild = pcall(function()
         return out
     end
 
-    -- park and wait for the game to sell: true once the load drops
+    -- ▸ THE MENU THAT ACTUALLY SELLS (live dump): GuiViews.Menus.SellMenu,
+    --   Enabled=false while closed. Its state is readable, so the trip can
+    --   TELL whether the pad opened it instead of guessing.
+    local function sellMenuGui()
+        local ok, m = pcall(function()
+            local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+            local gv = pg and pg:FindFirstChild("GuiViews")
+            local menus = gv and gv:FindFirstChild("Menus")
+            return menus and menus:FindFirstChild("SellMenu")
+        end)
+        if ok then return m end
+        return nil
+    end
+
+    local function sellMenuOpen()
+        local m = sellMenuGui()
+        return m ~= nil and m.Enabled == true
+    end
+
+    -- the confirm inside the sell menu, clicked the way a player clicks it:
+    -- call the game's OWN handler on the button that says sell/confirm/pour
+    local SELL_WORDS = { "sell", "confirm", "pour", "unload", "accept", "yes" }
+    local function confirmSellMenu()
+        local m = sellMenuGui()
+        if not (m and m.Enabled) then return false end
+        for _, d in ipairs(m:GetDescendants()) do
+            if d:IsA("GuiButton") then
+                local t = (guiTextOf(d) .. " " .. d.Name):lower()
+                for _, w in ipairs(SELL_WORDS) do
+                    if t:find(w, 1, true) then
+                        invokeHandlers(d)
+                        log("sell menu: called the game's own handler on '" .. guiTextOf(d) .. "'")
+                        return true
+                    end
+                end
+            end
+        end
+        return false
+    end
+
+    -- ▸ PARK, THEN ACTUALLY SELL (README mechanic: onto the elevated
+    --   platform → Q opens the sell menu → E confirms). The old version only
+    --   PARKED and watched for 8 s — it pressed nothing at all, so a full
+    --   harvester sat on the pad for ever and the sweep carried on filling a
+    --   tank that could not fill. The load dropping is still the only judge;
+    --   Q/menu/E are just the ways to make it happen.
     local function trySellAt(ride, what)
         local cap0 = harvesterLoad(ride)
         local coins0 = coinBalance()
-        local deadline = os.clock() + 8
+        task.wait(0.8) -- the pad needs a beat to register the vehicle
+        if stopping() then return false end
+        local deadline = os.clock() + 16
+        local opened, blind = 0, 0
         while os.clock() < deadline do
             if stopping() then return false end
             local cur = harvesterLoad(ride)
             if cur and cap0 and cur < cap0 then
-                log(string.format("sold at %s — load %d → %d, coins %s → %s",
+                log(string.format("✅ sold at %s — load %d → %d, coins %s → %s",
                     what, cap0, cur, tostring(coins0), tostring(coinBalance())))
+                -- leave the menu closed so the drive back isn't blocked by it
+                if sellMenuOpen() then
+                    confirmSellMenu()
+                    task.wait(0.6)
+                    if sellMenuOpen() then pressKey(Enum.KeyCode.E) end
+                end
                 return true
             end
-            task.wait(0.4)
+            -- 1) Q opens the sell menu (the documented key for the pad)
+            if not sellMenuOpen() and opened < 4 then
+                opened += 1
+                log(string.format("sell pad %s: Q (open the sell menu) — try %d", what, opened))
+                pressKey(Enum.KeyCode.Q)
+                task.wait(0.9)
+                if stopping() then return false end
+            end
+            -- 2) confirm inside the menu with its own handler (no mouse);
+            --    E is the documented confirm key and the fallback when no
+            --    menu shows up at all
+            if sellMenuOpen() then
+                if not confirmSellMenu() then
+                    log("sell menu is up but has no sell/confirm button — pressing E")
+                    pressKey(Enum.KeyCode.E)
+                end
+            elseif blind < 3 then
+                blind += 1
+                log("sell pad " .. what .. ": no menu yet — pressing E (confirm)")
+                pressKey(Enum.KeyCode.E)
+            end
+            task.wait(1.0)
         end
-        log(string.format("no sale at %s after 8 s (load %s, coins %s → %s) — next pad",
-            what, tostring(cap0), tostring(coins0), tostring(coinBalance())))
+        log(string.format("no sale at %s after 16 s (load %s, coins %s → %s, sell menu %s)",
+            what, tostring(cap0), tostring(coins0), tostring(coinBalance()),
+            sellMenuOpen() and "OPEN" or "never opened"))
         return false
     end
 
@@ -3252,7 +3348,7 @@ local okBuild, errBuild = pcall(function()
                 return true
             end
         end
-        log("⚠ still full — none of the pads sold the load")
+        log("⚠ still full — none of the pads sold the load (the log above says which pad was tried and whether its sell menu opened; if it stayed closed, do the trip once by hand — Q then E — and tell me where the vehicle was parked)")
         return false
     end
 
@@ -3358,7 +3454,7 @@ local okBuild, errBuild = pcall(function()
             -- full harvester: sell and come back (the user's loop). The spiral
             -- is already computed, so after the trip the sweep just resumes at
             -- THIS leg — from where the vehicle actually is now.
-            if job.selfPropelled and sellTries < 2 then
+            if job.selfPropelled and sellTries < 4 then
                 local cur, max = harvesterLoad(tr)
                 if cur and max and max > 0 and cur >= max then
                     sellTries += 1
