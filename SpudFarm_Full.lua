@@ -868,7 +868,20 @@ local okBuild, errBuild = pcall(function()
     --   written every step, never steered — at 10 studs/s.
     local HARVEST_TWEEN_SPEED = 10 -- studs per second (user's number)
 
-    local function tweenDriveLeg(tr, from, goal, speed)
+    -- ▸ HOLD A REAL KEY (user: "you need to make the harvester hold w or s to
+    --   make it pick up crops, unless you can find a way to cheat it"). The
+    --   harvest trigger is the game's own controller seeing the PLAYER drive —
+    --   a pure PivotTo slide does not count. So the swath tween holds W (or S)
+    --   for its whole length: the game does the driving, we only keep the
+    --   chassis on the line and on the speed.
+    local function holdKey(key)
+        pcall(function() VIM:SendKeyEvent(true, key, false, game) end)
+    end
+    local function releaseKey(key)
+        pcall(function() VIM:SendKeyEvent(false, key, false, game) end)
+    end
+
+    local function tweenDriveLeg(tr, from, goal, speed, hold)
         speed = speed or HARVEST_TWEEN_SPEED
         local startCF = tr:GetPivot()
         local y = startCF.Position.Y -- stay on the field plane: no hopping
@@ -879,18 +892,33 @@ local okBuild, errBuild = pcall(function()
         if dist < 0.5 then return true end
         local dir = delta / dist
         local rot = CFrame.lookAt(Vector3.zero, dir) -- the fixed heading
-        local travelled, tick = 0, 0.1
-        while travelled < dist do
-            if stopping() then return nil end
-            -- the 1-second full-tank watch works here too
-            if driveWatchTick(tr) then return false end
-            travelled = math.min(dist, travelled + speed * tick)
-            local p = a + dir * travelled
-            tr:PivotTo(CFrame.new(p) * rot)
-            task.wait(tick)
-        end
-        tr:PivotTo(CFrame.new(b) * rot) -- land exactly on the leg end
-        return true
+        if hold then holdKey(hold) end
+        -- the whole walk is pcall'd so the held key can NEVER be left down,
+        -- whatever happens inside
+        local okRun, res = pcall(function()
+            local travelled, tick = 0, 0.1
+            while travelled < dist do
+                if stopping() then return nil end
+                -- the 1-second full-tank watch works here too
+                if driveWatchTick(tr) then return false end
+                travelled = math.min(dist, travelled + speed * tick)
+                -- ▸ step FROM THE LIVE PIVOT, not from a fixed world point: with
+                --   the key held the game's own controller also moves the
+                --   chassis, and a fixed target would yank it back every tick
+                --   (a visible stutter). Adding one step to where the vehicle
+                --   actually IS keeps it moving at our speed on our heading
+                --   while the game does the driving — which is what harvests.
+                local here = tr:GetPivot().Position
+                local p = here + dir * (speed * tick)
+                tr:PivotTo(CFrame.new(Vector3.new(p.X, y, p.Z)) * rot)
+                task.wait(tick)
+            end
+            tr:PivotTo(CFrame.new(b) * rot) -- land exactly on the leg end
+            return true
+        end)
+        if hold then releaseKey(hold) end
+        if not okRun then return nil end
+        return res
     end
 
     -- fly-over ARC (user's plan, smoothed): ONE smooth curve — rise,
@@ -4009,7 +4037,7 @@ local okBuild, errBuild = pcall(function()
             -- ▸ a harvest leg never touches the keys or the physics mover:
             --   straight tween, fixed heading, 10 studs/s (see tweenDriveLeg)
             if job.selfPropelled then
-                local okT = tweenDriveLeg(tr, from, goal, HARVEST_TWEEN_SPEED)
+                local okT = tweenDriveLeg(tr, from, goal, HARVEST_TWEEN_SPEED, Enum.KeyCode.W)
                 if okT == nil then return nil end
                 return okT
             end
