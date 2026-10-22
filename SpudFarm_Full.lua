@@ -2372,6 +2372,10 @@ local okBuild, errBuild = pcall(function()
             and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
         local tagged, models = {}, {}
         local walked = 0
+        -- the walk below can take a while on a streamed-in town and prints
+        -- nothing until it is done — say we started, so a slow shop trip
+        -- can't look like the script stopping
+        log("seed crate: searching the town for a " .. tostring(seedName) .. " crate…")
         for _, d in ipairs(workspace:GetDescendants()) do
             walked += 1
             if d.Name == "SeedType" then
@@ -2796,6 +2800,29 @@ local okBuild, errBuild = pcall(function()
             return false
         end
         buySeedAndFill(seedChoice)
+        if stopping() then return false end
+        -- ▸ GET BACK IN AND SEED (user's step list ends with it: "get back in
+        --   and seed"). The shop trip leaves the character on foot next to
+        --   the seeder; walk back, sit down, and the check-back re-enters the
+        --   planting stage in THIS run now that the seeder is full.
+        local char2 = LocalPlayer.Character
+        local hum2 = char2 and char2:FindFirstChildOfClass("Humanoid")
+        if hum2 and tr.Parent
+            and not (hum2.SeatPart and hum2.SeatPart:IsDescendantOf(tr)) then
+            local seat2 = tr:FindFirstChildWhichIsA("VehicleSeat", true)
+                or tr:FindFirstChildWhichIsA("Seat", true)
+            if seat2 then
+                local root2 = char2:FindFirstChild("HumanoidRootPart")
+                local d2 = root2 and (seat2.Position - root2.Position).Magnitude or 0
+                if mountTractor(char2, hum2, tr, seat2, d2, "tractor") then
+                    log("✅ back in the tractor — the planting stage runs next")
+                else
+                    log("⚠ couldn't get back into the tractor — get in by hand and the next run seeds")
+                end
+            else
+                log("⚠ the tractor has no seat any more — get in by hand and the next run seeds")
+            end
+        end
         return false
     end
 
