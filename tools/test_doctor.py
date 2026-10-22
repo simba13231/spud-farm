@@ -233,6 +233,16 @@ BTN.Callback()
 has("no sell pads found", "empty-pads anomaly")
 findSellSpots = realSpots
 
+-- the startup run mirrors into the in-game console
+local beforeMirror = #LOGS
+doctorReport(true)
+assert(#LOGS > beforeMirror, "mirror mode logged nothing")
+local sawMirror = false
+for i = #LOGS, math.max(1, beforeMirror), -1 do
+  if LOGS[i]:find("doc: ", 1, true) then sawMirror = true break end
+end
+assert(sawMirror, "mirror lines are not prefixed")
+
 -- no button needed: spudDoctor() must stand alone
 assert(type(GENV.spudDoctor) == "function", "spudDoctor() was not exposed")
 PARAVAL = nil

@@ -6,7 +6,7 @@
 
 local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/releases/latest/download/Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.5 · fluent gui"
+local VERSION    = "rebuild v1.6 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -4535,7 +4535,7 @@ local okBuild, errBuild = pcall(function()
             #flags > 0 and (" · " .. table.concat(flags, " ")) or "",
             #caps > 0 and (" · " .. table.concat(caps, " ")) or "")
     end
-    doctorReport = function()
+    doctorReport = function(mirror)
         local lines, problems = {}, {}
         local function add(s) lines[#lines + 1] = s end
         local function problem(s) problems[#problems + 1] = s end
@@ -4626,6 +4626,10 @@ local okBuild, errBuild = pcall(function()
             pcall(function() doctorPara:SetValue(table.concat(lines, "\n")) end)
         end
         for _, l in ipairs(lines) do print("[spud doc] " .. l) end
+        if mirror then
+            -- the startup run puts itself where it will be seen without a click
+            for _, l in ipairs(lines) do log("doc: " .. l) end
+        end
         if not doctorPara then
             -- no panel to read: put the report where the player can see it
             for _, l in ipairs(lines) do log("doc: " .. l) end
@@ -4641,8 +4645,8 @@ local okBuild, errBuild = pcall(function()
     --   built — made the button look dead, with the reason hidden in the
     --   executor console. Every path now ends in a notification: the summary,
     --   or the actual error text.
-    local function runDoctor()
-        local ok, res = pcall(doctorReport)
+    local function runDoctor(mirror)
+        local ok, res = pcall(doctorReport, mirror)
         if ok then
             local summary = tostring(res)
             if not doctorPara then
@@ -4790,6 +4794,14 @@ local okBuild, errBuild = pcall(function()
     })
 
     log("gui: settings ok")
+
+    -- ▸ IT ALSO RUNS ITSELF. The button proved easy to look past (or to click
+    --   with nothing visible happening), so the snapshot is taken once a few
+    --   seconds after load and written into BOTH the Doctor panel and the
+    --   Console tab — no click needed to see the state of the farm.
+    task.delay(3, function()
+        pcall(function() runDoctor(true) end)
+    end)
 
     -- start
     Window:SelectTab(1)
