@@ -2488,17 +2488,24 @@ local okBuild, errBuild = pcall(function()
         return false, "still " .. math.floor(d) .. " studs short"
     end
 
-    local function driveToField(tr, field, seat, impl)
+    -- the corner of a field's plate to aim at (4 studs inside), from wherever
+    -- the vehicle is now — the same point driveToField uses, so the harvester
+    -- can ARC there instead of pathfinding
+    local function fieldCornerTarget(field, fromPos)
         local baseCF, baseSize = fieldFrame(field)
-        if not baseCF then return false, "no bounds" end
+        if not baseCF then return nil end
         local c = baseCF.Position
         local rx = Vector3.new(baseCF.RightVector.X, 0, baseCF.RightVector.Z).Unit
         local rz = Vector3.new(baseCF.LookVector.X, 0, baseCF.LookVector.Z).Unit
-        local p0 = tr:GetPivot().Position - c
-        -- nearest corner along the plate's OWN axes, 4 studs inside
-        local goal = c
+        local p0 = fromPos - c
+        return c
             + rx * math.max(baseSize.X / 2 - 4, 2) * (p0:Dot(rx) >= 0 and 1 or -1)
             + rz * math.max(baseSize.Z / 2 - 4, 2) * (p0:Dot(rz) >= 0 and 1 or -1)
+    end
+
+    local function driveToField(tr, field, seat, impl)
+        local goal = fieldCornerTarget(field, tr:GetPivot().Position)
+        if not goal then return false, "no bounds" end
         log(string.format("field corner target: (%.0f, %.0f)", goal.X, goal.Z))
         return driveRoute(tr, seat, goal, impl)
     end
@@ -4155,8 +4162,9 @@ local okBuild, errBuild = pcall(function()
         end
         local dir = flat / dist
         -- the arc grows with the trip but is capped: a 400-stud errand must not
-        -- leave the map. 0.22 × distance, 10…60 studs of lift.
-        local lift = math.clamp(dist * 0.22, 10, 60)
+        -- leave the map. 0.25 × distance, 18…70 studs of lift.
+        local lift = math.clamp(dist * 0.25, 18, 70)
+        log(string.format("arc hop: %.0f studs, lifting %.0f studs", dist, lift))
         local travelled, tick = 0, 0.03
         while travelled < dist do
             if stopping() then return nil end
@@ -4779,8 +4787,23 @@ local okBuild, errBuild = pcall(function()
                         log(string.format("%s %s (%s land, %s)",
                             job.verb, m.d.Name, m.typeName,
                             need and (need .. " cells need it") or "state unknown"))
-                        local arrived, how =
-                            driveToField(ride, m.d, rideSeat, impl)
+                        -- ▸ THE HARVESTER ARCS EVERYWHERE (user: "the harvester
+                        --   is not using the arc tween bro, make it use it to
+                        --   and back"): the self-propelled ride does not need a
+                        --   path — it hops, so the trip to the field and every
+                        --   sell trip are the same visible arc.
+                        local arrived, how
+                        if job.selfPropelled then
+                            local goal = fieldCornerTarget(m.d, ride:GetPivot().Position)
+                            if goal then
+                                log("arc hop to the " .. m.d.Name .. " corner")
+                                arrived = hopTo(ride, goal, SELL_HOP_SPEED) and true or false
+                                how = "arc hop"
+                            end
+                        end
+                        if arrived == nil then
+                            arrived, how = driveToField(ride, m.d, rideSeat, impl)
+                        end
                         if stopping() then return false end
                         if not arrived then
                             log("couldn't reach " .. m.d.Name .. " (" .. tostring(how) .. ")")
