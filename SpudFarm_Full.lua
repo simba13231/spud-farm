@@ -68,6 +68,120 @@ local okBuild, errBuild = pcall(function()
         Content = "loaded",
     })
 
+    ------------------------------------------------------------
+    -- ▸ WEBHOOK SINK (user: "i also want a webhook now please, it
+    --   sends everything to the webhook"). EVERY line log() prints
+    --   is queued and posted to a Discord webhook in batches, so the
+    --   console exists outside the game: a run can be read on a
+    --   phone, or pasted straight to me, with no copy-paste.
+    --   The URL is NOT hard-coded in the public repo (anyone could
+    --   spam it): paste it once in Settings → "webhook url", and it
+    --   is remembered in a local file when the executor allows it.
+    ------------------------------------------------------------
+    local HOOK_FILE = "spudfarm_webhook.txt"
+    local HOOK_URL_HARDCODED = "" -- optional: paste a URL here instead of the box
+    local hookQueue, hookURL, hookDropped, hookFails = {}, "", 0, 0
+    local hookHealthy = true
+
+    local function hookLoadURL()
+        if HOOK_URL_HARDCODED ~= "" then return (HOOK_URL_HARDCODED:gsub("%s+", "")) end
+        local ok, v = pcall(function() return readfile(HOOK_FILE) end)
+        if ok and type(v) == "string" then
+            v = v:gsub("%s+", "")
+            if #v > 20 then return v end
+        end
+        return ""
+    end
+    local function hookSaveURL(u)
+        pcall(function() writefile(HOOK_FILE, u) end)
+    end
+    local function hookHTTP(payload)
+        local fn = (syn and syn.request) or (http and http.request)
+            or (fluxus and fluxus.request) or http_request or request
+        if type(fn) ~= "function" then
+            return false, "this executor has no HTTP request function"
+        end
+        local ok, res = pcall(fn, {
+            Url = hookURL,
+            Method = "POST",
+            Headers = { ["Content-Type"] = "application/json" },
+            Body = payload,
+        })
+        if not ok then return false, tostring(res) end
+        return true
+    end
+    -- one batch = as many queued lines as fit in one Discord message
+    local function hookFlush()
+        if hookURL == "" or not hookHealthy or #hookQueue == 0 then return end
+        local batch, size = {}, 0
+        while #hookQueue > 0 do
+            local line = hookQueue[1]
+            if size + #line + 1 > 1700 then break end
+            table.remove(hookQueue, 1)
+            size += #line + 1
+            batch[#batch + 1] = line
+        end
+        if #batch == 0 then return end
+        local body = table.concat(batch, "\n")
+        if hookDropped > 0 then
+            body = body .. string.format("\n… %d earlier line(s) dropped (offline)", hookDropped)
+            hookDropped = 0
+        end
+        local ok, err = hookHTTP(game:GetService("HttpService"):JSONEncode({
+            username = "spud farm",
+            content = body,
+        }))
+        if ok then
+            hookFails = 0
+        else
+            hookFails += 1
+            if hookFails >= 5 then
+                hookHealthy = false
+                print("[spud] webhook disabled after 5 failed posts: " .. tostring(err))
+            end
+        end
+    end
+    local function hookPush(line)
+        if hookURL == "" then return end
+        hookQueue[#hookQueue + 1] = line
+        if #hookQueue > 300 then
+            table.remove(hookQueue, 1)
+            hookDropped += 1
+        end
+    end
+    local function setHookURL(u)
+        u = tostring(u or ""):gsub("%s+", "")
+        if u ~= "" and not u:lower():find("discord") then
+            return false, "that doesn't look like a Discord webhook url"
+        end
+        hookURL, hookFails, hookHealthy = u, 0, true
+        hookQueue = {}
+        if u ~= "" then hookSaveURL(u) end
+        return true
+    end
+    hookURL = hookLoadURL()
+    -- the pump runs for the whole session; it is a no-op until a URL is set
+    task.spawn(function()
+        while true do
+            task.wait(2.5) -- 24 posts/min max, under Discord's 30/min
+            pcall(hookFlush)
+        end
+    end)
+    do
+        local g = (getgenv and getgenv()) or _G
+        if g then
+            g.spudWebhook = function(url)
+                if url == nil then
+                    print("[spud] webhook: " .. (hookURL == "" and "not set" or hookURL))
+                    return hookURL
+                end
+                local ok, why = setHookURL(url)
+                print(ok and "[spud] webhook: set" or ("[spud] webhook: " .. tostring(why)))
+                return ok
+            end
+        end
+    end
+
     local function log(msg)
         table.insert(LOG, tostring(msg))
         if #LOG > 24 then table.remove(LOG, 1) end
@@ -80,6 +194,17 @@ local okBuild, errBuild = pcall(function()
         t[#t + 1] = tostring(msg)
         if #t > 400 then table.remove(t, 1) end
         pcall(function() logPara:SetValue(table.concat(LOG, "\n")) end)
+        -- ▸ and OUT of the game: every line goes to the webhook queue too
+        hookPush(tostring(msg))
+    end
+
+    -- ▸ the webhook says hello if a URL was remembered from last session, so
+    --   the first message proves the pipe works before anything else happens
+    if hookURL ~= "" then
+        log(string.format("webhook: on · %s · place %d", VERSION, game.PlaceId))
+        task.spawn(function() task.wait(0.5) pcall(hookFlush) end)
+    else
+        log("webhook: off — paste a url in Settings to mirror this console there")
     end
 
     -- ▸ STAGE (user: "sometimes it just end with this" + "it looks to stay
@@ -1906,11 +2031,19 @@ local okBuild, errBuild = pcall(function()
         -- ▸ CURVES, NOT SQUARES (user: "use curves not squares"). A chamfer
         --   cut at most 10 studs off a corner — a ~45° kink that the nose has
         --   to swing in one go, with the towed tool swinging wider still. Each
-        --   sharp vertex is now a QUADRATIC BEZIER arc (q1 → q → q2) sampled
-        --   every ~1.6 studs, and the radius is grown until the arc's own
+        --   sharp vertex is now a QUINTIC BEZIER blend (q1 → q → q2) sampled
+        --   every ~1.4 studs, and the radius is grown until the blend's own
         --   samples are all free: try 22 studs, then 14, then 8, else keep the
         --   vertex sharp. Long straights stay single segments, so the tween
         --   driver still works leg by leg.
+        --   ▸ WHY QUINTIC AND NOT THE OLD QUADRATIC: a circular/quadratic arc
+        --     is only G1 — the curvature jumps from 0 to 1/R the instant the
+        --     nose enters it, which is the visible "swings wide then jerks".
+        --     A degree-5 blend with its curvature forced to ZERO at both ends
+        --     (B''(0)=B''(1)=0 → P2 = 2P1 − P0, P4 = (P3+P5)/2) is G2: the
+        --     steering rate is continuous, so it can be driven faster without
+        --     the wheels snapping (Brezak 2011 measured up to 25% higher
+        --     trackable speed and a fraction of the cross-track error vs arcs).
         local function freeAt(x, z)
             local ix, iz = cellOf(x, x0), cellOf(z, z0)
             if ix < 0 or iz < 0 or ix >= nx or iz >= nz then return false end
@@ -1927,24 +2060,43 @@ local okBuild, errBuild = pcall(function()
             if l1 > 6 and l2 > 6 then
                 local cosang = (d1x * d2x + d1z * d2z) / (l1 * l2)
                 if cosang < 0.94 then -- anything past ~20° of turn
+                    local u1x, u1z = d1x / l1, d1z / l1 -- incoming direction
+                    local u2x, u2z = d2x / l2, d2z / l2 -- outgoing direction
                     for _, want in ipairs({ 22, 14, 8 }) do
                         local d = math.min(want, l1 * 0.45, l2 * 0.45)
-                        local q1x, q1z = q[1] - d1x / l1 * d, q[2] - d1z / l1 * d
-                        local q2x, q2z = q[1] + d2x / l2 * d, q[2] + d2z / l2 * d
-                        local n = math.max(4, math.ceil(d / 1.6))
-                        local okArc = freeAt(q1x, q1z) and freeAt(q2x, q2z)
+                        -- quintic control points: enter at q0, leave at q5,
+                        -- curvature zero at both ends, so it joins the straight
+                        -- legs with no steering-rate step
+                        local p0x, p0z = q[1] - u1x * d, q[2] - u1z * d
+                        local p5x, p5z = q[1] + u2x * d, q[2] + u2z * d
+                        local a = 0.55 * d
+                        local p1x, p1z = p0x + u1x * a, p0z + u1z * a
+                        local p2x, p2z = p0x + u1x * 2 * a, p0z + u1z * 2 * a
+                        local p4x, p4z = p5x - u2x * a, p5z - u2z * a
+                        local p3x, p3z = p5x - u2x * 2 * a, p5z - u2z * 2 * a
+                        local n = math.max(6, math.ceil(d / 1.4))
+                        local okArc = freeAt(p0x, p0z) and freeAt(p5x, p5z)
                         local samples = {}
-                        for k = 1, n do
+                        for k = 1, n - 1 do
                             local t = k / n
                             local u = 1 - t
-                            local sx = u * u * q1x + 2 * u * t * q[1] + t * t * q2x
-                            local sz = u * u * q1z + 2 * u * t * q[2] + t * t * q2z
+                            local b0 = u ^ 5
+                            local b1 = 5 * u ^ 4 * t
+                            local b2 = 10 * u ^ 3 * t * t
+                            local b3 = 10 * u * u * t ^ 3
+                            local b4 = 5 * u * t ^ 4
+                            local b5 = t ^ 5
+                            local sx = b0 * p0x + b1 * p1x + b2 * p2x
+                                + b3 * p3x + b4 * p4x + b5 * p5x
+                            local sz = b0 * p0z + b1 * p1z + b2 * p2z
+                                + b3 * p3z + b4 * p4z + b5 * p5z
                             samples[k] = { sx, sz }
                             if okArc and not freeAt(sx, sz) then okArc = false end
                         end
                         if okArc then
-                            out[#out + 1] = { q1x, q1z }
+                            out[#out + 1] = { p0x, p0z }
                             for _, sp in ipairs(samples) do out[#out + 1] = sp end
+                            out[#out + 1] = { p5x, p5z }
                             curved = true
                             break
                         end
@@ -1983,7 +2135,20 @@ local okBuild, errBuild = pcall(function()
     local ALIGN_MAXVEL = 24 -- studs/s
     local ALIGN_YAW = 70    -- deg/s — arcs, not pivots (a pivot drags the towed tool sideways)
     local ALIGN_AIM = 14    -- how far up the leg the aim point sits
+    -- ▸ NETWORK OWNERSHIP (Roblox docs, "Network ownership": the DRIVER should
+    --   own the vehicle). A vehicle left server-owned answers input several
+    --   network cycles late — that is the mushiness you feel on mobile. Claim
+    --   the assembly for the local player so the game's own controller answers
+    --   on this frame instead of three later. Harmless where the executor
+    --   refuses it (pcall).
+    local function claimOwnership(tr)
+        local part = tr.PrimaryPart or tr:FindFirstChildWhichIsA("BasePart", true)
+        if not part then return end
+        pcall(function() part:SetNetworkOwner(LocalPlayer) end)
+    end
+
     local function alignDriveStart(tr)
+        claimOwnership(tr)
         local part = tr.PrimaryPart or tr:FindFirstChildWhichIsA("BasePart", true)
         if not part then return nil, "no BasePart" end
         local mass = 0
@@ -2308,6 +2473,39 @@ local okBuild, errBuild = pcall(function()
             return legs[lo][1] + (legs[lo + 1][1] - legs[lo][1]) * t,
                 legs[lo][2] + (legs[lo + 1][2] - legs[lo][2]) * t
         end
+        -- ▸ CURVATURE AWARE PURSUIT (research: with a speed-only lookahead pure
+        --   pursuit CUTS THE INSIDE of every corner — "lookahead too far =
+        --   corner cutting, too near = oscillation", and every practical fix
+        --   shrinks the lookahead as curvature rises). Three samples ~8 studs
+        --   apart give the turn rate in rad per stud at s.
+        local function curvatureAt(s)
+            local ax, az = pointAt(s)
+            local bx, bz = pointAt(s + 4)
+            local cx, cz = pointAt(s + 8)
+            local ux, uz = bx - ax, bz - az
+            local vx, vz = cx - bx, cz - bz
+            local lu = math.sqrt(ux * ux + uz * uz)
+            local lv = math.sqrt(vx * vx + vz * vz)
+            if lu < 1e-3 or lv < 1e-3 then return 0 end
+            local cosang = math.clamp((ux * vx + uz * vz) / (lu * lv), -1, 1)
+            return math.acos(cosang) / ((lu + lv) / 2)
+        end
+        -- ▸ SPEED PROFILE (forward/backward pass): the fastest we may be at s is
+        --   set by the sideways grip through the tightest corner within braking
+        --   distance (v² = a_lat / κ), and we may be faster HERE only if we can
+        --   still brake down to it: v ≤ √(vκ² + 2·a_brake·d). That is what
+        --   stops the "arrive too hot, overshoot, jam" pattern.
+        local ALIGN_LAT = 42   -- studs/s² of sideways grip
+        local ALIGN_BRAKE = 55 -- studs/s² of braking
+        local function speedLimitAt(s)
+            local vmax = ALIGN_MAXVEL
+            for d = 0, 40, 5 do
+                local k = curvatureAt(s + d)
+                local vk = math.sqrt(ALIGN_LAT / math.max(k, 0.008))
+                vmax = math.min(vmax, math.sqrt(vk * vk + 2 * ALIGN_BRAKE * d))
+            end
+            return math.max(vmax, 6)
+        end
         -- nearest point on the path, searched in a window around the cursor so
         -- a path that crosses itself cannot steal the cursor
         local function project(px, pz, hint)
@@ -2405,8 +2603,16 @@ local okBuild, errBuild = pcall(function()
                         return true, pass
                     end
                 end
-                -- lookahead grows with measured speed (12 studs at rest → 30)
-                local Ld = math.clamp(12 + spdEma * 0.5, ALIGN_AIM, 30)
+                -- ▸ lookahead: grows with speed BUT SHRINKS IN THE CORNERS
+                --   (was speed-only → it aimed 30 studs past a corner and cut
+                --   the inside of it). 0.10 rad/stud is a ~90° corner over
+                --   ~15 studs: there the lookahead drops to ~45% of nominal.
+                local kNow = curvatureAt(s)
+                local Ld = math.clamp(
+                    (10 + spdEma * 0.45) * (1 - 0.55 * math.clamp(kNow / 0.10, 0, 1)),
+                    8, 30)
+                -- ▸ and the SPEED comes from the corner ahead, not from hope
+                ah.cap = speedLimitAt(s)
                 local axp, azp = pointAt(s + Ld)
                 if now - teleClock >= 1 then
                     local nose = seat and seat.CFrame.LookVector or Vector3.new(0, 0, 1)
@@ -3499,6 +3705,7 @@ local okBuild, errBuild = pcall(function()
         local turnSince, stalls = nil, 0
         local deadline = os.clock() + 12 + legLen / 4
         releaseDriveKeys()
+        claimOwnership(tr)
         while os.clock() < deadline do
             if stopping() then releaseDriveKeys() return nil end
             if driveWatchTick(tr) then releaseDriveKeys() return false end
@@ -3531,17 +3738,35 @@ local okBuild, errBuild = pcall(function()
                     return "jammed"
                 end
                 setKey(KEY_W, remaining > BRAKE)
-                local step = math.min(ang, math.rad(120) * 0.1)
-                local axis = flat:Cross(dir)
-                local signed = CFrame.fromAxisAngle(Vector3.yAxis,
-                    (axis.Y >= 0 and 1 or -1) * step)
-                local nd = signed * flat
-                nd = Vector3.new(nd.X, 0, nd.Z)
-                if nd.Magnitude > 0.01 then
-                    tr:PivotTo(CFrame.new(p) * CFrame.lookAt(Vector3.zero, nd.Unit))
+                local turnT = os.clock() - turnSince
+                local crossY = flat:Cross(dir).Y -- > 0 = the aim is to our LEFT
+                if turnT < 2.0 then
+                    -- ▸ REAL STEERING. Rotating the chassis with PivotTo turns
+                    --   the BODY, not the velocity: physics keeps the old
+                    --   momentum, so the combine slides sideways through the
+                    --   corner. Holding W and pressing A/D instead makes the
+                    --   game's own controller turn the wheels — the arc is real,
+                    --   the harvest keeps counting, and W stays down so it never
+                    --   stops (user: "keep going on the angle").
+                    setKey(KEY_A, crossY > 0)
+                    setKey(KEY_D, crossY < 0)
+                else
+                    -- keys aren't bringing it round (fence, or the game ignored
+                    -- the steer input): finish the swing by hand
+                    setKey(KEY_A, false) setKey(KEY_D, false)
+                    local step = math.min(ang, math.rad(120) * 0.1)
+                    local axis = flat:Cross(dir)
+                    local signed = CFrame.fromAxisAngle(Vector3.yAxis,
+                        (axis.Y >= 0 and 1 or -1) * step)
+                    local nd = signed * flat
+                    nd = Vector3.new(nd.X, 0, nd.Z)
+                    if nd.Magnitude > 0.01 then
+                        tr:PivotTo(CFrame.new(p) * CFrame.lookAt(Vector3.zero, nd.Unit))
+                    end
                 end
             else
                 turnSince = nil
+                setKey(KEY_A, false) setKey(KEY_D, false)
                 local wantW = remaining > BRAKE
                 if wantW then
                     -- W ignored entirely (from a standstill)? fall back
@@ -4264,19 +4489,33 @@ local okBuild, errBuild = pcall(function()
         local runOut = job.selfPropelled and -4 or 12
         local driveHalf = (alongX and baseSize.X or baseSize.Z) / 2 + runOut
         local rowSpan   = (alongX and baseSize.Z or baseSize.X)
-        -- THE SPIRAL (user's drawing): concentric rectangular laps from
-        -- the OUTSIDE IN — each lap's long sides cover their step band
-        -- over the whole length, each lap steps 10 studs inward, and the
-        -- last ring (step inset to the center line) is one full pass down
-        -- the middle. On a 5-wide field: laps at ±20, ±10, 0 = 3 rings.
-        local rowHalf = rowSpan / 2 - 5 -- step half-extent of the outer lap (cell centers)
-        local rings   = math.max(math.floor(rowHalf / 10) + 1, 1)
+        -- ▸ HEADLAND + SKIP-ROW (research, not guesswork). A combine cannot
+        --   turn inside a 10-stud row gap — its turning circle is two to three
+        --   passes wide — so the old "concentric laps 10 studs apart" was a
+        --   geometrically IMPOSSIBLE path, and every row end jammed because of
+        --   it. Real fields are cut the other way round (Biosystems
+        --   Engineering 2023: cut the periphery first, it is the headland the
+        --   turns need; ICARA 2022: SKIP-ROW the interior when the working
+        --   width is narrower than the turning circle): one lap around the
+        --   edge, then rows 1,3,5 … and 2,4,6 … so each turn is a wide Ω
+        --   across a skipped row instead of a 180 in a 10-stud gap. Rows stay
+        --   dead straight; only the turns use the headland band.
+        local rowHalf = rowSpan / 2 - 5 -- step half-extent of the headland lap
+        local HEAD_BAND = 10             -- one perimeter lap before the rows
+        local axRow = math.max(driveHalf - 12, 8) -- rows end inside the headland
+        local lane = math.max(driveHalf - 4, 10)  -- turn lane, just inside the fence
+        local inner = math.max(rowHalf - HEAD_BAND, 0)
+        local lines = {}
+        do
+            local n = math.max(math.floor(inner * 2 / 10 + 0.5), 1)
+            for i = 0, n do lines[#lines + 1] = inner - i * (2 * inner / n) end
+        end
         local function pt(along, step) -- field-local (along, step) → world
             return c + driveDir * along + stepDir * step
         end
         local st0 = countStages(field)
         local need0 = st0 and whichNeed(job, st0) or nil
-        log(string.format("%s: %d-ring spiral, outside-in  (%s)", job.verb, rings,
+        log(string.format("%s: 1 headland lap + %d skip-row pass(es)  (%s)", job.verb, #lines,
             st0 and string.format("%d/%d cells still need %s", need0, st0.total, job.prog)
                 or "cell read unavailable"))
         local realDrive -- nil = not probed yet; true = seat driving; false = glide
@@ -4360,29 +4599,37 @@ local okBuild, errBuild = pcall(function()
         local rel0 = at - c -- sides picked along the PLATE's axes, not world
         local E = rel0:Dot(driveDir) >= 0 and 1 or -1 -- which end I arrived at
         local S = rel0:Dot(stepDir) >= 0 and 1 or -1  -- which step side
-        -- each full lap = side, far end, side, entry end (closed), then a
-        -- short diagonal step inward onto the next lap; the final ring
-        -- slides down the entry-end line and drives ONE center pass that
-        -- reaches back to that end line (so the half-cell strip between
-        -- the pass end and the end band is covered too — no gaps).
+        -- each leg entry = { target, tolerance, label }
         local map = {}
-        for k = 0, rings - 1 do
-            local ax = driveHalf - 10 * k -- along half-extent of this lap
-            local sx = rowHalf - 10 * k   -- step half-extent (20, 10, ...)
-            -- tol 10 on the lap legs (user: the harvester swings wide at
-            -- corners) = the end counts as reached 10 studs early, so the
-            -- turn starts sooner and the arc stays inside the lap. The
-            -- short step onto the next ring is capped back down by doLeg.
-            if sx > 0 then -- full closed lap
-                map[#map + 1] = { pt( E * ax,  S * sx), 10, nil }   -- side +
-                map[#map + 1] = { pt(-E * ax,  S * sx), 10, nil }   -- far end
-                map[#map + 1] = { pt(-E * ax, -S * sx), 10, nil }   -- side -
-                map[#map + 1] = { pt( E * ax, -S * sx), 10, nil }   -- near end
-                map[#map + 1] = { pt( E * ax,  S * sx), 10, k + 1 } -- lap closed
-            else -- final ring: one center-line pass from the entry end
-                map[#map + 1] = { pt( E * (ax + 10), 0), 10, nil }
-                map[#map + 1] = { pt(-E * ax, 0), 10, rings }
+        -- 1) THE HEADLAND: one closed lap around the field edge. This is the
+        --    band the Ω turns later use, so it is cut first and never again.
+        map[#map + 1] = { pt( E * driveHalf,  S * rowHalf), 10, "headland" }
+        map[#map + 1] = { pt(-E * driveHalf,  S * rowHalf), 10, "headland" }
+        map[#map + 1] = { pt(-E * driveHalf, -S * rowHalf), 10, "headland" }
+        map[#map + 1] = { pt( E * driveHalf, -S * rowHalf), 10, "headland" }
+        map[#map + 1] = { pt( E * driveHalf,  S * rowHalf), 10, "headland" }
+        -- 2) THE INTERIOR, SKIP-ROW: odd lines first, then even, serpentine.
+        --    Consecutive rows are then two passes apart, and the turn between
+        --    them is a Ω through the headland lane instead of an impossible
+        --    180° inside a 10-stud gap.
+        local order = {}
+        for i = 1, #lines, 2 do order[#order + 1] = i end
+        for i = 2, #lines, 2 do order[#order + 1] = i end
+        local rdir = E
+        for n, idx in ipairs(order) do
+            local s = lines[idx]
+            -- tol 10 = the end counts as reached 10 studs early, so the turn
+            -- starts sooner and the swing stays inside the field
+            map[#map + 1] = { pt(-rdir * axRow, s), 10, "row " .. n }
+            map[#map + 1] = { pt( rdir * axRow, s), 10, "row " .. n }
+            local nxt = order[n + 1]
+            if nxt then
+                -- Ω: run out into the headland lane, cross to the next row's
+                -- line, then the next row pulls back in (its first point).
+                map[#map + 1] = { pt(rdir * lane, s), 8, "turn" }
+                map[#map + 1] = { pt(rdir * lane, lines[nxt]), 8, "turn" }
             end
+            rdir = -rdir
         end
         dbgShow(tr, map, at) -- glowing bars on the field; bright = active leg
         for i, leg in ipairs(map) do
@@ -4409,7 +4656,9 @@ local okBuild, errBuild = pcall(function()
                 dbgClear() return nil
             else
                 at = leg[1]
-                if leg[3] then log(string.format("ring %d/%d done", leg[3], rings)) end
+                if leg[3] == "headland" then
+                    log("headland lap done — interior rows next (skip-row)")
+                end
             end
         end
         dbgClear()
@@ -5529,6 +5778,36 @@ local okBuild, errBuild = pcall(function()
             log("movement mode: " .. tostring(v))
         end,
     })
+
+    -- ▸ the webhook URL lives here, not in the public repo (user: "i also want
+    --   a webhook now please, it sends everything to the webhook"). Paste it
+    --   once; the pump then posts the console in batches. Blank = off.
+    local okHookUI, errHookUI = pcall(function()
+        Tabs.Settings:CreateInput("WebhookURL", {
+            Title = "webhook url (sends the console there)",
+            Placeholder = "https://discord.com/api/webhooks/…",
+            Value = hookURL ~= "" and hookURL or "",
+            Callback = function(text)
+                local ok, why = setHookURL(text)
+                if not ok then
+                    log("webhook: " .. tostring(why))
+                    return
+                end
+                if hookURL == "" then
+                    log("webhook: off")
+                    return
+                end
+                log("webhook: set — everything from now on is posted there")
+                log(string.format("webhook test · %s · place %d · %s",
+                    VERSION, game.PlaceId, tostring(game.JobId)))
+                task.spawn(function() task.wait(0.2) pcall(hookFlush) end)
+            end,
+        })
+    end)
+    if not okHookUI then
+        log("webhook: the settings box didn't build (" .. tostring(errHookUI)
+            .. ') — run spudWebhook("your url") in the executor')
+    end
 
     Tabs.Settings:CreateButton({
         Title = "🔄 Reload latest update",
