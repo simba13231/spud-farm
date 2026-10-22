@@ -3467,6 +3467,67 @@ local okBuild, errBuild = pcall(function()
         setKey(KEY_D, false) setKey(KEY_S, false)
     end
 
+    -- ▸ THE HARVEST ROW IS DRIVEN BY REAL W (wiki: "drive forward within the
+    --   field to harvest the drop — (W - Keyboard)"). The combine only credits a
+    --   harvest while its OWN controller is driving it, and writing
+    --   seat.Throttle is overwritten from player input every frame (proven on
+    --   the tractor), so this holds W for real: no tween, no seat write, no
+    --   position edits — the game drives, physics happens, the crops register.
+    --   The only thing the script does is ease the NOSE back onto the line
+    --   (small yaw, position untouched) and lift off W before the row end.
+    --   Returns true = row done, false = W didn't move it (caller falls back to
+    --   the seat throttle), nil = stopped.
+    local function keyRow(tr, seat, from, goal)
+        local y0 = tr:GetPivot().Position.Y
+        local A = Vector3.new(from.X, y0, from.Z)
+        local B = Vector3.new(goal.X, y0, goal.Z)
+        local leg = B - A
+        local legLen = leg.Magnitude
+        if legLen < 1 then return true end
+        local dir = leg / legLen
+        local perp = Vector3.new(-dir.Z, 0, dir.X)
+        local BRAKE, ACCEPT = 20, 5
+        local started = os.clock()
+        local lastP = tr:GetPivot().Position
+        local deadline = started + 20 + legLen / 4
+        releaseDriveKeys()
+        while os.clock() < deadline do
+            if stopping() then releaseDriveKeys() return nil end
+            if driveWatchTick(tr) then releaseDriveKeys() return false end
+            local cf = tr:GetPivot()
+            local p = cf.Position
+            local rel = Vector3.new(p.X, 0, p.Z) - A
+            local along, cross = rel:Dot(dir), rel:Dot(perp)
+            local remaining = legLen - along
+            if remaining <= ACCEPT then break end
+            local flat = Vector3.new(cf.LookVector.X, 0, cf.LookVector.Z)
+            flat = flat.Magnitude > 0.1 and flat.Unit or dir
+            local ang = math.acos(math.clamp(flat:Dot(dir), -1, 1))
+            if ang > math.rad(8) then
+                local step = math.min(ang, math.rad(90) * 0.1)
+                local axis = flat:Cross(dir)
+                local signed = CFrame.fromAxisAngle(Vector3.yAxis,
+                    (axis.Y >= 0 and 1 or -1) * step)
+                local nd = signed * flat
+                nd = Vector3.new(nd.X, 0, nd.Z)
+                if nd.Magnitude > 0.01 then
+                    tr:PivotTo(CFrame.new(p) * CFrame.lookAt(Vector3.zero, nd.Unit))
+                end
+            end
+            -- only drive once the nose is ON the row; turning happens stopped
+            setKey(KEY_W, remaining > BRAKE and ang <= math.rad(8))
+            -- did the keys actually move it? (the game may ignore synthetic input)
+            if os.clock() - started > 2.5 and
+                (Vector3.new(p.X, 0, p.Z) - Vector3.new(lastP.X, 0, lastP.Z)).Magnitude < 1.5 then
+                releaseDriveKeys()
+                return false
+            end
+            task.wait(0.1)
+        end
+        releaseDriveKeys()
+        return true
+    end
+
     -- ▸ REVERSE — ONLY where a turn is too sharp to take going forward
     --   (user: "allow it to reverse? but only when needed on turns and
     --   sharp turns"): back up while steering the nose around. Reversing
@@ -4178,11 +4239,18 @@ local okBuild, errBuild = pcall(function()
         local lineStats = { worst = 0, flips = 0 }
         local function doLeg(from, goal, tol)
             if stopping() then return nil end
-            -- ▸ a harvest leg never touches the keys or the physics mover:
-            --   straight tween, fixed heading, 10 studs/s (see tweenDriveLeg)
+            -- ▸ a harvest leg is DRIVEN on real W (the game only credits a
+            --   harvest while its own controller drives — see keyRow). If W
+            --   doesn't move it, the seat throttle is tried, and that still
+            --   falls back to the plain tween.
             if job.selfPropelled then
-                local okT = throttleRow(tr, seat, from, goal)
+                local okT = keyRow(tr, seat, from, goal)
                 if okT == nil then return nil end
+                if okT == false then
+                    log("harvester: holding W moved nothing — trying the seat throttle for this row")
+                    okT = throttleRow(tr, seat, from, goal)
+                    if okT == nil then return nil end
+                end
                 return okT
             end
             -- never accept more than half a leg early (the short step onto
