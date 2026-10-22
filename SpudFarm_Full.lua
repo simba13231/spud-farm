@@ -3489,8 +3489,8 @@ local okBuild, errBuild = pcall(function()
         local BRAKE, ACCEPT = 20, 5
         local stallP, stallT = tr:GetPivot().Position, os.clock()
         local startP, startT = stallP, stallT
-        local stalls = 0
-        local deadline = os.clock() + 20 + legLen / 4
+        local turnSince, stalls = nil, 0
+        local deadline = os.clock() + 12 + legLen / 4
         releaseDriveKeys()
         while os.clock() < deadline do
             if stopping() then releaseDriveKeys() return nil end
@@ -3500,14 +3500,24 @@ local okBuild, errBuild = pcall(function()
             local rel = Vector3.new(p.X, 0, p.Z) - A
             local along, cross = rel:Dot(dir), rel:Dot(perp)
             local remaining = legLen - along
+            -- movement bookkeeping happens EVERY tick, whatever phase we are in
+            if (p - stallP).Magnitude > 0.6 then
+                stallP, stallT = p, os.clock()
+            end
+            local stoppedFor = os.clock() - stallT
             if remaining <= ACCEPT then break end
             local flat = Vector3.new(cf.LookVector.X, 0, cf.LookVector.Z)
             flat = flat.Magnitude > 0.1 and flat.Unit or dir
             local ang = math.acos(math.clamp(flat:Dot(dir), -1, 1))
-            -- only drive once the nose is ON the row; turning happens stopped
-            local wantW = remaining > BRAKE and ang <= math.rad(8)
             if ang > math.rad(8) then
+                -- TURNING: no W, nose eased onto the row, position untouched
                 stallT = os.clock() -- turning in place is not a stall
+                turnSince = turnSince or os.clock()
+                if os.clock() - turnSince > 4 then
+                    log("harvester: can't get the nose onto this row (4 s) — finishing it with the tween")
+                    releaseDriveKeys()
+                    return "jammed"
+                end
                 local step = math.min(ang, math.rad(90) * 0.1)
                 local axis = flat:Cross(dir)
                 local signed = CFrame.fromAxisAngle(Vector3.yAxis,
@@ -3517,36 +3527,43 @@ local okBuild, errBuild = pcall(function()
                 if nd.Magnitude > 0.01 then
                     tr:PivotTo(CFrame.new(p) * CFrame.lookAt(Vector3.zero, nd.Unit))
                 end
-            elseif wantW then
-                -- W ignored entirely (from a standstill)? hand the row to the
-                -- seat throttle, then the tween
-                if os.clock() - startT > 3 and (p - startP).Magnitude < 1.5 then
-                    releaseDriveKeys()
-                    return false
-                end
-                -- ▸ STALL = W DOWN AND NO MOVEMENT (user: "now it's stalled on
-                --   the corner"). The nose is usually jammed on the plot fence,
-                --   so back off for a moment and try again; after three tries
-                --   the row is handed to the tween so the sweep can never park
-                --   itself on a corner.
-                if (p - stallP).Magnitude > 0.6 then
-                    stallP, stallT = p, os.clock()
-                elseif os.clock() - stallT > 1.8 then
-                    stalls += 1
-                    if stalls > 2 then
+            else
+                turnSince = nil
+                local wantW = remaining > BRAKE
+                if wantW then
+                    -- W ignored entirely (from a standstill)? fall back
+                    if os.clock() - startT > 3 and (p - startP).Magnitude < 1.5 then
                         releaseDriveKeys()
-                        log("harvester: jammed on this row (3 tries) — tweening the rest of it")
-                        return "jammed"
+                        return false
                     end
-                    log(string.format("harvester: stuck for 1.8 s — backing off and retrying (try %d/2)", stalls))
-                    setKey(KEY_W, false)
-                    setKey(KEY_S, true)
-                    task.wait(0.8)
-                    setKey(KEY_S, false)
-                    stallP, stallT = tr:GetPivot().Position, os.clock()
+                    -- ▸ STALL = W DOWN AND NO MOVEMENT (user: "now it's stalled
+                    --   on the corner"). Back off and retry; after three tries
+                    --   hand the row to the tween.
+                    if stoppedFor > 1.8 then
+                        stalls += 1
+                        if stalls > 2 then
+                            releaseDriveKeys()
+                            log("harvester: jammed on this row (3 tries) — tweening the rest of it")
+                            return "jammed"
+                        end
+                        log(string.format("harvester: stuck for 1.8 s — backing off and retrying (try %d/2)", stalls))
+                        setKey(KEY_W, false)
+                        setKey(KEY_S, true)
+                        task.wait(0.8)
+                        setKey(KEY_S, false)
+                        stallP, stallT = tr:GetPivot().Position, os.clock()
+                    end
+                else
+                    -- BRAKE ZONE: no W, just coasting. If it has stopped short of
+                    -- the row end, that IS the row end — never sit here waiting
+                    -- for the deadline (that was the silent stall).
+                    if stoppedFor > 1.2 then
+                        log("harvester: rolled to a stop before the row end — counting the row as done")
+                        break
+                    end
                 end
+                setKey(KEY_W, wantW)
             end
-            setKey(KEY_W, wantW)
             task.wait(0.1)
         end
         releaseDriveKeys()
@@ -3944,7 +3961,9 @@ local okBuild, errBuild = pcall(function()
                 for _, q in ipairs(out) do
                     if (q.p - c.p).Magnitude < 25 then near = true break end
                 end
-                if not near then out[#out + 1] = { p = c.p, what = c.what } end
+                if not near then out[#out + 1] = {
+                    p = c.p, what = c.what, store = c.store, dist = c.dist,
+                    board = c.board } end
             end
         end
         log(string.format("sell pads: %d candidate(s), %d at the crop store — nearest FarmCo first: %s",
