@@ -2058,6 +2058,10 @@ local okBuild, errBuild = pcall(function()
     --   legs re-planned about once a second, then the align driver (or real
     --   keys, or the glide fallback) drives them. Shared now, because the
     --   sell trip drives the harvester to a pad and back the same way.
+    -- forward declaration: the route preview lives with the other visual debug
+    -- helpers further down, but driveRoute needs it here
+    local dbgRoute, dbgRouteClear
+
     local function driveRoute(tr, seat, goal, impl)
         local startPos = tr:GetPivot().Position
         local hull = towMargin(tr, impl)
@@ -2082,6 +2086,9 @@ local okBuild, errBuild = pcall(function()
             log(string.format("path: %d point(s) (corners are arcs), %d obstacle part(s) mapped (tool margin %d)",
                 #legs, info, hull))
         end
+        -- draw the route we are about to follow (studs on the real path)
+        dbgRoute(legs, startPos.Y + 0.9)
+        local dbgClock = os.clock()
         local useKeys = driveLegKeys ~= nil
         -- ▸ the HARVESTER never uses the align mover or WASD here either: the
         --   A* path already avoids the obstacles, and the physics drivers
@@ -2182,12 +2189,12 @@ local okBuild, errBuild = pcall(function()
         local deadline = os.clock() + 120
         while os.clock() < deadline do
             pass += 1
-            if stopping() then alignDriveStop(ah) return nil end
+            if stopping() then alignDriveStop(ah) dbgRouteClear() return nil end
             -- ▸ the tank filled ON THE WAY: stop the route here and report
             --   arrival-ish, so the sweep's own check sells before the route
             --   plan wastes seconds driving a full harvester around.
             if driveWatchTick(tr) then
-                if ah then alignDriveStop(ah) end
+                if ah then alignDriveStop(ah) dbgRouteClear() end
                 log("route: stopping here — the harvester is full, selling next")
                 return true, pass
             end
@@ -2200,7 +2207,7 @@ local okBuild, errBuild = pcall(function()
                     alignMark, alignClock = p, os.clock()
                 elseif os.clock() - alignClock > 3 then
                     useAlign = false
-                    alignDriveStop(ah)
+                    alignDriveStop(ah) dbgRouteClear()
                     log("align driver stalled (3 s without progress) — falling back to keys")
                 end
             end
@@ -2209,7 +2216,7 @@ local okBuild, errBuild = pcall(function()
             if os.clock() - lastPlan > 1 then
                 lastPlan = os.clock()
                 local newLegs, n = pathfindAround(p, goal, tr, impl, hull)
-                if stopping() then alignDriveStop(ah) return nil end
+                if stopping() then alignDriveStop(ah) dbgRouteClear() return nil end
                 if newLegs then
                     if info ~= n then
                         log(string.format("re-routed: %d point(s), %d obstacle part(s) mapped", #newLegs, n))
@@ -2220,6 +2227,13 @@ local okBuild, errBuild = pcall(function()
                     -- failed replan the old legs keep their old first point,
                     -- so the cursor must not be reset to it.
                     li = 2
+                    -- redraw the preview at most every 3 s: a full clear and
+                    -- redraw of ~120 studs every second is a visible hitch on
+                    -- mobile, and the path barely moves in one second
+                    if os.clock() - dbgClock > 3 then
+                        dbgRoute(legs, p.Y + 0.9)
+                        dbgClock = os.clock()
+                    end
                 else
                     log("re-plan failed (" .. tostring(n) .. ") — keeping the last path")
                 end
@@ -2241,7 +2255,7 @@ local okBuild, errBuild = pcall(function()
                     if dg <= 12 then
                         log(string.format("route: arrived in %d ticks — worst line error %.1f studs",
                             pass, teleMax))
-                        alignDriveStop(ah)
+                        alignDriveStop(ah) dbgRouteClear()
                         return true, pass
                     end
                 end
@@ -2272,7 +2286,7 @@ local okBuild, errBuild = pcall(function()
                     else
                         local dg = (Vector3.new(p.X, 0, p.Z) - Vector3.new(goal.X, 0, goal.Z)).Magnitude
                         if dg <= 8 then
-                            alignDriveStop(ah)
+                            alignDriveStop(ah) dbgRouteClear()
                             return true, pass
                         end
                     end
@@ -2280,7 +2294,7 @@ local okBuild, errBuild = pcall(function()
                 -- one A* leg per tween: land on the waypoint, the loop then
                 -- advances the cursor exactly as the driven path does
                 local okT = tweenDriveLeg(tr, p, Vector3.new(g[1], p.Y, g[2]), TRAVEL_TWEEN_SPEED)
-                if okT == nil then alignDriveStop(ah) return nil end
+                if okT == nil then alignDriveStop(ah) dbgRouteClear() return nil end
                 local np = tr:GetPivot().Position
                 local dgNow = (Vector3.new(np.X, 0, np.Z) - Vector3.new(goal.X, 0, goal.Z)).Magnitude
                 if li >= #legs and dgNow > 8 then
@@ -2301,14 +2315,14 @@ local okBuild, errBuild = pcall(function()
                     else
                         local dg = (Vector3.new(p.X, 0, p.Z) - Vector3.new(goal.X, 0, goal.Z)).Magnitude
                         if dg <= 8 then
-                            alignDriveStop(ah)
+                            alignDriveStop(ah) dbgRouteClear()
                             return true, pass
                         end
                     end
                 end
                 if useKeys then
                     local res = driveLegKeys(tr, seat, p, Vector3.new(g[1], p.Y, g[2]), 6)
-                    if res == nil then alignDriveStop(ah) return nil end
+                    if res == nil then alignDriveStop(ah) dbgRouteClear() return nil end
                     -- a leg cut short by the harvest watch is not "keys failed"
                     if res == false and not watchHit then
                         useKeys = false
@@ -2321,7 +2335,7 @@ local okBuild, errBuild = pcall(function()
             end
             task.wait(0.12)
         end
-        alignDriveStop(ah)
+        alignDriveStop(ah) dbgRouteClear()
         local p = tr:GetPivot().Position
         local d = (Vector3.new(p.X, 0, p.Z) - Vector3.new(goal.X, 0, goal.Z)).Magnitude
         if d <= 8 then return true, pass end
@@ -3505,6 +3519,56 @@ local okBuild, errBuild = pcall(function()
     local function dbgClear()
         for _, bar in ipairs(dbgParts) do pcall(function() bar:Destroy() end) end
         table.clear(dbgParts)
+    end
+
+    -- ▸ ROUTE PREVIEW: THE REAL PATH, drawn stud by stud (user: "make the
+    --   display studs show the real path instead of the blocky path"). The bars
+    --   above are the sweep rings, which are straight by design; this draws the
+    --   A* route the bot will actually drive — Bézier corner arcs included — as
+    --   small studs every 5 studs of path, so what you see is what it follows.
+    --   Redrawn at most every 3 s on a re-plan, cleared when the drive ends.
+    local routeParts = {}
+    function dbgRouteClear()
+        for _, s in ipairs(routeParts) do pcall(function() s:Destroy() end) end
+        table.clear(routeParts)
+    end
+    function dbgRoute(legs, y)
+        pcall(function()
+            dbgRouteClear()
+            if not legs or #legs < 2 then return end
+            local STEP, MAX = 5, 300
+            local function stud(x, z)
+                if #routeParts >= MAX then return end
+                local s = Instance.new("Part")
+                s.Anchored = true
+                s.CanCollide = false s.CanQuery = false s.CanTouch = false
+                s.CastShadow = false
+                s.Material = Enum.Material.Neon
+                s.Shape = Enum.PartType.Ball
+                s.Size = Vector3.new(0.55, 0.55, 0.55)
+                s.Position = Vector3.new(x, y, z)
+                s.Color = Color3.fromRGB(255, 190, 60)
+                s.Transparency = 0.2
+                s.Parent = workspace
+                routeParts[#routeParts + 1] = s
+            end
+            stud(legs[1][1], legs[1][2])
+            local since = 0
+            for i = 2, #legs do
+                local ax, az = legs[i - 1][1], legs[i - 1][2]
+                local bx, bz = legs[i][1], legs[i][2]
+                local dx, dz = bx - ax, bz - az
+                local len = math.sqrt(dx * dx + dz * dz)
+                if len > 1e-6 then
+                    local d = STEP - since
+                    while d <= len do
+                        stud(ax + dx / len * d, az + dz / len * d)
+                        d += STEP
+                    end
+                    since = len - (d - STEP)
+                end
+            end
+        end)
     end
 
     -- ▸ SELL WHEN FULL (user: "when the harvester is full it will go to
