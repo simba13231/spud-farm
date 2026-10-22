@@ -3510,15 +3510,21 @@ local okBuild, errBuild = pcall(function()
             flat = flat.Magnitude > 0.1 and flat.Unit or dir
             local ang = math.acos(math.clamp(flat:Dot(dir), -1, 1))
             if ang > math.rad(8) then
-                -- TURNING: no W, nose eased onto the row, position untouched
-                stallT = os.clock() -- turning in place is not a stall
+                -- ▸ KEEP GOING THROUGH THE CORNER (user: "instead of making it
+                --   stop at corners just make it keep going on the angle"):
+                --   W stays down and the nose is eased around, so the combine
+                --   swings through the turn instead of stopping, pivoting and
+                --   pulling away. Only the brake zone at the very end of a row
+                --   lifts off W.
+                stallT = os.clock() -- turning is not a stall
                 turnSince = turnSince or os.clock()
-                if os.clock() - turnSince > 4 then
-                    log("harvester: can't get the nose onto this row (4 s) — finishing it with the tween")
+                if os.clock() - turnSince > 6 then
+                    log("harvester: can't swing onto this row (6 s) — finishing it with the tween")
                     releaseDriveKeys()
                     return "jammed"
                 end
-                local step = math.min(ang, math.rad(90) * 0.1)
+                setKey(KEY_W, remaining > BRAKE)
+                local step = math.min(ang, math.rad(120) * 0.1)
                 local axis = flat:Cross(dir)
                 local signed = CFrame.fromAxisAngle(Vector3.yAxis,
                     (axis.Y >= 0 and 1 or -1) * step)
@@ -4243,8 +4249,11 @@ local okBuild, errBuild = pcall(function()
         -- the trailing plow still covers the edge cells
         -- ▸ the HARVESTER gets NO run-out: it turns in place between rows, and
         --   driving 12 studs past the plot is exactly the user's "it goes past
-        --   the specified field" — straight through the fence.
-        local runOut = job.selfPropelled and 0 or 12
+        --   the specified field" — straight through the fence. It now keeps
+        --   rolling through the corners (user: "keep going on the angle"), so
+        --   the rows end 4 studs INSIDE the plot: that is the room the swing
+        --   needs, and the end cells are still entered by the blade.
+        local runOut = job.selfPropelled and -4 or 12
         local driveHalf = (alongX and baseSize.X or baseSize.Z) / 2 + runOut
         local rowSpan   = (alongX and baseSize.Z or baseSize.X)
         -- THE SPIRAL (user's drawing): concentric rectangular laps from
