@@ -3876,6 +3876,38 @@ local okBuild, errBuild = pcall(function()
         return false
     end
 
+    -- ▸ STRAIGHT HOP (user: "it went to the right spot and sold, just make it
+    --   tween or tp there bro"). The sell trip no longer pathfinds: the
+    --   harvester is self-propelled and tweened anyway, so it is one smooth
+    --   PivotTo slide along the straight line — fast enough to read as a
+    --   teleport, still smooth — keeping the heading it had, and it lands on
+    --   the pad's own height instead of the field's.
+    local SELL_HOP_SPEED = 220 -- studs/s
+    local function hopTo(tr, target, speed)
+        speed = speed or SELL_HOP_SPEED
+        local cf = tr:GetPivot()
+        local from = cf.Position
+        local to = Vector3.new(target.X, from.Y, target.Z) -- flat hop: same as the field tween, no hopping into the air
+        local rot = cf - cf.Position -- heading only, zero position
+        local flat = Vector3.new(to.X - from.X, 0, to.Z - from.Z)
+        local dist = flat.Magnitude
+        if dist < 1 then
+            tr:PivotTo(CFrame.new(to) * rot)
+            return true
+        end
+        local dir = flat / dist
+        local travelled, tick = 0, 0.1
+        while travelled < dist do
+            if stopping() then return nil end
+            travelled = math.min(dist, travelled + speed * tick)
+            local p = from + dir * travelled
+            tr:PivotTo(CFrame.new(p) * rot)
+            task.wait(tick)
+        end
+        tr:PivotTo(CFrame.new(to) * rot)
+        return true
+    end
+
     -- the whole trip: drive to a pad, sell, drive back to the field
     local function sellHarvester(ride, seat, field)
         local cur, max = harvesterLoad(ride)
@@ -3894,11 +3926,11 @@ local okBuild, errBuild = pcall(function()
         sellingNow = true
         for i, s in ipairs(spots) do
             if stopping() then sellingNow = false return false end
-            log(string.format("sell point %d/%d: %s at (%.0f, %.0f)", i, #spots,
+            log(string.format("sell point %d/%d: %s at (%.0f, %.0f) — straight hop, no pathfinding", i, #spots,
                 s.what, s.p.X, s.p.Z))
-            local ok, why = driveRoute(ride, seat, s.p, ride)
+            local ok = hopTo(ride, s.p, SELL_HOP_SPEED)
             if not ok then
-                log("couldn't reach " .. s.what .. " (" .. tostring(why) .. ")")
+                log("couldn't hop to " .. s.what .. " (hop interrupted)")
             elseif trySellAt(ride, s.what) then
                 if field and field.Parent then
                     log("back to " .. field.Name .. " to finish the harvest")
