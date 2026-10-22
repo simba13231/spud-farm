@@ -1855,15 +1855,21 @@ local okBuild, errBuild = pcall(function()
         pos.MaxForce = Vector3.new(mass * 30, 0, mass * 30) -- horizontal only
         pos.ApplyAtCenterOfMass = true -- no stray tipping torque
         pos.MaxVelocity = ALIGN_MAXVEL
-        pos.Responsiveness = 30
+        -- ▸ RESPONSIVENESS IS THE TWITCH KNOB (user: "it's twitching the wheels
+        --   a lot when working on the field"). At 30 the servo was stiff enough
+        --   to answer every physics jolt of the soil in one tick, and the whole
+        --   chassis buzzed. 12 still reaches the top speed instantly (the
+        --   velocity clamp does that) but rides out the bumps. Raise it toward
+        --   20 only if the line starts lagging; lower it toward 6 if it buzzes.
+        pos.Responsiveness = 12
         pos.Parent = part
         local ori = Instance.new("AlignOrientation")
         ori.Name = "SpudAlignOri"
         ori.Mode = Enum.OrientationAlignmentMode.OneAttachment
         ori.Attachment0 = a0
-        ori.MaxTorque = mass * 10
+        ori.MaxTorque = mass * 6
         ori.MaxAngularVelocity = math.rad(ALIGN_YAW * 1.5)
-        ori.Responsiveness = 20
+        ori.Responsiveness = 8
         ori.Parent = part
         -- start the targets where the tractor IS, or the first physics step
         -- would yank it toward the world origin. Heading is carried as a
@@ -1909,14 +1915,28 @@ local okBuild, errBuild = pcall(function()
         local dist = want.Magnitude
         if dist < 0.5 then return 0 end
         want = want / dist
+        -- ▸ SMOOTH THE AIM, DON'T CHASE NOISE (user: "it's twitching the wheels
+        --   a lot when working on the field"). The aim point sits ~14 studs
+        --   ahead, so a 0.25-stud jolt in position is a whole degree of heading
+        --   — and re-aiming at that on every tick made the front wheels visibly
+        --   vibrate. The aim direction is now low-passed, and a change under
+        --   ~0.8° is ignored outright: that is physics noise, not steering.
+        local prev = h.aim
+        if prev then
+            if prev:Dot(want) > 0.9999 then want = prev end
+            h.aim = (prev * 0.75 + want * 0.25).Unit
+        else
+            h.aim = want
+        end
+        want = h.aim
         local ang = math.acos(math.clamp(h.dir:Dot(want), -1, 1))
         if ang > 1e-4 then
             local t = math.min(1, math.rad(ALIGN_YAW) * (dt or 0.12) / ang)
             h.dir = (h.dir * (1 - t) + want * t).Unit
         end
         -- creep while the nose is still turning (the key driver's rule)
-        h.pos.MaxVelocity = math.clamp(ALIGN_MAXVEL * (1 - ang / 1.6),
-            ALIGN_MAXVEL * 0.15, ALIGN_MAXVEL)
+        local cap = h.cap or ALIGN_MAXVEL
+        h.pos.MaxVelocity = math.clamp(cap * (1 - ang / 1.6), cap * 0.2, cap)
         h.ori.CFrame = CFrame.lookAt(Vector3.zero, h.dir)
         local goal = p + h.dir * math.clamp(dist, 2, ALIGN_AIM)
         h.pos.Position = Vector3.new(goal.X, p.Y, goal.Z)
@@ -1932,7 +1952,13 @@ local okBuild, errBuild = pcall(function()
         if legLen < 0.5 then return end
         local dir = leg / legLen
         local along = (Vector3.new(p.X, 0, p.Z) - A):Dot(dir)
-        local aim = A + dir * math.clamp(along + ALIGN_AIM, 0, legLen)
+        -- ▸ the aim is NEVER clamped onto the leg end: pinning it there made the
+        --   aim point collapse onto the tractor over the last 14 studs, and the
+        --   moment it drifted past the end the "steer to the aim" angle flipped
+        --   toward 180° — a visible wiggle/twitch right where a row ends. It
+        --   now runs past the end (and never behind the leg start), so the
+        --   heading target stays steady all the way in.
+        local aim = A + dir * math.max(along + ALIGN_AIM, ALIGN_AIM)
         alignDriveAim(h, tr, aim.X, aim.Z, dt)
     end
 
@@ -1944,7 +1970,7 @@ local okBuild, errBuild = pcall(function()
     --   drives this leg with keys), nil = user stopped. `stats` collects how
     --   far off the line it got and how often it crossed it, so a run says
     --   whether it really held the line.
-    local function alignDriveLeg(tr, from, goal, tol, stats)
+    local function alignDriveLeg(tr, from, goal, tol, stats, speed)
         local A = Vector3.new(from.X, 0, from.Z)
         local B = Vector3.new(goal.X, 0, goal.Z)
         local leg = B - A
@@ -1954,6 +1980,14 @@ local okBuild, errBuild = pcall(function()
         local perp = Vector3.new(-dir.Z, 0, dir.X)
         local h = alignDriveStart(tr)
         if not h then return false end
+        -- ▸ FIELD LEGS RUN AT THE SWATH SPEED, not the travel speed (user: "it's
+        --   twitching the wheels a lot when working on the field"). The mover
+        --   was allowed its full 24 studs/s travel speed with a plow in the
+        --   dirt — 2.4× the harvester's swath speed — so the implement snagged
+        --   the soil, the chassis hopped and the front wheels buzzed. A leg now
+        --   uses the caller's speed (10 studs/s for passes); travel legs still
+        --   use ALIGN_MAXVEL.
+        h.cap = speed or ALIGN_MAXVEL
         local mark, markT = tr:GetPivot().Position, os.clock()
         local deadline = os.clock() + 8 + legLen / 6
         local t0 = os.clock()
@@ -2070,8 +2104,8 @@ local okBuild, errBuild = pcall(function()
         end
         local useAlign = ah ~= nil
         if useAlign then
-            log(string.format("route: ALIGN driver on (mass %.0f, maxvel %d, aim %d) — physics follows the line",
-                ah.mass, ALIGN_MAXVEL, ALIGN_AIM))
+            log(string.format("route: ALIGN driver on (mass %.0f, maxvel %d, aim %d, resp %d/%d) — physics follows the line",
+                ah.mass, ALIGN_MAXVEL, ALIGN_AIM, ah.pos.Responsiveness, ah.ori.Responsiveness))
         elseif not isHarvestRide then
             log("route: align driver unavailable (" .. tostring(alignWhy) .. ") — driving with keys")
         end
@@ -2100,7 +2134,17 @@ local okBuild, errBuild = pcall(function()
         local function pointAt(s)
             local last = #legs
             if last < 2 or s <= 0 then return legs[1][1], legs[1][2] end
-            if s >= cum[last] then return legs[last][1], legs[last][2] end
+            if s >= cum[last] then
+                -- keep the aim moving past the goal (up to 30 studs) instead of
+                -- parking it on the final point: a collapsed aim is a twitch
+                local ax, az = legs[last - 1][1], legs[last - 1][2]
+                local bx, bz = legs[last][1], legs[last][2]
+                local dx, dz = bx - ax, bz - az
+                local l = math.sqrt(dx * dx + dz * dz)
+                if l < 1e-3 then return bx, bz end
+                local over = math.min(s - cum[last], 30)
+                return bx + dx / l * over, bz + dz / l * over
+            end
             local lo, hi = 1, last
             while hi - lo > 1 do
                 local mid = math.floor((lo + hi) / 2)
@@ -3877,7 +3921,7 @@ local okBuild, errBuild = pcall(function()
             -- the next ring would get cut otherwise)
             tol = math.min(tol or 7, (goal - from).Magnitude * 0.5)
             if useAlign then
-                local res = alignDriveLeg(tr, from, goal, tol, lineStats)
+                local res = alignDriveLeg(tr, from, goal, tol, lineStats, HARVEST_TWEEN_SPEED)
                 if res == nil then return nil end
                 if res then
                     task.wait(0.05)
