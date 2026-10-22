@@ -6,7 +6,7 @@
 
 local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/releases/latest/download/Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.3 · fluent gui"
+local VERSION    = "rebuild v1.4 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -50,6 +50,9 @@ local okBuild, errBuild = pcall(function()
 
     local Tabs = {
         Home     = Window:CreateTab({ Title = "Home", Icon = "house" }),
+        -- ▸ its own tab, second from the left: the report is a diagnostic, not
+        --   a farm control, and it must be findable in one look
+        Doctor   = Window:CreateTab({ Title = "Doctor", Icon = "stethoscope" }),
         Farm     = Window:CreateTab({ Title = "Farm", Icon = "wheat" }),
         Player   = Window:CreateTab({ Title = "Player", Icon = "user" }),
         Console  = Window:CreateTab({ Title = "Console", Icon = "terminal" }),
@@ -4484,7 +4487,7 @@ local okBuild, errBuild = pcall(function()
     local doctorReport
     local doctorPara
     local okPanel, errPanel = pcall(function()
-        doctorPara = Tabs.Farm:CreateParagraph("DoctorReport", {
+        doctorPara = Tabs.Doctor:CreateParagraph("DoctorReport", {
             Title = "Diagnostics",
             Content = "not run yet",
         })
@@ -4640,7 +4643,7 @@ local okBuild, errBuild = pcall(function()
     end
 
     local okBtn, errBtn = pcall(function()
-        Tabs.Farm:CreateButton({
+        Tabs.Doctor:CreateButton({
             Title = "🩺 Doctor report (read-only)",
             Callback = function()
                 if genv and genv.spudDoctor then return genv.spudDoctor() end
@@ -4770,7 +4773,7 @@ local okBuild, errBuild = pcall(function()
     })
     log("loaded — " .. VERSION)
     log("GUI: Fluent Renewed · RIGHT SHIFT hides the window")
-    log("🩺 doctor: FARM tab, the 🩺 Doctor report button (read-only)")
+    log("🩺 doctor: its own DOCTOR tab (2nd tab) — or run spudDoctor() in the executor")
 
     -- FIELD WATCH (user request): scan at launch and re-scan every 15
     -- minutes so newly placed fields get discovered. The farming loop

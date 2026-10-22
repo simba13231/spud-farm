@@ -140,12 +140,12 @@ workspace = {
 }
 
 local PARAVAL = nil
-Tabs = { Farm = {} }
-function Tabs.Farm.CreateParagraph(self, name, opts)
+Tabs = { Doctor = {} }
+function Tabs.Doctor.CreateParagraph(self, name, opts)
   return { SetValue = function(_, v) PARAVAL = v end }
 end
 local BTN = nil
-function Tabs.Farm.CreateButton(self, opts) BTN = opts end
+function Tabs.Doctor.CreateButton(self, opts) BTN = opts end
 
 local LOGS = {}
 log = function(s) LOGS[#LOGS + 1] = tostring(s) end
