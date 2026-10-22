@@ -3162,65 +3162,120 @@ local okBuild, errBuild = pcall(function()
         return cur, max
     end
 
-    -- the sell pads, found live and never hardcoded (same rule as the shop):
-    -- the GameplayVisuals.SellArea pad first, then the store DropOff parts.
-    -- Every candidate is logged, so the first run names the real one.
-    local function findSellSpots()
-        local out = {}
-        local function add(p, what)
-            if not p then return end
-            for _, q in ipairs(out) do
-                if (q.p - p).Magnitude < 12 then return end
+    -- ▸ THE SELL PAD FOR CROPS. The harvester sells at FARMCO, so the right
+    --   pad is the one at FarmCo — not whichever part of
+    --   GameplayVisuals.SellArea happens to be biggest or highest (the world
+    --   has three sell stores: FarmCo crops, AnimalCo animals, LumberCo
+    --   logs). That is how the trip ended up at the wrong spot. Ranking:
+    --   1) is it at the CROP store at all (nearest store anchor), 2) how
+    --   close to the FarmCo waypoint, 3) a name match (sell/pad/platform/
+    --   drop/load/ramp), 4) higher = the elevated platform. Every candidate
+    --   is logged with its distance, so a wrong pick is visible instead of
+    --   guessed at.
+    local STORE_MARKERS = { "FarmCo", "AnimalCo", "LumberStore", "LumberCo" }
+    local function storeAnchors()
+        local a = {}
+        pcall(function()
+            local markers = workspace:FindFirstChild("Markers")
+            local gotos = markers and markers:FindFirstChild("GotoLocations")
+            if not gotos then return end
+            for _, nm in ipairs(STORE_MARKERS) do
+                local g = gotos:FindFirstChild(nm)
+                if g and g:IsA("BasePart") then a[nm] = g.Position end
             end
-            out[#out + 1] = { p = p, what = what }
+        end)
+        return a
+    end
+
+    local function findSellSpots()
+        local anchors = storeAnchors()
+        local farm = anchors.FarmCo
+        local cands = {}
+        local function consider(d, what)
+            if not (d and d:IsA("BasePart")) then return end
+            local n = d.Name:lower()
+            local named = n:find("sell", 1, true) or n:find("platform", 1, true)
+                or n:find("pad", 1, true) or n:find("drop", 1, true)
+                or n:find("load", 1, true) or n:find("ramp", 1, true)
+            -- aim at the pad's TOP surface: a platform's centre can sit
+            -- below the deck the vehicle has to be standing on
+            local top = d.Position + Vector3.new(0, d.Size.Y / 2, 0)
+            local nearest, nd = nil, nil
+            for nm, ap in pairs(anchors) do
+                local dd = (top - ap).Magnitude
+                if not nd or dd < nd then nearest, nd = nm, dd end
+            end
+            cands[#cands + 1] = {
+                p = top, what = what, named = named and true or false,
+                store = nearest, dist = farm and (top - farm).Magnitude or 1e9,
+                y = top.Y, area = d.Size.X * d.Size.Z,
+            }
         end
         pcall(function()
             local gv = workspace:FindFirstChild("GameplayVisuals")
             local sa = gv and gv:FindFirstChild("SellArea")
             if not sa then return end
-            -- ▸ THE PAD IS THE RAISED ONE (README: "drive onto the elevated
-            --   platform"). Picking simply the BIGGEST part in the folder can
-            --   land on the ground-level trigger, and then the trip parks
-            --   somewhere that never opens the sell menu. Score by NAME
-            --   first (platform/pad/ramp/load/sell), then by how HIGH the
-            --   part sits, then by area — and log what was in there.
-            local best, bestScore, seen = nil, nil, {}
             for _, d in ipairs(sa:GetDescendants()) do
-                if d:IsA("BasePart") then
-                    local n = d.Name:lower()
-                    local named = n:find("platform", 1, true) or n:find("pad", 1, true)
-                        or n:find("ramp", 1, true) or n:find("load", 1, true)
-                        or n:find("sell", 1, true)
-                    local a = d.Size.X * d.Size.Z
-                    local score = (named and 1e9 or 0) + d.Position.Y * 100 + a
-                    if #seen < 10 then
-                        seen[#seen + 1] = string.format("%s (y=%.0f, area=%.0f%s)",
-                            d.Name, d.Position.Y, a, named and ", named" or "")
-                    end
-                    if not bestScore or score > bestScore then best, bestScore = d, score end
-                end
-            end
-            if best then
-                add(best.Position, "SellArea." .. best.Name)
-                log("sell pad candidates: " .. table.concat(seen, " · "))
-                log(string.format("sell pad picked: %s at (%.0f, %.0f, %.0f)",
-                    best.Name, best.Position.X, best.Position.Y, best.Position.Z))
+                consider(d, "SellArea." .. d.Name)
             end
         end)
         pcall(function()
             local stores = workspace:FindFirstChild("Stores")
             local dr = stores and stores:FindFirstChild("DropOffs")
             if not dr then return end
-            local ps = {}
-            for _, d in ipairs(dr:GetChildren()) do
-                if d:IsA("BasePart") then ps[#ps + 1] = d end
-            end
-            -- biggest first: the drive-on pads are the big ones
-            table.sort(ps, function(a, b) return a.Size.X * a.Size.Z > b.Size.X * b.Size.Z end)
-            for i = 1, math.min(#ps, 2) do
-                add(ps[i].Position, "DropOffs." .. ps[i].Name)
+            for _, d in ipairs(dr:GetChildren()) do consider(d, "DropOffs." .. d.Name) end
+        end)
+        -- the crop store's own markers are pads too (a parking-lot style Pad)
+        pcall(function()
+            local stores = workspace:FindFirstChild("Stores")
+            local am = stores and stores:FindFirstChild("AreaMarkers")
+            if not am then return end
+            for _, d in ipairs(am:GetChildren()) do
+                local n = d.Name:lower()
+                if n:find("farmco", 1, true) then
+                    consider(d, "AreaMarkers." .. d.Name)
+                end
             end
         end)
+        if #cands == 0 then return {} end
+        -- only pads whose NEAREST store is the crop store; if that filter
+        -- empties the list, keep everything rather than refusing to sell
+        local atFarm = {}
+        for _, c in ipairs(cands) do
+            if c.store == nil or c.store == "FarmCo" then
+                atFarm[#atFarm + 1] = c
+            end
+        end
+        local pool = #atFarm > 0 and atFarm or cands
+        table.sort(pool, function(a, b)
+            -- 40-stud buckets, so tiny differences don't reorder the list
+            local ad, bd = math.floor(a.dist / 40), math.floor(b.dist / 40)
+            if ad ~= bd then return ad < bd end
+            if a.named ~= b.named then return a.named end
+            if math.abs(a.y - b.y) > 5 then return a.y > b.y end
+            return a.area > b.area
+        end)
+        local out, lines = {}, {}
+        for _, c in ipairs(pool) do
+            if #lines < 10 then
+                lines[#lines + 1] = string.format("%s @(%.0f,%.0f,%.0f) %.0f studs from FarmCo, y=%.0f%s",
+                    c.what, c.p.X, c.p.Y, c.p.Z, c.dist, c.y,
+                    c.named and ", named" or "")
+            end
+            if #out < 4 then
+                local near = false
+                for _, q in ipairs(out) do
+                    if (q.p - c.p).Magnitude < 25 then near = true break end
+                end
+                if not near then out[#out + 1] = { p = c.p, what = c.what } end
+            end
+        end
+        log(string.format("sell pads: %d candidate(s), %d at the crop store — nearest FarmCo first: %s",
+            #cands, #atFarm, table.concat(lines, " · ")))
+        if out[1] then
+            log(string.format("sell pad picked: %s at (%.0f, %.0f, %.0f)",
+                out[1].what, out[1].p.X, out[1].p.Y, out[1].p.Z))
+        end
         return out
     end
 
