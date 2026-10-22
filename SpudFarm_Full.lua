@@ -696,6 +696,45 @@ local okBuild, errBuild = pcall(function()
         return res and true or false
     end
 
+    -- ▸ RESPAWN A TOOL, WITH RETRIES (user: "it's not retrying 5 times").
+    --   ONE Spawn click used to be the whole story, and it was judged by
+    --   "is it close to the player" — but a respawn always lands in front of
+    --   YOUR PLOT, so a player who is not standing at their own farm could
+    --   never see that test pass even when the spawn worked. The test is now
+    --   the MODEL MOVING: a stored / desynced vehicle sits in the void at
+    --   tens of thousands of studs (the dump showed ~±100k), so any real
+    --   move of a few hundred studs means it came out. Up to 5 attempts.
+    --   Returns the new position, or nil after every attempt failed.
+    local function respawnTool(name, getPos, attempts)
+        attempts = attempts or 5
+        local p0 = getPos()
+        for i = 1, attempts do
+            if stopping() then return nil end
+            log(string.format("respawn %s: attempt %d/%d (Equipment Manager → Spawn)",
+                name, i, attempts))
+            managerAction(name, "Spawn")
+            if stopping() then return nil end
+            for _ = 1, 16 do -- ~8 s for THIS attempt to land
+                if stopping() then return nil end
+                local p1 = getPos()
+                if p1 and (not p0 or (p1 - p0).Magnitude > 200) then
+                    log(string.format("✅ %s respawned — it moved %s", name,
+                        p0 and string.format("%.0f studs", (p1 - p0).Magnitude) or "into the world"))
+                    return p1
+                end
+                task.wait(0.5)
+            end
+            local p1 = getPos()
+            log(string.format("respawn %s: attempt %d didn't move it (%s)", name, i,
+                (p1 and p0) and string.format("still %.0f studs from where it was", (p1 - p0).Magnitude)
+                    or "position unreadable"))
+            p0 = p1 or p0
+        end
+        log(string.format("⚠ %s didn't respawn after %d attempts — spawn it once by hand from the Equipment Manager, then start the loop",
+            name, attempts))
+        return nil
+    end
+
     -- ▸ SAFETY FOR EVERY TOOL (user: "make it do that for every tool
     --   now"): the exact rule the tractor gate uses, applied to each
     --   implement — farther than RESPAWN_RANGE (or sitting IN STORAGE,
@@ -722,40 +761,25 @@ local okBuild, errBuild = pcall(function()
             stored and "IN STORAGE"
                 or string.format("%.0f studs away (>%d)", dist, RESPAWN_RANGE)))
         setStage("Equipment Manager: respawning " .. impl.Name)
-        local respawned = managerAction(impl.Name)
-        if respawned == false then
-            log(string.format("equipment manager: the respawn for %s failed — see the lines above for why", impl.Name))
+        local moved = respawnTool(impl.Name, function()
+            local i2 = findImplement(typeName, tr:GetPivot().Position, tr)
+            return i2 and i2:GetPivot().Position or nil
+        end, 5)
+        if not moved then
+            log(string.format("respawn didn't bring the %s back — skipping this pass", verb))
+            return nil
         end
-        setStage("waiting for " .. impl.Name .. " to come back out of the Equipment Manager")
-        for i = 1, 30 do -- ~15 s for the respawn to land
-            if stopping() then return nil end
-            local impl2, dist2, basis2 =
-                findImplement(typeName, tr:GetPivot().Position, tr)
-            if impl2 and not impl2:GetAttribute("InStorage")
-                and dist2 and dist2 <= RESPAWN_RANGE then
-                log(string.format("✅ %s respawned — %.0f studs away now",
-                    impl2.Name, dist2))
-                return impl2, dist2, basis2
+        setStage("waiting for " .. impl.Name .. " to be usable")
+        local impl2, dist2, basis2 =
+            findImplement(typeName, tr:GetPivot().Position, tr)
+        if impl2 then
+            log(string.format("✅ %s is out — %.0f studs away now", impl2.Name, dist2 or 0))
+            if dist2 and dist2 > RESPAWN_RANGE then
+                log(string.format("⚠ it spawned %.0f studs from the tractor (>%d) — hitching may still fail from here",
+                    dist2, RESPAWN_RANGE))
             end
-            -- say so once, halfway: a respawn that never lands used to look
-            -- like the run silently stopping right after the manager closed
-            if i == 10 then
-                log(string.format("still waiting for %s to come out (%s)…",
-                    impl.Name,
-                    impl2 and (impl2:GetAttribute("InStorage")
-                        and "it still reads in storage"
-                        or string.format("%.0f studs away", dist2 or 0))
-                        or "it isn't in the folder"))
-            end
-            task.wait(0.5)
         end
-        local impl2, dist2 = findImplement(typeName, tr:GetPivot().Position, tr)
-        log(string.format("respawn didn't bring the %s back (%s) — skipping this pass",
-            verb,
-            impl2 and (impl2:GetAttribute("InStorage") and "still in storage"
-                or string.format("still %.0f studs away", dist2 or 0))
-                or "it's gone"))
-        return nil
+        return impl2, dist2, basis2
     end
 
     -- VFly-style vehicle glide: ease-out CFrame steps facing the direction
@@ -3849,25 +3873,21 @@ local okBuild, errBuild = pcall(function()
         if dist and dist > RESPAWN_RANGE then
             log(string.format("tractor is %.0f studs away (>%d) — respawning it via the Equipment Manager",
                 dist, RESPAWN_RANGE))
-            managerAction(tr.Name)
-            local back = false
-            for _ = 1, 30 do -- ~15 s for the respawn to land
-                if stopping() then return end
-                local tr2, dist2, seat2 = findTractor()
-                if tr2 and dist2 and dist2 <= RESPAWN_RANGE then
-                    tr, dist, seat = tr2, dist2, seat2
-                    back = true
-                    break
-                end
-                task.wait(0.5)
-            end
-            if not back then
-                local tr2, dist2 = findTractor()
-                log(string.format("respawn didn't bring the tractor back (%s) — are you far from the farm? not walking that",
-                    tr2 and string.format("still %.0f studs away", dist2) or "it's gone"))
+            setStage("Equipment Manager: respawning " .. tr.Name)
+            local moved = respawnTool(tr.Name, function()
+                local t2 = findTractor()
+                return t2 and t2:GetPivot().Position or nil
+            end, 5)
+            if not moved then
+                log("respawn didn't bring the tractor back after 5 attempts — not walking 18k studs; spawn it once by hand and start the loop again")
                 return
             end
-            log(string.format("✅ tractor respawned — %.0f studs away now", dist))
+            local tr2, dist2, seat2 = findTractor()
+            if tr2 then tr, dist, seat = tr2, dist2 or dist, seat2 end
+            log(string.format("✅ tractor is out — %.0f studs away now%s", dist or 0,
+                (dist and dist > RESPAWN_RANGE)
+                    and " (it spawned at your plot, not next to you — the route drives from here)"
+                    or ""))
         end
 
         -- ▸ THE SEEDER, FIRST THING — REPORT ONLY. This used to BUY here, so
