@@ -143,6 +143,38 @@ local okBuild, errBuild = pcall(function()
         return coroutine.running() ~= loopThread
     end
 
+    -- ▸ THE 1-SECOND HARVEST WATCH (user: "check every second when it's in the
+    --   harvester to check if it's full and then sell"). Every field-drive
+    --   loop calls this on each step; it reads the game's own
+    --   Capacity/MaxCapacity at most once a second, and ONLY for a vehicle
+    --   whose EquipmentType is Harvester, so no other pass pays anything.
+    --   When it fires, the leg stops where it is and the sweep sells before
+    --   doing anything else. sellingNow mutes it during the sell trip itself
+    --   (the tank is still full while driving to the pad).
+    local watchLast, watchHit, sellingNow = 0, false, false
+    local function driveWatchTick(tr)
+        if watchHit then return true end
+        if sellingNow or not tr then return false end
+        if os.clock() - watchLast < 1 then return false end
+        watchLast = os.clock()
+        local okType, etype = pcall(function() return tr:GetAttribute("EquipmentType") end)
+        if not (okType and etype == "Harvester") then return false end
+        local ok, cur, max = pcall(function()
+            local conf = tr:FindFirstChild("Configurations")
+            if not conf then return nil end
+            local c = conf:FindFirstChild("Capacity")
+            local m = conf:FindFirstChild("MaxCapacity")
+            return (c and c:IsA("IntValue")) and c.Value or nil,
+                (m and m:IsA("IntValue")) and m.Value or nil
+        end)
+        if ok and cur and max and max > 0 and cur >= max then
+            watchHit = true
+            log(string.format("harvester hit capacity (%d/%d) while driving — stopping this leg to sell",
+                cur, max))
+        end
+        return watchHit
+    end
+
     -- ▸ AUTO-FARM STEP 2: movement (Tween = fly-over ARC — up, across at
     --   altitude, down onto the target; the player carries nothing so
     --   nothing smashes. VFly = legacy BodyVelocity steps.)
@@ -737,6 +769,7 @@ local okBuild, errBuild = pcall(function()
         local steps = math.clamp(math.floor(flat.Magnitude / 1.5), 3, 40)
         for i = 1, steps do
             if stopping() then return end
+            if driveWatchTick(tr) then return end
             local t = i / steps
             local ease = 1 - (1 - t) * (1 - t) -- ease-out: quick start, soft landing
             local p = Vector3.new(pos.X, y, pos.Z) + flat * ease
@@ -1769,6 +1802,8 @@ local okBuild, errBuild = pcall(function()
         local ok, prevSide = false, nil
         while os.clock() < deadline do
             if stopping() then alignDriveStop(h) return nil end
+            -- the 1-second harvest watch: a full tank stops the leg here
+            if driveWatchTick(tr) then break end
             local p = tr:GetPivot().Position
             local rel = Vector3.new(p.X, 0, p.Z) - A
             local cross = rel:Dot(perp)
@@ -1874,6 +1909,14 @@ local okBuild, errBuild = pcall(function()
         while os.clock() < deadline do
             pass += 1
             if stopping() then alignDriveStop(ah) return nil end
+            -- ▸ the tank filled ON THE WAY: stop the route here and report
+            --   arrival-ish, so the sweep's own check sells before the route
+            --   plan wastes seconds driving a full harvester around.
+            if driveWatchTick(tr) then
+                if ah then alignDriveStop(ah) end
+                log("route: stopping here — the harvester is full, selling next")
+                return true, pass
+            end
             local p = tr:GetPivot().Position
             -- stuck probe: 3 s without 3 studs of progress = the constraint is
             -- losing to the game's controller (or we are jammed) — hand back
@@ -1954,7 +1997,8 @@ local okBuild, errBuild = pcall(function()
             elseif useKeys then
                 local res = driveLegKeys(tr, seat, p, Vector3.new(g[1], p.Y, g[2]), 6)
                 if res == nil then alignDriveStop(ah) return nil end
-                if res == false then
+                -- a leg cut short by the harvest watch is not "keys failed"
+                if res == false and not watchHit then
                     useKeys = false
                     log("keys didn't drive to the field — falling back to glide")
                 end
@@ -3021,6 +3065,7 @@ local okBuild, errBuild = pcall(function()
         local prevPos, fwd = startPos, nil
         for tick = 1, 350 do -- ~42 s cap per leg (0.12 s ticks)
             if stopping() then releaseDriveKeys() return nil end
+            if driveWatchTick(tr) then releaseDriveKeys() return false end
             local pos = tr:GetPivot().Position
             local rel = Vector3.new(pos.X, 0, pos.Z) - A
             local along, cross = rel:Dot(dir), rel:Dot(perp)
@@ -3388,8 +3433,11 @@ local okBuild, errBuild = pcall(function()
             log("⚠ no sell pad found (GameplayVisuals.SellArea / Stores.DropOffs) — sell skipped")
             return false
         end
+        -- the 1-second watch is muted for the whole trip: the tank is STILL
+        -- full while driving to the pad, and it must not abort that drive
+        sellingNow = true
         for i, s in ipairs(spots) do
-            if stopping() then return false end
+            if stopping() then sellingNow = false return false end
             log(string.format("sell point %d/%d: %s at (%.0f, %.0f)", i, #spots,
                 s.what, s.p.X, s.p.Z))
             local ok, why = driveRoute(ride, seat, s.p, ride)
@@ -3400,9 +3448,12 @@ local okBuild, errBuild = pcall(function()
                     log("back to " .. field.Name .. " to finish the harvest")
                     driveToField(ride, field, seat, ride)
                 end
+                sellingNow = false
+                watchHit = false
                 return true
             end
         end
+        sellingNow = false
         log("⚠ still full — none of the pads sold the load (the log above says which pad was tried and whether its sell menu opened; if it stayed closed, do the trip once by hand — Q then E — and tell me where the vehicle was parked)")
         return false
     end
@@ -3477,7 +3528,9 @@ local okBuild, errBuild = pcall(function()
             if realDrive ~= false then
                 local res = driveLegKeys(tr, seat, from, goal, tol)
                 if res == nil then return nil end
-                if realDrive == nil then
+                -- a leg stopped by the harvest watch says nothing about
+                -- whether the keys work — never flip the driver on that
+                if realDrive == nil and not watchHit then
                     realDrive = res == true
                     if realDrive then
                         log("real driving ON (held WASD — true physics)")
@@ -3492,6 +3545,7 @@ local okBuild, errBuild = pcall(function()
         end
         -- precompute the whole spiral ONCE, then just FOLLOW the list
         local at = tr:GetPivot().Position
+        watchHit = false -- a fresh sweep starts with a clear 1-second watch
         -- ▸ the tank can already be full on arrival (it filled on the way in)
         if job.selfPropelled and sellTries < 6 then
             local tried, sold = harvestSellIfFull(tr, seat, field, "on arrival")
@@ -3536,9 +3590,22 @@ local okBuild, errBuild = pcall(function()
                 if tried then sellTries += 1 end
                 if sold then at = tr:GetPivot().Position end
             end
-            if not doLeg(at, leg[1], leg[2]) then dbgClear() return nil end
-            at = leg[1]
-            if leg[3] then log(string.format("ring %d/%d done", leg[3], rings)) end
+            local okLeg = doLeg(at, leg[1], leg[2])
+            if job.selfPropelled and watchHit then
+                -- ▸ the tank filled DURING this leg (the 1-second watch
+                --   stopped it where it was): sell now, then carry on with
+                --   the spiral from the vehicle's real position. The cell
+                --   strip this leg didn't finish is the touch-up's job.
+                watchHit = false
+                sellTries += 1
+                harvestSellIfFull(tr, seat, field, "mid leg " .. i)
+                at = tr:GetPivot().Position
+            elseif not okLeg then
+                dbgClear() return nil
+            else
+                at = leg[1]
+                if leg[3] then log(string.format("ring %d/%d done", leg[3], rings)) end
+            end
         end
         dbgClear()
         if stopping() then return nil end
@@ -3583,8 +3650,17 @@ local okBuild, errBuild = pcall(function()
             local through = 0
             for i, r in ipairs(route) do
                 dbgLeg(i)
-                if not doLeg(at, r.goal, 6) then dbgClear() return nil end
-                at = r.goal
+                local okLeg = doLeg(at, r.goal, 6)
+                if job.selfPropelled and watchHit then
+                    watchHit = false
+                    sellTries += 1
+                    harvestSellIfFull(tr, seat, field, "mid touch-up")
+                    at = tr:GetPivot().Position
+                elseif not okLeg then
+                    dbgClear() return nil
+                else
+                    at = r.goal
+                end
                 if r.kind == "through" then
                     through += 1
                     log(string.format("touch-up %d/%d: drove through cube (%.0f, %.0f)",
