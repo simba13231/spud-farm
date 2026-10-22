@@ -13,7 +13,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 SRC = ROOT / "SpudFarm_Full.lua"
 LUAU = pathlib.Path(r"C:/Users/MIOUTH~1/AppData/Local/Temp/luau-check/luau.exe")
 
-START = "    local doctorPara = Tabs.Farm:CreateParagraph"
+START = "    local okPanel, errPanel = pcall(function()"
 END = "    -- ON = spawn the loop on its own thread"
 
 text = SRC.read_text(encoding="utf-8")
@@ -35,6 +35,9 @@ local function v3(x, y, z)
     Magnitude = math.sqrt(x * x + y * y + z * z) }, V3)
 end
 Vector3 = { zero = v3(0, 0, 0), new = v3 }
+
+local GENV = {}
+getgenv = function() return GENV end
 
 local CHAR = { HumanoidRootPart = { Position = Vector3.new(10, 5, 20) } }
 function CHAR.FindFirstChild(self, k)
@@ -225,6 +228,17 @@ findSellSpots = function() return {} end
 BTN.Callback()
 has("no sell pads found", "empty-pads anomaly")
 findSellSpots = realSpots
+
+-- no button needed: spudDoctor() must stand alone
+assert(type(GENV.spudDoctor) == "function", "spudDoctor() was not exposed")
+PARAVAL = nil
+local msg = GENV.spudDoctor()
+assert(PARAVAL and #PARAVAL > 200, "spudDoctor() did not produce the report")
+assert(type(msg) == "string" and msg:find("done", 1, true), "spudDoctor() returned no tell")
+
+-- a tab that refuses the panel must still leave the report usable
+doctorPara = nil
+assert(pcall(GENV.spudDoctor), "spudDoctor() crashed when the panel was missing")
 
 print("doctor harness: OK")
 print("----------------------------------------")

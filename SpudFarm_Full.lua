@@ -6,7 +6,7 @@
 
 local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/releases/latest/download/Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.2 · fluent gui"
+local VERSION    = "rebuild v1.3 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -57,6 +57,8 @@ local okBuild, errBuild = pcall(function()
     }
 
     -- console log (also printed to the executor console)
+    print("[spud] gui: window + tabs ok") -- log() exists a few lines below
+
     local LOG = {}
     local logPara = Tabs.Console:CreateParagraph("ConsoleLog", {
         Title = "Console",
@@ -4474,10 +4476,25 @@ local okBuild, errBuild = pcall(function()
     --   which field plates are readable and which pads exist with their real
     --   store. It CLICKS NOTHING, PRESSES NO KEY AND MOVES NOTHING — reads
     --   only, so it is safe to press in the middle of a run.
-    local doctorPara = Tabs.Farm:CreateParagraph("DoctorReport", {
-        Title = "Diagnostics",
-        Content = "not run yet",
-    })
+    -- ▸ THE UI PART IS BEST-EFFORT. If this library version refuses the
+    --   paragraph, the error used to abort the whole GUI build pcall — the
+    --   window and tabs appeared with NOTHING in them (no loop toggle, no
+    --   settings buttons). Each piece now fails alone and says so, and the
+    --   report is reachable without any button at all.
+    local doctorReport
+    local doctorPara
+    local okPanel, errPanel = pcall(function()
+        doctorPara = Tabs.Farm:CreateParagraph("DoctorReport", {
+            Title = "Diagnostics",
+            Content = "not run yet",
+        })
+    end)
+    if okPanel then
+        log("gui: diagnostics panel ok")
+    else
+        log("doctor: the Diagnostics panel didn't build (" .. tostring(errPanel)
+            .. ") — run spudDoctor() in the executor instead")
+    end
     -- the dump put stored/desynced equipment ~±100,000 studs out, so a model
     -- this far from the origin is not on the map at all
     local function voidish(p)
@@ -4515,7 +4532,7 @@ local okBuild, errBuild = pcall(function()
             #flags > 0 and (" · " .. table.concat(flags, " ")) or "",
             #caps > 0 and (" · " .. table.concat(caps, " ")) or "")
     end
-    local function doctorReport()
+    doctorReport = function()
         local lines, problems = {}, {}
         local function add(s) lines[#lines + 1] = s end
         local function problem(s) problems[#problems + 1] = s end
@@ -4602,21 +4619,42 @@ local okBuild, errBuild = pcall(function()
         else
             add("✅ nothing obviously wrong in this snapshot")
         end
-        pcall(function() doctorPara:SetValue(table.concat(lines, "\n")) end)
+        if doctorPara then
+            pcall(function() doctorPara:SetValue(table.concat(lines, "\n")) end)
+        end
         for _, l in ipairs(lines) do print("[spud doc] " .. l) end
         log(string.format("doctor: %d lines — Farm → Diagnostics", #lines))
     end
 
-    Tabs.Farm:CreateButton({
-        Title = "🩺 Doctor report (read-only)",
-        Callback = function()
+    -- ▸ REACHABLE WITHOUT THE BUTTON. If the tab refuses to render it, the
+    --   report is one line in the executor: spudDoctor(). Same code either way.
+    local genv = (getgenv and getgenv()) or _G
+    if genv then
+        genv.spudDoctor = function()
             local ok, err = pcall(doctorReport)
             if not ok then
-                log("doctor failed: " .. tostring(err))
-                pcall(function() doctorPara:SetValue("doctor failed: " .. tostring(err)) end)
+                print("[spud doc] doctor failed: " .. tostring(err))
             end
-        end,
-    })
+            return "[spud doc] done — the report is above"
+        end
+    end
+
+    local okBtn, errBtn = pcall(function()
+        Tabs.Farm:CreateButton({
+            Title = "🩺 Doctor report (read-only)",
+            Callback = function()
+                if genv and genv.spudDoctor then return genv.spudDoctor() end
+                local ok, err = pcall(doctorReport)
+                if not ok then log("doctor failed: " .. tostring(err)) end
+            end,
+        })
+    end)
+    if okBtn then
+        log("gui: doctor button ok")
+    else
+        log("doctor: the button didn't build (" .. tostring(errBtn)
+            .. ") — run spudDoctor() in the executor instead")
+    end
 
     -- ON = spawn the loop on its own thread; OFF = clear the thread id so
     -- stopping() flips true everywhere and the loop dies at its next step.
@@ -4657,6 +4695,8 @@ local okBuild, errBuild = pcall(function()
             end
         end,
     })
+
+    log("gui: farming toggle ok")
 
     -- Settings: reload + unload
     local function destroyUI()
@@ -4712,6 +4752,8 @@ local okBuild, errBuild = pcall(function()
             print("[spud] unloaded")
         end,
     })
+
+    log("gui: settings ok")
 
     -- start
     Window:SelectTab(1)
