@@ -6,7 +6,7 @@
 
 local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/releases/latest/download/Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.4 · fluent gui"
+local VERSION    = "rebuild v1.5 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -4626,7 +4626,40 @@ local okBuild, errBuild = pcall(function()
             pcall(function() doctorPara:SetValue(table.concat(lines, "\n")) end)
         end
         for _, l in ipairs(lines) do print("[spud doc] " .. l) end
-        log(string.format("doctor: %d lines — Farm → Diagnostics", #lines))
+        if not doctorPara then
+            -- no panel to read: put the report where the player can see it
+            for _, l in ipairs(lines) do log("doc: " .. l) end
+        end
+        log(string.format("doctor: %d lines — Doctor tab", #lines))
+        return #problems > 0
+            and string.format("%d thing(s) to look at — see the Doctor tab", #problems)
+            or "nothing obviously wrong in this snapshot"
+    end
+
+    -- ▸ A CLICK MUST ALWAYS VISIBLY DO SOMETHING. The first version only wrote
+    --   into the panel, so a failure inside the report — or a panel that never
+    --   built — made the button look dead, with the reason hidden in the
+    --   executor console. Every path now ends in a notification: the summary,
+    --   or the actual error text.
+    local function runDoctor()
+        local ok, res = pcall(doctorReport)
+        if ok then
+            local summary = tostring(res)
+            if not doctorPara then
+                summary = summary .. " (panel unavailable — full report is in the Console tab)"
+            end
+            pcall(function()
+                Fluent:Notify({ Title = "SPUD DOCTOR", Content = summary, Duration = 8 })
+            end)
+            return summary
+        end
+        local msg = "doctor failed: " .. tostring(res)
+        if doctorPara then pcall(function() doctorPara:SetValue(msg) end) end
+        log(msg)
+        pcall(function()
+            Fluent:Notify({ Title = "SPUD DOCTOR", Content = msg, Duration = 10 })
+        end)
+        return msg
     end
 
     -- ▸ REACHABLE WITHOUT THE BUTTON. If the tab refuses to render it, the
@@ -4634,22 +4667,16 @@ local okBuild, errBuild = pcall(function()
     local genv = (getgenv and getgenv()) or _G
     if genv then
         genv.spudDoctor = function()
-            local ok, err = pcall(doctorReport)
-            if not ok then
-                print("[spud doc] doctor failed: " .. tostring(err))
-            end
-            return "[spud doc] done — the report is above"
+            local res = runDoctor()
+            print("[spud doc] " .. tostring(res))
+            return "[spud doc] " .. tostring(res)
         end
     end
 
     local okBtn, errBtn = pcall(function()
         Tabs.Doctor:CreateButton({
             Title = "🩺 Doctor report (read-only)",
-            Callback = function()
-                if genv and genv.spudDoctor then return genv.spudDoctor() end
-                local ok, err = pcall(doctorReport)
-                if not ok then log("doctor failed: " .. tostring(err)) end
-            end,
+            Callback = function() runDoctor() end,
         })
     end)
     if okBtn then

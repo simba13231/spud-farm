@@ -37,6 +37,8 @@ end
 Vector3 = { zero = v3(0, 0, 0), new = v3 }
 
 local GENV = {}
+local NOTIFY = nil
+Fluent = { Notify = function(_, opts) NOTIFY = opts end }
 getgenv = function() return GENV end
 
 local CHAR = { HumanoidRootPart = { Position = Vector3.new(10, 5, 20) } }
@@ -171,6 +173,8 @@ end
 
 assert(type(BTN) == "table" and type(BTN.Callback) == "function", "no doctor button was created")
 BTN.Callback()
+assert(NOTIFY and NOTIFY.Title == "SPUD DOCTOR", "the click produced no notification")
+assert(tostring(NOTIFY.Content):find("thing", 1, true), "notification did not carry the summary")
 if type(PARAVAL) ~= "string" or #PARAVAL < 200 then
   for _, l in ipairs(LOGS) do print("LOG: " .. l) end
 end
@@ -234,7 +238,7 @@ assert(type(GENV.spudDoctor) == "function", "spudDoctor() was not exposed")
 PARAVAL = nil
 local msg = GENV.spudDoctor()
 assert(PARAVAL and #PARAVAL > 200, "spudDoctor() did not produce the report")
-assert(type(msg) == "string" and msg:find("done", 1, true), "spudDoctor() returned no tell")
+assert(type(msg) == "string" and msg:find("[spud doc]", 1, true), "spudDoctor() returned no tell")
 
 -- a tab that refuses the panel must still leave the report usable
 doctorPara = nil
