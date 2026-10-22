@@ -2680,6 +2680,13 @@ local okBuild, errBuild = pcall(function()
                 end
             end
         end
+        -- ▸ EVIDENCE THE CODE ALREADY HAD AND THREW AWAY: a box of the
+        --   picked seed sitting next to you IS the purchase. The balance
+        --   label lags (and reads as "nil" for a beat) after a buy, and the
+        --   old check used the balance ALONE — so a purchase that really
+        --   landed was reported "could not be confirmed", the trip returned
+        --   early, and the run ended with an empty seeder and no seeding.
+        if box then bought = true end
         log(string.format("seed shop: balance %s → %s%s",
             tostring(before), tostring(after),
             box and (" · " .. box) or ""))
@@ -2741,7 +2748,7 @@ local okBuild, errBuild = pcall(function()
             task.wait(0.5)
         end
         if n1 and n0 and n1 > n0 then
-            log(string.format("✅ seeder now holds %d%s seeds%s — run the loop again (or turn it back on) to seed the fields",
+            log(string.format("✅ seeder now holds %d%s seeds%s — the planting pass takes it from here",
                 n1, cap1 and ("/" .. cap1) or "", kind1 and (" (" .. kind1 .. ")") or ""))
             return true
         end
@@ -2844,7 +2851,7 @@ local okBuild, errBuild = pcall(function()
             return false
         end
         setStage("shop trip: buying " .. tostring(seedChoice) .. " seeds")
-        buySeedAndFill(seedChoice)
+        local bought = buySeedAndFill(seedChoice)
         if stopping() then return false end
         -- ▸ GET BACK IN AND SEED (user's step list ends with it: "get back in
         --   and seed"). The shop trip leaves the character on foot next to
@@ -2869,6 +2876,20 @@ local okBuild, errBuild = pcall(function()
                 log("⚠ the tractor has no seat any more — get in by hand and the next run seeds")
             end
         end
+        -- ▸ RETURN TRUE WHEN THE TRIP ACTUALLY WORKED (user's step list ends
+        --   with "get back in and seed"): an empty seeder used to return
+        --   false no matter what, so the planting pass only ever ran if the
+        --   check-back round happened to notice the new seed. If the seeder
+        --   really holds seed now, say so — seedPasses then hitches it and
+        --   seeds in THIS run, which is the whole point of the trip.
+        local held = seederSeeds(tr)
+        if held and held > 0 then
+            log(string.format("✅ the seeder holds %d seed(s) now — seeding this run (no second run needed)", held))
+            return true
+        end
+        log(bought
+            and "the crate is with you but the seeder still reads empty — fill it by hand (V); the planting stage runs on the next run"
+            or "no seed was bought this run (the shop lines above say why) — the planting stage can't run until the seeder has seed")
         return false
     end
 
