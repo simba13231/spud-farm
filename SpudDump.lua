@@ -2184,6 +2184,118 @@ pcall(function()
     w("  shown: " .. (#t - from + 1) .. " of " .. #t .. " line(s)")
 end)
 
+------------------------------------------------------------------
+-- 20. SELL POINT (live) — run it while the HARVESTER stands on the
+--     sell board. Says whether the pad is really there, which menu
+--     (if any) the game opens, and what one Q press does to the load.
+------------------------------------------------------------------
+pcall(function()
+    header("SELL POINT (live — pad, menu, and what Q does)")
+    local lp = game:GetService("Players").LocalPlayer
+    local vim = game:GetService("VirtualInputManager")
+    local ch = lp.Character
+    local r0 = ch and ch:FindFirstChild("HumanoidRootPart")
+    local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+    if not r0 then w("  no HumanoidRootPart — skipped") return end
+    local pos = r0.Position
+    w(string.format("  you are at (%.0f, %.0f, %.0f)  seated=%s",
+        pos.X, pos.Y, pos.Z, tostring(hum and hum.SeatPart ~= nil)))
+
+    -- the marker the script now aims at
+    local gotos = workspace:FindFirstChild("Markers")
+    gotos = gotos and gotos:FindFirstChild("GotoLocations")
+    local board = gotos and gotos:FindFirstChild("SellBoardSeeds")
+    if board then
+        w(string.format("  SellBoardSeeds marker at (%.0f, %.0f, %.0f) — %.0f studs away, dY %.1f",
+            board.Position.X, board.Position.Y, board.Position.Z,
+            (board.Position - pos).Magnitude, board.Position.Y - pos.Y))
+    else
+        w("  SellBoardSeeds marker NOT FOUND under Markers.GotoLocations")
+    end
+
+    -- the ride + its load
+    local seat = hum and hum.SeatPart
+    local ride = seat and seat:FindFirstAncestorOfClass("Model")
+    local function loadNow()
+        if not ride then return nil, nil end
+        local conf = ride:FindFirstChild("Configurations")
+        local c = conf and conf:FindFirstChild("Capacity")
+        local m = conf and conf:FindFirstChild("MaxCapacity")
+        return c and c.Value or nil, m and m.Value or nil
+    end
+    local cur0, max0 = loadNow()
+    if ride then
+        w(string.format("  seated in %s — EquipmentType=%s, load %s/%s",
+            ride.Name, tostring(ride:GetAttribute("EquipmentType")),
+            tostring(cur0), tostring(max0)))
+    else
+        w("  NOT seated — stand the harvester on the pad and run this again")
+    end
+
+    -- the pad itself: collidable parts under and around you
+    local parts, n = {}, 0
+    for _, d in ipairs(workspace:GetDescendants()) do
+        if d:IsA("BasePart") and (d.Position - pos).Magnitude < 45 then
+            n += 1
+            if #parts < 18 and d.CanCollide then
+                parts[#parts + 1] = string.format("    %-24s %-10s (%.0f, %.0f, %.0f) %.0fx%.0fx%.0f",
+                    d.Name, d.ClassName, d.Position.X, d.Position.Y, d.Position.Z,
+                    d.Size.X, d.Size.Y, d.Size.Z)
+            end
+        end
+    end
+    for _, l in ipairs(parts) do w(l) end
+    w("  parts within 45 studs: " .. n)
+
+    -- every menu that could be the sell one
+    local pg = lp:FindFirstChildOfClass("PlayerGui")
+    local views = pg and pg:FindFirstChild("GuiViews")
+    local menus = views and views:FindFirstChild("Menus")
+    local stores = views and views:FindFirstChild("Stores")
+    local function st(g, nm)
+        return string.format("%s=%s", nm, g and tostring(g.Enabled) or "missing")
+    end
+    local sellMenu = menus and menus:FindFirstChild("SellMenu")
+    local depMenu = menus and menus:FindFirstChild("DepositMenu")
+    local storeMenu = stores and stores:FindFirstChild("StoreMenu")
+    w("  menus before any key: " .. st(sellMenu, "Menus.SellMenu")
+        .. "  " .. st(depMenu, "Menus.DepositMenu")
+        .. "  " .. st(storeMenu, "Stores.StoreMenu"))
+
+    -- context actions live here
+    local acts = {}
+    pcall(function()
+        for _, b in ipairs(pg.GuiViews.HUD.PCGP_ContextActions.Buttons:GetChildren()) do
+            if b:IsA("GuiObject") and b.Visible then acts[#acts + 1] = b.Name end
+        end
+    end)
+    w("  context actions: " .. (#acts > 0 and table.concat(acts, " · ") or "NONE"))
+
+    -- one Q press (the key the script uses to open the sell menu)
+    vim:SendKeyEvent(true, Enum.KeyCode.Q, false, game)
+    task.wait(0.08)
+    vim:SendKeyEvent(false, Enum.KeyCode.Q, false, game)
+    task.wait(1.4)
+    local cur1 = loadNow()
+    w("  Q press sent. menus after: " .. st(sellMenu, "SellMenu")
+        .. "  " .. st(depMenu, "DepositMenu"))
+    w(string.format("  load %s -> %s (a drop means the pad sells on Q alone)",
+        tostring(cur0), tostring(cur1)))
+    local btns
+    if sellMenu and sellMenu.Enabled then
+        btns = {}
+        for _, d in ipairs(sellMenu:GetDescendants()) do
+            if d:IsA("GuiButton") and #btns < 14 then
+                local t = ""
+                pcall(function() t = d.Text end)
+                if t ~= "" then btns[#btns + 1] = "'" .. t .. "'" end
+            end
+        end
+        w("  SellMenu buttons: " .. (#btns > 0 and table.concat(btns, " · ") or "none"))
+    end
+    w("  DO NOW: if nothing opened, look at the screen and say what the pad shows")
+end)
+
 local text = table.concat(out, "\n")
 
 ------------------------------------------------------------------

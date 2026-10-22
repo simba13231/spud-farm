@@ -170,7 +170,7 @@ local okBuild, errBuild = pcall(function()
     --   steers itself off the row; a full tank never sells). The dump's own
     --   model name and the caller's intent are fallbacks, and the first
     --   decision is logged so one line says which one matched.
-    local HARVEST_MODEL_NAMES = { ZM80 = true }
+    local HARVEST_MODEL_NAMES = { SRC6 = true }
     local harvestDetectLogged = false
     local function isHarvester(tr, impl)
         if not tr then return false end
@@ -179,9 +179,18 @@ local okBuild, errBuild = pcall(function()
             how = "this pass drives the tool itself"
         else
             local okT, etype = pcall(function() return tr:GetAttribute("EquipmentType") end)
-            if okT and etype == "Harvester" then
-                how = "EquipmentType attribute"
+            if okT and etype ~= nil then
+                -- ▸ THE ATTRIBUTE IS THE ANSWER, EVEN WHEN IT SAYS NO. The old
+                --   chain fell through to the name table whenever the value
+                --   wasn't "Harvester", and that table listed ZM80 — the
+                --   TRACTOR (dump: ZM80=Tractor, SRC6=Harvester). So every
+                --   tractor route ran on the harvester's PivotTo tween: the
+                --   align mover was never started, nothing followed the A*
+                --   line, and the tractor (with the plow towed behind it)
+                --   was swept straight through gear and barns.
+                if etype == "Harvester" then how = "EquipmentType attribute" end
             elseif HARVEST_MODEL_NAMES[tostring(tr.Name)] then
+                -- attribute missing entirely — fall back to the dump's model
                 how = "model name " .. tostring(tr.Name)
             end
         end
@@ -2779,6 +2788,14 @@ local okBuild, errBuild = pcall(function()
         local function isShown(o) -- Visible all the way up to GuiViews
             local p = o
             while p and p ~= views do
+                -- ▸ A CLOSED SCREEN GUI IS NOT ON SCREEN. This only checked
+                --   Visible, and a ScreenGui is not a GuiObject — so the seed
+                --   row and the Buy/Close buttons were happily matched inside
+                --   a menu that was never opened (StoreMenu/SellMenu/TradeMenu
+                --   all live under GuiViews with Enabled=false), the click
+                --   went to an invisible button, and the purchase silently did
+                --   nothing.
+                if p:IsA("LayerCollector") and not p.Enabled then return false end
                 if p:IsA("GuiObject") and not p.Visible then return false end
                 p = p.Parent
             end
