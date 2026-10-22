@@ -6,7 +6,7 @@
 
 local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/releases/latest/download/Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.1 · fluent gui"
+local VERSION    = "rebuild v1.2 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -4465,6 +4465,158 @@ local okBuild, errBuild = pcall(function()
                 .. ") — no seed picker this session")
         end
     end
+
+    -- ▸🩺 DOCTOR REPORT (read-only). After a run of patches where each fix
+    --   exposed the next weak spot, the answer is not another feature: too
+    --   many bug reports needed a 10-minute run to answer questions the game
+    --   can answer in one frame. This prints what exists, where it is,
+    --   whether it is stored or in the void, what its Configurations say,
+    --   which field plates are readable and which pads exist with their real
+    --   store. It CLICKS NOTHING, PRESSES NO KEY AND MOVES NOTHING — reads
+    --   only, so it is safe to press in the middle of a run.
+    local doctorPara = Tabs.Farm:CreateParagraph("DoctorReport", {
+        Title = "Diagnostics",
+        Content = "not run yet",
+    })
+    -- the dump put stored/desynced equipment ~±100,000 studs out, so a model
+    -- this far from the origin is not on the map at all
+    local function voidish(p)
+        if not p then return false end
+        return math.abs(p.X) > 10000 or math.abs(p.Z) > 10000 or p.Y < -1000
+    end
+    local function equipmentLine(m, here, problem)
+        local etype = tostring(m:GetAttribute("EquipmentType") or "?")
+        local stored = m:GetAttribute("InStorage") and "stored" or "spawned"
+        local okP, p = pcall(function() return m:GetPivot().Position end)
+        if not (okP and p) then
+            problem(m.Name .. ": position unreadable")
+            return string.format("· %s [%s · %s] — position unreadable", m.Name, etype, stored)
+        end
+        local caps = {}
+        pcall(function()
+            local conf = m:FindFirstChild("Configurations")
+            if not conf then return end
+            for _, v in ipairs(conf:GetChildren()) do
+                local n = v.Name:lower()
+                if v:IsA("IntValue")
+                    and (n:find("cap", 1, true) or n:find("seed", 1, true)) then
+                    caps[#caps + 1] = string.format("%s=%d", v.Name, v.Value)
+                end
+            end
+        end)
+        local flags = {}
+        if voidish(p) then
+            flags[#flags + 1] = "⚠VOID"
+            problem(string.format("%s (%s) is in the void at (%.0f, %.0f, %.0f) — it needs a respawn",
+                m.Name, etype, p.X, p.Y, p.Z))
+        end
+        return string.format("· %s [%s · %s] (%.0f, %.0f, %.0f) · %.0f studs from you%s%s",
+            m.Name, etype, stored, p.X, p.Y, p.Z, (p - here).Magnitude,
+            #flags > 0 and (" · " .. table.concat(flags, " ")) or "",
+            #caps > 0 and (" · " .. table.concat(caps, " ")) or "")
+    end
+    local function doctorReport()
+        local lines, problems = {}, {}
+        local function add(s) lines[#lines + 1] = s end
+        local function problem(s) problems[#problems + 1] = s end
+        local char = LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        local here = (root and root.Position) or Vector3.zero
+        add("🩺 DOCTOR — " .. VERSION)
+        add(string.format("loop: %s · stage: %s",
+            loopThread and "RUNNING" or "idle", tostring(runStage)))
+        add(string.format("you: %s at (%.0f, %.0f, %.0f)%s", LocalPlayer.Name,
+            here.X, here.Y, here.Z, char and "" or " — NO CHARACTER"))
+        if not char then problem("no character — every distance below is measured from 0,0,0") end
+        -- vehicles
+        local folder = equipmentFolder()
+        add("equipment (Objects.Equipment):")
+        local nEq = 0
+        for _, m in ipairs(folder and folder:GetChildren() or {}) do
+            if m:IsA("Model") then
+                nEq += 1
+                add("  " .. equipmentLine(m, here, problem))
+            end
+        end
+        if nEq == 0 then
+            add("  (none — the folder is missing or empty)")
+            problem("no equipment models under Objects.Equipment")
+        end
+        -- fields (mine only, same rule the tour uses: Configurations.Owner)
+        add("fields (yours):")
+        local nf = 0
+        local function considerField(d)
+            if not d:IsA("Model") then return end
+            local cfg = d:FindFirstChild("Configurations")
+            local owner = cfg and cfg:FindFirstChild("Owner")
+            if not (owner and owner.Value == LocalPlayer) then return end
+            nf += 1
+            local cf, sz = fieldFrame(d)
+            local ft = cfg:FindFirstChild("FieldType")
+            local p = d:GetPivot().Position
+            local flat = (Vector3.new(p.X, 0, p.Z) - Vector3.new(here.X, 0, here.Z)).Magnitude
+            add(string.format("  · %s [%s] %s · %.0f studs", d.Name,
+                ft and tostring(ft.Value) or "?",
+                sz and string.format("%.0f×%.0f plate", sz.X, sz.Z) or "NO READABLE PLATE",
+                flat))
+            if not sz then problem(d.Name .. ": no readable plate — the sweep can't plan a spiral") end
+        end
+        pcall(function()
+            local objects = workspace:FindFirstChild("Objects")
+            local fields = objects and objects:FindFirstChild("Fields")
+            for _, d in ipairs(fields and fields:GetChildren() or {}) do considerField(d) end
+            local plots = workspace:FindFirstChild("Plots")
+            for _, plot in ipairs(plots and plots:GetChildren() or {}) do
+                if plot:IsA("Model") then
+                    for _, d in ipairs(plot:GetChildren()) do considerField(d) end
+                end
+            end
+        end)
+        if nf == 0 then
+            add("  (none owned by you)")
+            problem("no field is owned by you — the tour has nothing to work")
+        end
+        -- pads
+        add("sell pads (ranked, crop store first):")
+        local spots = findSellSpots()
+        for i, s in ipairs(spots) do
+            if i > 6 then
+                add(string.format("  … %d more", #spots - 6))
+                break
+            end
+            add(string.format("  %d. %s · store %s · %.0f from FarmCo · %.0f from you",
+                i, s.what, tostring(s.store or "?"), s.dist, (s.p - here).Magnitude))
+        end
+        if #spots == 0 then
+            add("  (none found)")
+            problem("no sell pads found — selling cannot work at all")
+        end
+        local cool = sellCooldownUntil - os.clock()
+        if cool > 0 then
+            add(string.format("sell: cooling down %.0f s (the last trip didn't land)", cool))
+        end
+        -- the only part that needs a human
+        if #problems > 0 then
+            add(string.format("⚠ %d thing(s) to look at:", #problems))
+            for _, p in ipairs(problems) do add("  · " .. p) end
+        else
+            add("✅ nothing obviously wrong in this snapshot")
+        end
+        pcall(function() doctorPara:SetValue(table.concat(lines, "\n")) end)
+        for _, l in ipairs(lines) do print("[spud doc] " .. l) end
+        log(string.format("doctor: %d lines — Farm → Diagnostics", #lines))
+    end
+
+    Tabs.Farm:CreateButton({
+        Title = "🩺 Doctor report (read-only)",
+        Callback = function()
+            local ok, err = pcall(doctorReport)
+            if not ok then
+                log("doctor failed: " .. tostring(err))
+                pcall(function() doctorPara:SetValue("doctor failed: " .. tostring(err)) end)
+            end
+        end,
+    })
 
     -- ON = spawn the loop on its own thread; OFF = clear the thread id so
     -- stopping() flips true everywhere and the loop dies at its next step.
