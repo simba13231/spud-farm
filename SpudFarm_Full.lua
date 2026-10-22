@@ -3343,25 +3343,64 @@ local okBuild, errBuild = pcall(function()
         return m ~= nil and m.Enabled == true
     end
 
-    -- the confirm inside the sell menu, clicked the way a player clicks it:
-    -- call the game's OWN handler on the button that says sell/confirm/pour
+    -- the confirm inside the sell menu (user: "a Sell/Confirm button in the
+    -- menu" completes the sale — not a key), clicked the way a player clicks
+    -- it: call the game's OWN handler, with :Activate() as the fallback the
+    -- equipment manager already proved. The old version called the handler
+    -- and returned true even when there was NO readable handler, so it could
+    -- report a confirm that never happened.
     local SELL_WORDS = { "sell", "confirm", "pour", "unload", "accept", "yes" }
-    local function confirmSellMenu()
+    local CLOSE_WORDS = { "close", "exit", "back", "cancel" }
+
+    local function shownButton(d)
+        if not d:IsA("GuiButton") then return false end
+        local o = d
+        while o and not o:IsA("ScreenGui") do
+            if o:IsA("GuiObject") and not o.Visible then return false end
+            o = o.Parent
+        end
+        return true
+    end
+
+    local function pressButton(d)
+        if not d then return false end
+        if invokeHandlers(d) then
+            log(string.format("sell menu: called the game's own handler on '%s'", guiTextOf(d)))
+            return true
+        end
+        local ok = pcall(function() d:Activate() end)
+        log(string.format("sell menu: no readable handler on '%s' — :Activate() %s",
+            guiTextOf(d), ok and "sent" or "failed"))
+        return ok
+    end
+
+    local function findMenuButton(words)
         local m = sellMenuGui()
-        if not (m and m.Enabled) then return false end
+        if not (m and m.Enabled) then return nil end
+        local hidden
         for _, d in ipairs(m:GetDescendants()) do
             if d:IsA("GuiButton") then
                 local t = (guiTextOf(d) .. " " .. d.Name):lower()
-                for _, w in ipairs(SELL_WORDS) do
+                for _, w in ipairs(words) do
                     if t:find(w, 1, true) then
-                        invokeHandlers(d)
-                        log("sell menu: called the game's own handler on '" .. guiTextOf(d) .. "'")
-                        return true
+                        if shownButton(d) then return d end
+                        hidden = hidden or d
+                        break
                     end
                 end
             end
         end
-        return false
+        return hidden
+    end
+
+    local function confirmSellMenu()
+        return pressButton(findMenuButton(SELL_WORDS))
+    end
+
+    local function closeSellMenu()
+        local b = findMenuButton(CLOSE_WORDS)
+        if b then pressButton(b) task.wait(0.5) end
+        return not sellMenuOpen()
     end
 
     -- ▸ PARK, THEN ACTUALLY SELL (README mechanic: onto the elevated
@@ -3384,11 +3423,7 @@ local okBuild, errBuild = pcall(function()
                 log(string.format("✅ sold at %s — load %d → %d, coins %s → %s",
                     what, cap0, cur, tostring(coins0), tostring(coinBalance())))
                 -- leave the menu closed so the drive back isn't blocked by it
-                if sellMenuOpen() then
-                    confirmSellMenu()
-                    task.wait(0.6)
-                    if sellMenuOpen() then pressKey(Enum.KeyCode.E) end
-                end
+                if sellMenuOpen() then closeSellMenu() end
                 return true
             end
             -- 1) Q opens the sell menu (the documented key for the pad)
@@ -3417,6 +3452,22 @@ local okBuild, errBuild = pcall(function()
         log(string.format("no sale at %s after 16 s (load %s, coins %s → %s, sell menu %s)",
             what, tostring(cap0), tostring(coins0), tostring(coinBalance()),
             sellMenuOpen() and "OPEN" or "never opened"))
+        -- ▸ SAY WHAT THE MENU ACTUALLY OFFERS. If the confirm button is named
+        --   something this filter doesn't know, this line names it instead of
+        --   leaving the trip a mystery.
+        if sellMenuOpen() then
+            local m = sellMenuGui()
+            local names = {}
+            if m then
+                for _, d in ipairs(m:GetDescendants()) do
+                    if d:IsA("GuiButton") and shownButton(d) and #names < 12 then
+                        names[#names + 1] = "'" .. guiTextOf(d) .. "'"
+                    end
+                end
+            end
+            log("sell menu buttons on screen: "
+                .. (#names > 0 and table.concat(names, " · ") or "none visible"))
+        end
         return false
     end
 
