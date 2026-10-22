@@ -3335,80 +3335,206 @@ local okBuild, errBuild = pcall(function()
         --   green "Purchase" button (qty is already 1). There is no list to
         --   choose from and nothing to put on a counter: the popup is already
         --   for the crate in hand, so the only action is Purchase.
+        -- ▸ GUARD + CLICK LOOP REWRITTEN (user: "in the menu to buy the seed it
+        --   does not buy the seed it just stares at the menu and does not
+        --   purchase it"). The old guard refused to click unless the popup TEXT
+        --   contained the seed's name — but the real confirm popup says only
+        --   "Are you sure you want to buy 1 item?" with the crate as an ICON.
+        --   So it found the right button, logged it, and never pressed it.
+        --   Now: the popup may name nothing (it is for the crate IN HAND — that
+        --   is the whole flow), and the guard only refuses when it names a
+        --   DIFFERENT seed.
         local want = (seedName:lower():gsub("%s+", ""))
-        local firstWord = want:match("^%a+") or want
-        local purchase, labels
-        for _ = 1, 10 do -- up to ~5 s: the popup animates in
-            if stopping() then return false end
-            labels = {}
-            for _, g in ipairs(views:GetDescendants()) do
-                if isShown(g) then
+        local function otherSeedIn(text)
+            local flat = tostring(text or ""):lower():gsub("%s+", "")
+            if flat:find(want, 1, true) then return nil end
+            for name in pairs(seedIdOf) do
+                local n = name:lower():gsub("%s+", "")
+                if #n > 2 and flat:find(n, 1, true) then return name end
+            end
+            return nil
+        end
+        -- never click these, whatever the menu calls them
+        local function forbidden(t)
+            for _, bad in ipairs({ "robux", "premium", "gems", "gem", "sell",
+                "cancel", "close", "back", "exit" }) do
+                if t:find(bad, 1, true) then return true end
+            end
+            return false
+        end
+        local function isPurchase(t)
+            return t:find("purchase", 1, true)
+                or t:find("confirm", 1, true)
+                or t:find("buy", 1, true)
+                or t:find("^yes") ~= nil
+                or t:find("^ok") ~= nil
+        end
+        -- every VISIBLE button of the open menu + its readable text. `top` is
+        -- GuiViews normally, but the whole PlayerGui when the popup is parented
+        -- somewhere else (a menu that never shows up in the GuiViews tree used
+        -- to read as "nothing on screen" while it sat right there).
+        local function harvestMenu(top)
+            local out, labels = {}, {}
+            for _, g in ipairs(top:GetDescendants()) do
+                local shown = true
+                local p = g
+                while p and p ~= top do
+                    if p:IsA("LayerCollector") and not p.Enabled then shown = false break end
+                    if p:IsA("GuiObject") and not p.Visible then shown = false break end
+                    p = p.Parent
+                end
+                if shown then
                     if g:IsA("GuiButton") then
-                        local t = (guiTextOf(g) .. " " .. g.Name):lower()
-                        if not purchase and (t:find("purchase", 1, true)
-                            or t:find("confirm", 1, true) or t:find("buy", 1, true)) then
-                            purchase = g
-                        end
+                        out[#out + 1] = {
+                            btn = g,
+                            text = ((guiTextOf(g) .. " " .. g.Name):lower()),
+                        }
                     elseif g:IsA("TextLabel") then
                         local tx = guiTextOf(g)
                         if tx and tx ~= "" then labels[#labels + 1] = tx end
                     end
                 end
             end
-            if purchase then break end
-            task.wait(0.5)
+            return out, labels
         end
-        local popupText = (labels and #labels > 0)
-            and table.concat(labels, " | ") or "nothing readable"
-        if not purchase then
-            log("seed shop: no Purchase button in the owner's menu — the visible text was: " .. popupText)
-            log("seed shop: nothing clicked (check the shop by hand once)")
-            return false
-        end
-        log("seed shop: buy popup — " .. popupText)
-        local flatText = popupText:lower():gsub("%s+", "")
-        if not flatText:find(firstWord, 1, true) then
-            log(string.format("seed shop: ⚠ that popup does not name '%s' — NOT clicking Purchase", seedName))
-            return false
-        end
-        log(string.format("seed shop: clicking %s ('%s') — 1 × %s",
-            purchase:GetFullName(), guiTextOf(purchase), seedName))
-        if not invokeHandlers(purchase) then
-            log("seed shop: no readable handler on Purchase — trying :Activate()")
-            pcall(function() purchase:Activate() end)
-        end
-        setStage("shop trip: waiting for the " .. tostring(seedName) .. " purchase to land")
-        -- verify: the balance drops, or a box of that seed appears next to us
-        local after, box
-        for _ = 1, 12 do -- ~6 s
-            if stopping() then break end
-            after = coinBalance()
-            if before and after and after < before then break end
-            task.wait(0.5)
-        end
-        local bought = (before and after and after < before) or false
-        local objects = workspace:FindFirstChild("Objects")
-        local dobjs = objects and objects:FindFirstChild("DraggableObjects")
-        if dobjs then
+        -- a NEW crate of the chosen seed next to us = the purchase landed. It
+        -- is a COUNT, not a "is one there": the crate we carried INTO the shop
+        -- is already next to us, so presence proves nothing — an increase does.
+        local function crateCount()
+            local objects = workspace:FindFirstChild("Objects")
+            local dobjs = objects and objects:FindFirstChild("DraggableObjects")
+            if not dobjs or not root then return 0 end
+            local n = 0
             for _, m in ipairs(dobjs:GetChildren()) do
                 local p = m:FindFirstChildWhichIsA("BasePart", true)
                 if p and (p.Position - root.Position).Magnitude < 80 then
                     local s2 = crateSeedType(m)
-                    if s2 and s2:lower() == seedName:lower() then
-                        box = string.format("%s box %.0f studs away", seedName,
-                            (p.Position - root.Position).Magnitude)
+                    if s2 and s2:lower() == seedName:lower() then n += 1 end
+                end
+            end
+            return n
+        end
+
+        local buttons, labels
+        for _ = 1, 12 do -- up to ~6 s: the popup animates in
+            if stopping() then return false end
+            buttons, labels = harvestMenu(views)
+            if #buttons == 0 then buttons, labels = harvestMenu(pg) end
+            if #buttons > 0 then break end
+            task.wait(0.5)
+        end
+        local popupText = (labels and #labels > 0)
+            and table.concat(labels, " | ") or "nothing readable"
+        if #buttons == 0 then
+            log("seed shop: no menu buttons are on screen — the visible text was: " .. popupText)
+            log("seed shop: nothing clicked (check the shop by hand once)")
+            return false
+        end
+        log("seed shop: buy popup — " .. popupText)
+        -- ▸ only judge a DIALOG by its text. A store LIST names every seed in
+        --   the game, so "it names another seed" means nothing there — the
+        --   length test keeps a catalogue from being mistaken for a wrong popup.
+        local wrong = #popupText < 220 and otherSeedIn(popupText) or nil
+        if wrong then
+            log(string.format("seed shop: ⚠ that popup is for '%s', not '%s' — NOT clicking Purchase",
+                wrong, seedName))
+            return false
+        end
+
+        -- ▸ CLICK LOOP: up to 3 attempts, RE-READING the menu each time. The
+        --   Purchase button is clicked with every Click-handler the game itself
+        --   connected (no mouse events, no remotes). If the popup is one of
+        --   those "pick the tile first" menus, attempt 2 finds the Purchase
+        --   button the first click revealed — that is why the menu is re-read.
+        local bought, clickedAny = false, false
+        local after, box, lastBtns
+        local cratesBefore = crateCount()
+        setStage("shop trip: waiting for the " .. tostring(seedName) .. " purchase to land")
+        for attempt = 1, 3 do
+            if stopping() then return false end
+            local btns, lb = harvestMenu(views)
+            if #btns == 0 then btns, lb = harvestMenu(pg) end
+            lastBtns = btns
+            if #btns == 0 then break end
+            -- a tile click can change what the popup is FOR: re-judge it
+            local txt = (lb and #lb > 0) and table.concat(lb, " | ") or ""
+            if #txt > 0 and #txt < 220 then
+                local bad = otherSeedIn(txt)
+                if bad then
+                    log(string.format("seed shop: ⚠ the popup now says '%s', not '%s' — stopping before a wrong buy",
+                        bad, seedName))
+                    return false
+                end
+            end
+            local target, why
+            for _, b in ipairs(btns) do
+                if not forbidden(b.text) and isPurchase(b.text) then
+                    target, why = b, "the Purchase button"
+                    break
+                end
+            end
+            if not target then
+                for _, b in ipairs(btns) do
+                    if not forbidden(b.text) and b.text:find(want, 1, true) then
+                        target, why = b, "the " .. seedName .. " tile"
                         break
                     end
                 end
             end
+            if not target then
+                for _, b in ipairs(btns) do
+                    if not forbidden(b.text) then
+                        target, why = b, "the first usable control"
+                        break
+                    end
+                end
+            end
+            if not target then break end
+            clickedAny = true
+            log(string.format("seed shop: clicking %s ('%s') — %s%s",
+                target.btn:GetFullName(), guiTextOf(target.btn), why,
+                attempt > 1 and (" (attempt " .. attempt .. ")") or ""))
+            local called = invokeHandlers(target.btn)
+            if not called then
+                log("seed shop: no readable handler on it — trying firesignal / :Activate()")
+                pcall(function()
+                    if type(firesignal) == "function" then
+                        firesignal(target.btn.MouseButton1Click)
+                    end
+                end)
+                pcall(function() target.btn:Activate() end)
+            end
+            -- did that ONE click land? poll the balance, then the crate count
+            for _ = 1, 5 do
+                if stopping() then return false end
+                task.wait(0.4)
+                after = coinBalance()
+                if before and after and after < before then bought = true break end
+                local n = crateCount()
+                if n > cratesBefore then
+                    bought = true
+                    box = string.format("%s crate count %d → %d", seedName, cratesBefore, n)
+                    break
+                end
+            end
+            if bought then break end
         end
-        -- ▸ EVIDENCE THE CODE ALREADY HAD AND THREW AWAY: a box of the
-        --   picked seed sitting next to you IS the purchase. The balance
-        --   label lags (and reads as "nil" for a beat) after a buy, and the
-        --   old check used the balance ALONE — so a purchase that really
-        --   landed was reported "could not be confirmed", the trip returned
-        --   early, and the run ended with an empty seeder and no seeding.
-        if box then bought = true end
+        -- final settle + one last read of both signals
+        task.wait(0.4)
+        after = after or coinBalance()
+        if not box and crateCount() > cratesBefore then
+            box = string.format("%s crate count %d → %d", seedName, cratesBefore, crateCount())
+            bought = true
+        end
+        if not bought and clickedAny then
+            log("seed shop: the menu is still showing after " .. (lastBtns and #lastBtns or 0)
+                .. " visible control(s) — nothing bought.")
+            local names = {}
+            for _, b in ipairs(lastBtns or {}) do
+                names[#names + 1] = string.format("'%s'", guiTextOf(b.btn))
+            end
+            log("seed shop: buttons on screen were: " .. table.concat(names, ", "))
+        end
         log(string.format("seed shop: balance %s → %s%s",
             tostring(before), tostring(after),
             box and (" · " .. box) or ""))
