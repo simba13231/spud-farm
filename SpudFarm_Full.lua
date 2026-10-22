@@ -4722,6 +4722,7 @@ local okBuild, errBuild = pcall(function()
     })
     log("loaded — " .. VERSION)
     log("GUI: Fluent Renewed · RIGHT SHIFT hides the window")
+    log("🩺 doctor: FARM tab, the 🩺 Doctor report button (read-only)")
 
     -- FIELD WATCH (user request): scan at launch and re-scan every 15
     -- minutes so newly placed fields get discovered. The farming loop
