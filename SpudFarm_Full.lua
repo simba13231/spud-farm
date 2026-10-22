@@ -3487,9 +3487,10 @@ local okBuild, errBuild = pcall(function()
         local dir = leg / legLen
         local perp = Vector3.new(-dir.Z, 0, dir.X)
         local BRAKE, ACCEPT = 20, 5
-        local started = os.clock()
-        local lastP = tr:GetPivot().Position
-        local deadline = started + 20 + legLen / 4
+        local stallP, stallT = tr:GetPivot().Position, os.clock()
+        local startP, startT = stallP, stallT
+        local stalls = 0
+        local deadline = os.clock() + 20 + legLen / 4
         releaseDriveKeys()
         while os.clock() < deadline do
             if stopping() then releaseDriveKeys() return nil end
@@ -3503,7 +3504,10 @@ local okBuild, errBuild = pcall(function()
             local flat = Vector3.new(cf.LookVector.X, 0, cf.LookVector.Z)
             flat = flat.Magnitude > 0.1 and flat.Unit or dir
             local ang = math.acos(math.clamp(flat:Dot(dir), -1, 1))
+            -- only drive once the nose is ON the row; turning happens stopped
+            local wantW = remaining > BRAKE and ang <= math.rad(8)
             if ang > math.rad(8) then
+                stallT = os.clock() -- turning in place is not a stall
                 local step = math.min(ang, math.rad(90) * 0.1)
                 local axis = flat:Cross(dir)
                 local signed = CFrame.fromAxisAngle(Vector3.yAxis,
@@ -3513,15 +3517,36 @@ local okBuild, errBuild = pcall(function()
                 if nd.Magnitude > 0.01 then
                     tr:PivotTo(CFrame.new(p) * CFrame.lookAt(Vector3.zero, nd.Unit))
                 end
+            elseif wantW then
+                -- W ignored entirely (from a standstill)? hand the row to the
+                -- seat throttle, then the tween
+                if os.clock() - startT > 3 and (p - startP).Magnitude < 1.5 then
+                    releaseDriveKeys()
+                    return false
+                end
+                -- ▸ STALL = W DOWN AND NO MOVEMENT (user: "now it's stalled on
+                --   the corner"). The nose is usually jammed on the plot fence,
+                --   so back off for a moment and try again; after three tries
+                --   the row is handed to the tween so the sweep can never park
+                --   itself on a corner.
+                if (p - stallP).Magnitude > 0.6 then
+                    stallP, stallT = p, os.clock()
+                elseif os.clock() - stallT > 1.8 then
+                    stalls += 1
+                    if stalls > 2 then
+                        releaseDriveKeys()
+                        log("harvester: jammed on this row (3 tries) — tweening the rest of it")
+                        return "jammed"
+                    end
+                    log(string.format("harvester: stuck for 1.8 s — backing off and retrying (try %d/2)", stalls))
+                    setKey(KEY_W, false)
+                    setKey(KEY_S, true)
+                    task.wait(0.8)
+                    setKey(KEY_S, false)
+                    stallP, stallT = tr:GetPivot().Position, os.clock()
+                end
             end
-            -- only drive once the nose is ON the row; turning happens stopped
-            setKey(KEY_W, remaining > BRAKE and ang <= math.rad(8))
-            -- did the keys actually move it? (the game may ignore synthetic input)
-            if os.clock() - started > 2.5 and
-                (Vector3.new(p.X, 0, p.Z) - Vector3.new(lastP.X, 0, lastP.Z)).Magnitude < 1.5 then
-                releaseDriveKeys()
-                return false
-            end
+            setKey(KEY_W, wantW)
             task.wait(0.1)
         end
         releaseDriveKeys()
@@ -4249,6 +4274,9 @@ local okBuild, errBuild = pcall(function()
                 if okT == false then
                     log("harvester: holding W moved nothing — trying the seat throttle for this row")
                     okT = throttleRow(tr, seat, from, goal)
+                    if okT == nil then return nil end
+                elseif okT == "jammed" then
+                    okT = tweenDriveLeg(tr, from, goal, HARVEST_TWEEN_SPEED)
                     if okT == nil then return nil end
                 end
                 return okT
