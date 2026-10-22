@@ -1949,12 +1949,33 @@ local okBuild, errBuild = pcall(function()
                 #legs - 1, info, hull))
         end
         local useKeys = driveLegKeys ~= nil
-        local ah, alignWhy = alignDriveStart(tr)
+        -- ▸ the HARVESTER never uses the align mover or WASD here either: the
+        --   A* path already avoids the obstacles, and the physics drivers
+        --   kept failing to execute it (live log: "align driver stalled",
+        --   "sharp turn (100°)", legs accepted 600–1 170 studs short — 15 s
+        --   wasted per leg, and the harvester never reached the field). Its
+        --   route legs are tweened instead, at a faster rate than the 10
+        --   studs/s swath speed because these legs are travel, not harvest.
+        local TRAVEL_TWEEN_SPEED = 60
+        local isHarvestRide = false
+        pcall(function()
+            isHarvestRide = tr:GetAttribute("EquipmentType") == "Harvester"
+        end)
+        local ah, alignWhy
+        if isHarvestRide then
+            -- NO align constraints at all on a tweened ride: AlignPosition
+            -- would pin the harvester where it started and fight every
+            -- PivotTo step of the tween.
+            log(string.format("route: tween driver for the harvester (%d studs/s travel, %d studs/s swath)",
+                TRAVEL_TWEEN_SPEED, HARVEST_TWEEN_SPEED))
+        else
+            ah, alignWhy = alignDriveStart(tr)
+        end
         local useAlign = ah ~= nil
         if useAlign then
             log(string.format("route: ALIGN driver on (mass %.0f, maxvel %d, aim %d) — physics follows the line",
                 ah.mass, ALIGN_MAXVEL, ALIGN_AIM))
-        else
+        elseif not isHarvestRide then
             log("route: align driver unavailable (" .. tostring(alignWhy) .. ") — driving with keys")
         end
         local alignClock, alignMark = os.clock(), tr:GetPivot().Position
@@ -2025,7 +2046,22 @@ local okBuild, errBuild = pcall(function()
                     end
                 end
             end
-            if useAlign then
+            if isHarvestRide then
+                -- one A* leg per tween: land on the waypoint, the loop then
+                -- advances the cursor exactly as the driven path does
+                local okT = tweenDriveLeg(tr, p, Vector3.new(g[1], p.Y, g[2]), TRAVEL_TWEEN_SPEED)
+                if okT == nil then alignDriveStop(ah) return nil end
+                local np = tr:GetPivot().Position
+                local dgNow = (Vector3.new(np.X, 0, np.Z) - Vector3.new(goal.X, 0, goal.Z)).Magnitude
+                if li >= #legs and dgNow > 8 then
+                    -- last waypoint and still not on the goal: accept it. A
+                    -- tween back to the same point returns instantly, which
+                    -- would spin this loop with no yield at all.
+                    log(string.format("route: tween accepted %.0f studs short of the goal", dgNow))
+                    return true, pass
+                end
+                task.wait(0.05) -- always yield, even on a zero-length leg
+            elseif useAlign then
                 -- cross-track error vs the leg we are on, once a second
                 local a1 = legs[math.max(li - 1, 1)]
                 local lx, lz = g[1] - a1[1], g[2] - a1[2]
