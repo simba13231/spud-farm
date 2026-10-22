@@ -4695,6 +4695,71 @@ local okBuild, errBuild = pcall(function()
         end
     end
 
+    -- ▸ WAIT FOR THE CROPS (user: "once it's done seeding i want it to wait
+    --   for all the crops to be done growning and then it restarts the loop").
+    --   Reads the game's own FieldHelper.GetCells per field — the same read the
+    --   harvest pass uses — until NO cell is left in the Seeded stage, i.e.
+    --   every planted cell has moved on to a grown stage. Tools are already
+    --   back in storage at this point (the run stored them), so the wait is
+    --   clean: nothing of ours is standing in the world while the farm grows.
+    --   Logs progress once a minute, never fails silently, and returns true
+    --   when the crops are done (false = user stopped).
+    local growthQuiet = false -- the heartbeat stays out of the way while waiting
+    local GROWTH_CAP = 60 * 60 -- give up waiting after an hour
+    local function waitForGrowth()
+        local t0 = os.clock()
+        local lastLog = -60
+        growthQuiet = true
+        setStage("waiting for the crops to grow")
+        log("🌱 waiting for the crops to finish growing — reading every field once a minute")
+        while true do
+            if stopping() then growthQuiet = false return false end
+            local ch = LocalPlayer.Character
+            local root = ch and ch:FindFirstChild("HumanoidRootPart")
+            local crops = findMyFields(root and root.Position or Vector3.zero)
+            local seeded, grown, total, seen = 0, 0, 0, {}
+            for _, m in ipairs(crops) do
+                local st = countStages(m.d)
+                if st and st.total > 0 then
+                    total += st.total
+                    seeded += (st.Seeded or 0)
+                    grown += (whichNeed(JOBS[4], st) or 0)
+                    for name, n in pairs(st) do
+                        if name ~= "total" then seen[name] = (seen[name] or 0) + n end
+                    end
+                end
+            end
+            local elapsed = os.clock() - t0
+            if total > 0 and seeded == 0 then
+                log(string.format("🌱 all %d cell(s) are done growing (%d standing) after %dm %ds — restarting the loop",
+                    total, grown, math.floor(elapsed / 60), math.floor(elapsed % 60)))
+                growthQuiet = false
+                return true
+            end
+            if elapsed - lastLog >= 60 then
+                lastLog = elapsed
+                local parts = {}
+                for name, n in pairs(seen) do parts[#parts + 1] = string.format("%s=%d", name, n) end
+                table.sort(parts)
+                if total == 0 then
+                    log("🌱 no field readable yet — retrying in a minute")
+                else
+                    log(string.format("🌱 growing: %d/%d cell(s) still Seeded, %d grown · %s · waiting",
+                        seeded, total, grown, table.concat(parts, " ")))
+                end
+            end
+            if elapsed >= GROWTH_CAP then
+                log("🌱 still not grown after an hour — restarting the loop anyway instead of waiting forever")
+                growthQuiet = false
+                return true
+            end
+            for _ = 1, 120 do -- 60 s in 0.5 s slices: STOP reacts at once
+                if stopping() then growthQuiet = false return false end
+                task.wait(0.5)
+            end
+        end
+    end
+
     -- ▸ the run's wrapper: the whole pass chain above, then the tools go
     --   back in storage ("when it's done"). A wrapper rather than a call at
     --   the end of the body, so EVERY exit of the body — a finished run or
@@ -4716,13 +4781,29 @@ local okBuild, errBuild = pcall(function()
         --   the thread with the toggle frozen ON and every tool left
         --   standing in the world; now the tools go back to storage and the
         --   caller clears the thread id.
-        local okRun, errRun = pcall(runFarmingBody)
-        beat = false
-        if not okRun then
-            log("⚠ farming loop error: " .. tostring(errRun))
+        -- ▸ the run no longer ends after one chain: it waits for the crops and
+        --   goes again (user: "wait for all the crops to be done growning and
+        --   then it restarts the loop"). Every cycle starts with the tools in
+        --   storage, so the restart hitches them fresh — the same state a clean
+        --   start would have.
+        local cycle = 0
+        while not stopping() do
+            cycle += 1
+            if cycle > 1 then
+                log("🔁 loop restart #" .. cycle .. " — the crops are done growing")
+            end
+            local okRun, errRun = pcall(runFarmingBody)
+            if not okRun then
+                log("⚠ farming loop error: " .. tostring(errRun))
+                storeUnusedTools()
+                break
+            end
+            log("run ended — the last stage it reached was: " .. runStage)
+            storeUnusedTools()
+            if stopping() then break end
+            if not waitForGrowth() then break end
         end
-        log("run ended — the last stage it reached was: " .. runStage)
-        storeUnusedTools()
+        beat = false
     end
 
     -- ▸ SEED PICKER (user: "in the farming section i want a dropdown menu
