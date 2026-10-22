@@ -3080,67 +3080,53 @@ local okBuild, errBuild = pcall(function()
             end
             return true
         end
-        -- the row for the picked seed: a button named by text, else a label
+        -- ▸ THE REAL BUY UI (user's screenshot of the FarmCo menu): talking to
+        --   the owner with the crate in hand opens a CONFIRM POPUP — "Are you
+        --   sure you want to buy 1 item?", the item tile with its price and ONE
+        --   green "Purchase" button (qty is already 1). There is no list to
+        --   choose from and nothing to put on a counter: the popup is already
+        --   for the crate in hand, so the only action is Purchase.
         local want = (seedName:lower():gsub("%s+", ""))
-        local row
-        for _, g in ipairs(views:GetDescendants()) do
-            if g:IsA("TextButton") and isShown(g) then
-                local t = (guiTextOf(g):lower():gsub("%s+", ""))
-                if t == want or t:find(want, 1, true) then row = g break end
-            end
-        end
-        if not row then
+        local firstWord = want:match("^%a+") or want
+        local purchase, labels
+        for _ = 1, 10 do -- up to ~5 s: the popup animates in
+            if stopping() then return false end
+            labels = {}
             for _, g in ipairs(views:GetDescendants()) do
-                if g:IsA("TextLabel") and isShown(g) then
-                    local t = (tostring(g.Text or ""):lower():gsub("%s+", ""))
-                    if t ~= "" and (t == want or t:find(want, 1, true)) then row = g break end
-                end
-            end
-        end
-        local target
-        if not row then
-            -- no menu row: the owner may simply charge for the crate that's
-            -- sitting on the counter (user's flow: "talk the the guy"). Never
-            -- stop here — the balance check below is the judge.
-            local seen = {}
-            for _, g in ipairs(views:GetDescendants()) do
-                if g:IsA("TextButton") and isShown(g) then
-                    local t = guiTextOf(g)
-                    if t and t ~= "" then seen[#seen + 1] = t end
-                    if #seen >= 25 then break end
-                end
-            end
-            log("seed shop: no seed row in the menu — the owner may charge for the crate directly; the visible buttons were: "
-                .. (#seen > 0 and table.concat(seen, " · ") or "none (no menu opened)"))
-        end
-        -- the Buy button: its own row first, then up to 5 ancestors up
-        local node = row
-        if node then
-            for _ = 1, 6 do
-                for _, d in ipairs(node:GetDescendants()) do
-                    if d:IsA("GuiButton") and isShown(d) then
-                        local t = (guiTextOf(d) .. " " .. d.Name):lower()
-                        if t:find("buy", 1, true) or t:find("purchase", 1, true) then
-                            target = d
-                            break
+                if isShown(g) then
+                    if g:IsA("GuiButton") then
+                        local t = (guiTextOf(g) .. " " .. g.Name):lower()
+                        if not purchase and (t:find("purchase", 1, true)
+                            or t:find("confirm", 1, true) or t:find("buy", 1, true)) then
+                            purchase = g
                         end
+                    elseif g:IsA("TextLabel") then
+                        local tx = guiTextOf(g)
+                        if tx and tx ~= "" then labels[#labels + 1] = tx end
                     end
                 end
-                if target or node == views then break end
-                node = node.Parent
             end
-            target = target or (row:IsA("GuiButton") and row or nil)
-            if target then
-                log(string.format("seed shop: clicking %s ('%s') for %s",
-                    target:GetFullName(), guiTextOf(target), seedName))
-                local handled = invokeHandlers(target)
-                if not handled then
-                    log("seed shop: no readable handler on that button (getconnections) — trying :Activate()")
-                    pcall(function() target:Activate() end)
-                end
-            else
-                log("seed shop: the '" .. seedName .. "' row has no Buy button in it — nothing clicked in the menu")
-            end
+            if purchase then break end
+            task.wait(0.5)
+        end
+        local popupText = (labels and #labels > 0)
+            and table.concat(labels, " | ") or "nothing readable"
+        if not purchase then
+            log("seed shop: no Purchase button in the owner's menu — the visible text was: " .. popupText)
+            log("seed shop: nothing clicked (check the shop by hand once)")
+            return false
+        end
+        log("seed shop: buy popup — " .. popupText)
+        local flatText = popupText:lower():gsub("%s+", "")
+        if not flatText:find(firstWord, 1, true) then
+            log(string.format("seed shop: ⚠ that popup does not name '%s' — NOT clicking Purchase", seedName))
+            return false
+        end
+        log(string.format("seed shop: clicking %s ('%s') — 1 × %s",
+            purchase:GetFullName(), guiTextOf(purchase), seedName))
+        if not invokeHandlers(purchase) then
+            log("seed shop: no readable handler on Purchase — trying :Activate()")
+            pcall(function() purchase:Activate() end)
         end
         setStage("shop trip: waiting for the " .. tostring(seedName) .. " purchase to land")
         -- verify: the balance drops, or a box of that seed appears next to us
@@ -3189,7 +3175,16 @@ local okBuild, errBuild = pcall(function()
                 end
             end
         end
-        if not closed then pressKey(Enum.KeyCode.F) end
+        if not closed then
+            -- the confirm popup closes itself on Purchase, so only press F when
+            -- a menu is actually still on screen (F would re-open the owner)
+            local stillOpen = false
+            for _, g in ipairs(views:GetDescendants()) do
+                if g:IsA("GuiButton") and isShown(g) then stillOpen = true break end
+            end
+            if stillOpen then pressKey(Enum.KeyCode.F)
+            else log("seed shop: the popup closed itself — no F needed") end
+        end
         task.wait(0.6)
         if not bought then
             log("⚠ the " .. seedName .. " purchase could NOT be confirmed (the balance didn't move) — check the shop by hand")
