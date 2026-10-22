@@ -868,20 +868,21 @@ local okBuild, errBuild = pcall(function()
     --   written every step, never steered — at 10 studs/s.
     local HARVEST_TWEEN_SPEED = 10 -- studs per second (user's number)
 
-    -- ▸ HOLD A REAL KEY (user: "you need to make the harvester hold w or s to
-    --   make it pick up crops, unless you can find a way to cheat it"). The
-    --   harvest trigger is the game's own controller seeing the PLAYER drive —
-    --   a pure PivotTo slide does not count. So the swath tween holds W (or S)
-    --   for its whole length: the game does the driving, we only keep the
-    --   chassis on the line and on the speed.
-    local function holdKey(key)
-        pcall(function() VIM:SendKeyEvent(true, key, false, game) end)
-    end
-    local function releaseKey(key)
-        pcall(function() VIM:SendKeyEvent(false, key, false, game) end)
+    -- ▸ THE SEAT'S OWN THROTTLE (user: "manipulate it, it is bugging out").
+    --   Holding W made the game's controller and the position tween fight: the
+    --   engine pushed while the tween pulled the chassis back every tick. The
+    --   fix is to stop moving the chassis ourselves: write the SEAT's Throttle
+    --   (the property the local vehicle controller already reads), let the GAME
+    --   drive — which is what registers the crop pickup — and only re-assert
+    --   the row heading plus a lateral snap when it drifts past ~2 studs.
+    local function setThrottle(seat, v)
+        pcall(function()
+            seat.Throttle = v
+            seat.ThrottleFloat = v
+        end)
     end
 
-    local function tweenDriveLeg(tr, from, goal, speed, hold)
+    local function tweenDriveLeg(tr, from, goal, speed)
         speed = speed or HARVEST_TWEEN_SPEED
         local startCF = tr:GetPivot()
         local y = startCF.Position.Y -- stay on the field plane: no hopping
@@ -892,32 +893,73 @@ local okBuild, errBuild = pcall(function()
         if dist < 0.5 then return true end
         local dir = delta / dist
         local rot = CFrame.lookAt(Vector3.zero, dir) -- the fixed heading
-        if hold then holdKey(hold) end
-        -- the whole walk is pcall'd so the held key can NEVER be left down,
-        -- whatever happens inside
+        local travelled, tick = 0, 0.1
+        while travelled < dist do
+            if stopping() then return nil end
+            -- the 1-second full-tank watch works here too
+            if driveWatchTick(tr) then return false end
+            travelled = math.min(dist, travelled + speed * tick)
+            local p = a + dir * travelled
+            tr:PivotTo(CFrame.new(p) * rot)
+            task.wait(tick)
+        end
+        tr:PivotTo(CFrame.new(b) * rot) -- land exactly on the leg end
+        return true
+    end
+
+    -- ▸ THROTTLE-DRIVEN ROW: the game drives, we only keep it on the line.
+    --   Returns true/false like the tween (false = the full-tank watch fired),
+    --   nil = stopped. If the throttle produces no movement in 2.5 s (the game
+    --   ignored the write) the row falls back to the tween, so it can never
+    --   stall — the crops then depend on the game counting the slide.
+    local function throttleRow(tr, seat, from, goal, tol)
+        if not seat then return tweenDriveLeg(tr, from, goal, HARVEST_TWEEN_SPEED) end
+        local y0 = tr:GetPivot().Position.Y
+        local A = Vector3.new(from.X, y0, from.Z)
+        local B = Vector3.new(goal.X, y0, goal.Z)
+        local leg = B - A
+        local legLen = leg.Magnitude
+        if legLen < 1 then return true end
+        local dir = leg / legLen
+        local perp = Vector3.new(-dir.Z, 0, dir.X)
+        local rot = CFrame.lookAt(Vector3.zero, dir)
+        local t0 = os.clock()
+        local deadline = t0 + 12 + legLen / 3
+        local prox0 = tr:GetPivot().Position
         local okRun, res = pcall(function()
-            local travelled, tick = 0, 0.1
-            while travelled < dist do
+            while os.clock() < deadline do
                 if stopping() then return nil end
-                -- the 1-second full-tank watch works here too
                 if driveWatchTick(tr) then return false end
-                travelled = math.min(dist, travelled + speed * tick)
-                -- ▸ step FROM THE LIVE PIVOT, not from a fixed world point: with
-                --   the key held the game's own controller also moves the
-                --   chassis, and a fixed target would yank it back every tick
-                --   (a visible stutter). Adding one step to where the vehicle
-                --   actually IS keeps it moving at our speed on our heading
-                --   while the game does the driving — which is what harvests.
-                local here = tr:GetPivot().Position
-                local p = here + dir * (speed * tick)
-                tr:PivotTo(CFrame.new(Vector3.new(p.X, y, p.Z)) * rot)
-                task.wait(tick)
+                setThrottle(seat, 1)
+                local cf = tr:GetPivot()
+                local p = cf.Position
+                local rel = Vector3.new(p.X, 0, p.Z) - A
+                local along, cross = rel:Dot(dir), rel:Dot(perp)
+                if along >= legLen - (tol or 6) then
+                    tr:PivotTo(CFrame.new(B) * rot) -- square up on the row end
+                    return true
+                end
+                local flat = Vector3.new(cf.LookVector.X, 0, cf.LookVector.Z)
+                local off = flat.Magnitude > 0.1 and flat.Unit:Dot(dir) or 1
+                local yaw = math.deg(math.acos(math.clamp(off, -1, 1)))
+                if yaw > 4 or math.abs(cross) > 2 then
+                    local q = Vector3.new(p.X, p.Y, p.Z) - perp * cross
+                    tr:PivotTo(CFrame.new(q) * rot)
+                end
+                if os.clock() - t0 > 2.5 and
+                    (Vector3.new(p.X, 0, p.Z) - Vector3.new(prox0.X, 0, prox0.Z)).Magnitude < 1.5 then
+                    return "nothrottle"
+                end
+                task.wait(0.1)
             end
-            tr:PivotTo(CFrame.new(b) * rot) -- land exactly on the leg end
-            return true
+            return false
         end)
-        if hold then releaseKey(hold) end
-        if not okRun then return nil end
+        setThrottle(seat, 0)
+        if not okRun or res == nil then return nil end
+        if res == "nothrottle" then
+            log("harvester: the seat throttle didn't move it — tweening this row instead")
+            return tweenDriveLeg(tr, from, goal, HARVEST_TWEEN_SPEED)
+        end
         return res
     end
 
@@ -4037,7 +4079,8 @@ local okBuild, errBuild = pcall(function()
             -- ▸ a harvest leg never touches the keys or the physics mover:
             --   straight tween, fixed heading, 10 studs/s (see tweenDriveLeg)
             if job.selfPropelled then
-                local okT = tweenDriveLeg(tr, from, goal, HARVEST_TWEEN_SPEED, Enum.KeyCode.W)
+                local okT = throttleRow(tr, seat, from, goal,
+                    math.min(7, (goal - from).Magnitude * 0.5))
                 if okT == nil then return nil end
                 return okT
             end
@@ -4549,6 +4592,49 @@ local okBuild, errBuild = pcall(function()
             return true
         end
 
+        -- ▸ EVERY STAGE CHECKS ITSELF (user: "make it see if it missed anything
+        --   on every stage bro"). When a pass ends the fields are re-read: any
+        --   cell still at this stage's own "before" state means a strip was
+        --   missed — the sweep's touch-up handles single cubes, this catches a
+        --   whole leg that never registered — and the pass runs again. Bounded
+        --   to 3 rounds, and it stops when a round changed nothing, so it can
+        --   never ping-pong.
+        local function needLeft(job)
+            local cells, fields = 0, 0
+            for _, m in ipairs(findMyFields(tr:GetPivot().Position)) do
+                local n = whichNeed(job, countStages(m.d))
+                if n and n > 0 then cells += n fields += 1 end
+            end
+            return cells, fields
+        end
+
+        local function passCheck(job, ride, rideSeat)
+            local before = needLeft(job)
+            if not before or before == 0 then
+                log(job.verb .. ": nothing left to do (checked before the pass)")
+                return true
+            end
+            for round = 1, 3 do
+                runPass(job, ride, rideSeat)
+                if stopping() then return false end
+                local after, afields = needLeft(job)
+                if not after or after == 0 then
+                    log(string.format("✅ %s: every cell is done (%d needed it at the start)",
+                        job.verb, before))
+                    return true
+                end
+                log(string.format("%s: %d cell(s) across %d field(s) still need it after round %d — going back",
+                    job.verb, after, afields, round))
+                if round >= 3 or after >= before then
+                    log(string.format("%s: clean-up stops at %d cell(s) — a round changed nothing (check-back retries at the end)",
+                        job.verb, after))
+                    return false
+                end
+                before = after
+            end
+            return false
+        end
+
         -- ▸ THE HARVEST PASS (user: "once it's in the harvester it does the
         --   same loop at the tractor to harvest the crops, goes back and
         --   re does it if any missed"): the SAME field tour + outside-in
@@ -4619,11 +4705,13 @@ local okBuild, errBuild = pcall(function()
         --   fields itself and logs "pass skipped" when nothing is bare —
         --   so cells the HARVEST just turned bare are picked up in the
         --   SAME run instead of waiting for the next one.
-        runPass(JOBS[1])
+        --   Every stage now re-checks its own misses (passCheck) instead of
+        --   leaving them all to the end-of-run check-back.
+        passCheck(JOBS[1])
         if stopping() then return end
         -- ▸ steps 7-10: the cultivate pass (Plowed -> Cultivated) — usually
         --   the same field the plow pass just finished
-        runPass(JOBS[2])
+        passCheck(JOBS[2])
         if stopping() then return end
         -- ▸ SEED CHECK (user: "check everytime after the cultivating") +
         --   SEEDER STEP 2 (user: "if the seeder is full make the tractor
