@@ -3987,12 +3987,18 @@ local okBuild, errBuild = pcall(function()
     --   PivotTo slide along the straight line — fast enough to read as a
     --   teleport, still smooth — keeping the heading it had, and it lands on
     --   the pad's own height instead of the field's.
-    local SELL_HOP_SPEED = 220 -- studs/s
+    local SELL_HOP_SPEED = 140 -- studs/s (the arc makes it read as a jump, not a blur)
+    -- ▸ THE ARC HOP (user: "make the harvester use arch tween thing to go to and
+    --   back from the sell"). A flat slide reads as a teleport glued to the
+    --   ground; this lifts the ride on a sine arc — zero at both ends, highest
+    --   in the middle — while it covers the distance, so the trip reads as a
+    --   jump that lands exactly on the target (Y is the ride's own Y at both
+    --   ends, so it never sinks into the ground or the pad).
     local function hopTo(tr, target, speed)
         speed = speed or SELL_HOP_SPEED
         local cf = tr:GetPivot()
         local from = cf.Position
-        local to = Vector3.new(target.X, from.Y, target.Z) -- flat hop: same as the field tween, no hopping into the air
+        local to = Vector3.new(target.X, from.Y, target.Z)
         local rot = cf - cf.Position -- heading only, zero position
         local flat = Vector3.new(to.X - from.X, 0, to.Z - from.Z)
         local dist = flat.Magnitude
@@ -4001,11 +4007,16 @@ local okBuild, errBuild = pcall(function()
             return true
         end
         local dir = flat / dist
-        local travelled, tick = 0, 0.1
+        -- the arc grows with the trip but is capped: a 400-stud errand must not
+        -- leave the map. 0.22 × distance, 10…60 studs of lift.
+        local lift = math.clamp(dist * 0.22, 10, 60)
+        local travelled, tick = 0, 0.03
         while travelled < dist do
             if stopping() then return nil end
             travelled = math.min(dist, travelled + speed * tick)
+            local t = travelled / dist
             local p = from + dir * travelled
+            p = Vector3.new(p.X, from.Y + lift * math.sin(math.pi * t), p.Z)
             tr:PivotTo(CFrame.new(p) * rot)
             task.wait(tick)
         end
@@ -4029,17 +4040,20 @@ local okBuild, errBuild = pcall(function()
         -- the 1-second watch is muted for the whole trip: the tank is STILL
         -- full while driving to the pad, and it must not abort that drive
         sellingNow = true
+        -- where it left the rows: the trip back is ONE arc hop to this exact
+        -- spot (user: "use arch tween thing to go to and back from the sell")
+        local back = ride:GetPivot().Position
         for i, s in ipairs(spots) do
             if stopping() then sellingNow = false return false end
-            log(string.format("sell point %d/%d: %s at (%.0f, %.0f) — straight hop, no pathfinding", i, #spots,
+            log(string.format("sell point %d/%d: %s at (%.0f, %.0f) — arc hop, no pathfinding", i, #spots,
                 s.what, s.p.X, s.p.Z))
             local ok = hopTo(ride, s.p, SELL_HOP_SPEED)
             if not ok then
                 log("couldn't hop to " .. s.what .. " (hop interrupted)")
             elseif trySellAt(ride, s.what) then
                 if field and field.Parent then
-                    log("back to " .. field.Name .. " to finish the harvest")
-                    driveToField(ride, field, seat, ride)
+                    log("arc back to " .. field.Name .. " to finish the harvest")
+                    hopTo(ride, back, SELL_HOP_SPEED)
                 end
                 sellingNow = false
                 watchHit = false
