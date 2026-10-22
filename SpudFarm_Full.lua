@@ -4726,7 +4726,13 @@ local okBuild, errBuild = pcall(function()
         Title = "🔄 Reload latest update",
         Callback = function()
             log("fetching latest build…")
-            local ok, src = pcall(function() return game:HttpGet(SCRIPT_URL, true) end)
+            -- ▸ CACHE BUSTER. GitHub's raw CDN holds a branch URL for a few
+            --   minutes, so a fresh push could reload as the OLD build and
+            --   look like "the button isn't there". A unique query string
+            --   makes the executor fetch the current file instead.
+            local bust = string.format("%s?t=%d&r=%d", SCRIPT_URL,
+                math.floor(os.time()), math.random(1, 999999))
+            local ok, src = pcall(function() return game:HttpGet(bust, true) end)
             if not ok or type(src) ~= "string" or #src < 100 then
                 log("ERROR fetch failed — staying on current version")
                 Fluent:Notify({ Title = "SPUD FARM", Content = "Update fetch failed — keeping current version", Duration = 5 })
