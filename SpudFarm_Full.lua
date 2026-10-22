@@ -583,11 +583,25 @@ local okBuild, errBuild = pcall(function()
                     end
                 end
             end
+            -- ▸ IS THE CARD ACTUALLY ON SCREEN (user: "it calls the card before
+            --   they are even visible")? A card object exists in the tree as
+            --   soon as the list is built, but the menu populates LATE and each
+            --   card is laid out / made visible a moment later — clicking the
+            --   handler of a card that hasn't been shown yet does nothing, and
+            --   the old code clicked once and gave up.
+            local function onScreen(o)
+                local hop = o
+                while hop and hop ~= menu do
+                    if hop:IsA("GuiObject") and not hop.Visible then return false end
+                    hop = hop.Parent
+                end
+                return o.AbsoluteSize.X > 1 and o.AbsoluteSize.Y > 1
+            end
             local card
-            for _ = 1, 20 do -- ~5 s for the card list to populate
+            for _ = 1, 40 do -- ~10 s for the card list to populate and lay out
                 if stopping() then break end
                 card = findCard()
-                if card then break end
+                if card and onScreen(card) then break end
                 task.wait(0.25)
             end
             -- ▸ DIAGNOSTIC (user: "the seeder respawn does not work. we
@@ -626,6 +640,9 @@ local okBuild, errBuild = pcall(function()
                     .. " — it is not among the cards listed above")
                 closeManager(menu, garageBtn)
                 return false
+            end
+            if not onScreen(card) then
+                log("equipment manager: the " .. vehicleName .. " card exists but never became visible — using it anyway")
             end
             -- select the card by calling the game's OWN handler (NO mouse;
             -- user rule), judged by the ExpandedCard naming THIS vehicle
@@ -682,8 +699,23 @@ local okBuild, errBuild = pcall(function()
                 return (t ~= nil and t ~= ""
                     and t:sub(1, #vehicleName) == vehicleName)
             end
-            clickEffect(card, expandedShows)
-            if not expandedShows() then
+            -- ▸ CLICK THE CARD UNTIL THE DETAIL VIEW OPENS (user: "it calls the
+            --   card before they are even visible"). One click was the whole
+            --   story: if the card had just been created its handler ran
+            --   against an empty ExpandedCard and nothing happened. Three
+            --   tries, re-finding the card each time (the list can be rebuilt
+            --   while it populates).
+            local opened = false
+            for i = 1, 3 do
+                if stopping() then break end
+                card = findCard() or card
+                clickEffect(card, expandedShows)
+                if expandedShows() then opened = true break end
+                log(string.format("equipment manager: card click %d/3 didn't open the detail view (it shows '%s') — retrying",
+                    i, (expandedName() or "nothing")))
+                task.wait(0.6)
+            end
+            if not opened then
                 -- log what the detail view DOES name, so a structure
                 -- surprise is diagnosable from the Console alone
                 local t = expandedName()
@@ -879,6 +911,10 @@ local okBuild, errBuild = pcall(function()
         pcall(function()
             seat.Throttle = v
             seat.ThrottleFloat = v
+            -- hold the wheel straight too: if the game's controller is still
+            -- feeding Steer from input, a leftover value curves the row
+            seat.Steer = 0
+            seat.SteerFloat = 0
         end)
     end
 
@@ -4122,6 +4158,19 @@ local okBuild, errBuild = pcall(function()
             st0 and string.format("%d/%d cells still need %s", need0, st0.total, job.prog)
                 or "cell read unavailable"))
         local realDrive -- nil = not probed yet; true = seat driving; false = glide
+        -- ▸ THE TANK, BEFORE AND AFTER THIS FIELD (diagnostic): "the harvester is
+        --   still not harvesting" needs ONE fact — does the game count the
+        --   movement we produce? If the tank is identical after a whole field,
+        --   the row drive is what has to change, not the sell trip.
+        local tank0 = job.selfPropelled and harvesterLoad(tr) or nil
+        if job.selfPropelled then
+            log(string.format("harvest: driving %s (EquipmentType=%s) — tank %s",
+                tr.Name, tostring(tr:GetAttribute("EquipmentType")), tostring(tank0)))
+            if tank0 == nil then
+                log("⚠ harvest: the tank isn't readable on " .. tr.Name
+                    .. " (no Configurations.Capacity) — the fill and the sell both depend on it")
+            end
+        end
         local sellTries = 0
         -- field driving starts on the ALIGN mover: binary WASD hunts across the
         -- line, the mover holds it. One fallback per sweep if it gets stuck.
@@ -4319,6 +4368,13 @@ local okBuild, errBuild = pcall(function()
             end
         else
             log("sweep done — cell read unavailable, check the field visually")
+        end
+        if tank0 ~= nil then
+            local tank1 = harvesterLoad(tr)
+            log(string.format("harvest: tank %s → %s after this field", tostring(tank0), tostring(tank1)))
+            if tank1 == tank0 then
+                log("⚠ the tank did NOT move while driving the rows — the game isn't counting this movement as harvesting")
+            end
         end
         return true
     end
