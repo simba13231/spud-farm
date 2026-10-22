@@ -907,12 +907,21 @@ local okBuild, errBuild = pcall(function()
         return true
     end
 
-    -- ▸ THROTTLE-DRIVEN ROW: the game drives, we only keep it on the line.
+    -- ▸ THROTTLE-DRIVEN ROW, NO SNAPS (user: "the feild pathfinding is kinda
+    --   fucked up … it snaps/teleports at row ends, goes off the field and past
+    --   the specified field"). Three rules:
+    --   1. TURN FIRST, SMOOTHLY — the nose is eased onto the row at TURN_RATE
+    --      with the throttle shut, so a row never starts with a CFrame snap and
+    --      a 180° row reversal is a visible turn, not a teleport.
+    --   2. NO POSITION SNAPS — drift is corrected at most 0.4 studs per tick,
+    --      and the row end is ACCEPTED where the vehicle is (never PivotTo'd
+    --      onto the target point, which was a multi-stud jump every row).
+    --   3. BRAKE EARLY — throttle off ~10 studs before the row end and accept at
+    --      4, so momentum cannot carry it past the plot edge and into a fence.
     --   Returns true/false like the tween (false = the full-tank watch fired),
-    --   nil = stopped. If the throttle produces no movement in 2.5 s (the game
-    --   ignored the write) the row falls back to the tween, so it can never
-    --   stall — the crops then depend on the game counting the slide.
-    local function throttleRow(tr, seat, from, goal, tol)
+    --   nil = stopped. If the throttle produces no movement the row falls back
+    --   to the tween, so it can never stall.
+    local function throttleRow(tr, seat, from, goal)
         if not seat then return tweenDriveLeg(tr, from, goal, HARVEST_TWEEN_SPEED) end
         local y0 = tr:GetPivot().Position.Y
         local A = Vector3.new(from.X, y0, from.Z)
@@ -922,33 +931,64 @@ local okBuild, errBuild = pcall(function()
         if legLen < 1 then return true end
         local dir = leg / legLen
         local perp = Vector3.new(-dir.Z, 0, dir.X)
-        local rot = CFrame.lookAt(Vector3.zero, dir)
-        local t0 = os.clock()
-        local deadline = t0 + 12 + legLen / 3
+        local TURN_RATE = math.rad(150) -- per second
+        local BRAKE, ACCEPT = 10, 4
+        local deadline = os.clock() + 15 + legLen / 3 + 2
         local prox0 = tr:GetPivot().Position
+        local throttleSince
+        local coastPrev, coastClock = tr:GetPivot().Position, os.clock()
         local okRun, res = pcall(function()
             while os.clock() < deadline do
                 if stopping() then return nil end
                 if driveWatchTick(tr) then return false end
-                setThrottle(seat, 1)
                 local cf = tr:GetPivot()
                 local p = cf.Position
+                local flat = Vector3.new(cf.LookVector.X, 0, cf.LookVector.Z)
+                flat = flat.Magnitude > 0.1 and flat.Unit or dir
                 local rel = Vector3.new(p.X, 0, p.Z) - A
                 local along, cross = rel:Dot(dir), rel:Dot(perp)
-                if along >= legLen - (tol or 6) then
-                    tr:PivotTo(CFrame.new(B) * rot) -- square up on the row end
-                    return true
-                end
-                local flat = Vector3.new(cf.LookVector.X, 0, cf.LookVector.Z)
-                local off = flat.Magnitude > 0.1 and flat.Unit:Dot(dir) or 1
-                local yaw = math.deg(math.acos(math.clamp(off, -1, 1)))
-                if yaw > 4 or math.abs(cross) > 2 then
-                    local q = Vector3.new(p.X, p.Y, p.Z) - perp * cross
-                    tr:PivotTo(CFrame.new(q) * rot)
-                end
-                if os.clock() - t0 > 2.5 and
-                    (Vector3.new(p.X, 0, p.Z) - Vector3.new(prox0.X, 0, prox0.Z)).Magnitude < 1.5 then
-                    return "nothrottle"
+                local remaining = legLen - along
+                local ang = math.acos(math.clamp(flat:Dot(dir), -1, 1))
+                if ang > math.rad(3) then
+                    -- turning: no throttle, eased heading, position untouched
+                    setThrottle(seat, 0)
+                    throttleSince = nil
+                    local step = math.min(ang, TURN_RATE * 0.1)
+                    local axis = flat:Cross(dir)
+                    local signed = CFrame.fromAxisAngle(Vector3.yAxis,
+                        (axis.Y >= 0 and 1 or -1) * step)
+                    local nd = signed * flat
+                    nd = Vector3.new(nd.X, 0, nd.Z)
+                    if nd.Magnitude > 0.01 then
+                        tr:PivotTo(CFrame.new(p) * CFrame.lookAt(Vector3.zero, nd.Unit))
+                    end
+                else
+                    if remaining <= ACCEPT then return true end -- accept HERE: no snap
+                    if remaining <= BRAKE then
+                        -- braking: accept once the coast really stopped (a short
+                        -- row or heavy soil stops it before ACCEPT, and waiting
+                        -- for the deadline would stall the whole sweep)
+                        setThrottle(seat, 0)
+                        local now = os.clock()
+                        if (p - coastPrev).Magnitude > 0.3 then
+                            coastPrev, coastClock = p, now
+                        elseif now - coastClock > 0.6 then
+                            return true
+                        end
+                    else
+                        setThrottle(seat, 1)
+                        throttleSince = throttleSince or os.clock()
+                        -- gentle lane keep: never a multi-stud jump
+                        if math.abs(cross) > 1 then
+                            local shift = math.clamp(cross, -0.4, 0.4)
+                            local q = Vector3.new(p.X, p.Y, p.Z) - perp * shift
+                            tr:PivotTo(CFrame.new(q) * CFrame.lookAt(Vector3.zero, dir))
+                        end
+                        if throttleSince and os.clock() - throttleSince > 2.5 and
+                            (Vector3.new(p.X, 0, p.Z) - Vector3.new(prox0.X, 0, prox0.Z)).Magnitude < 1.5 then
+                            return "nothrottle"
+                        end
+                    end
                 end
                 task.wait(0.1)
             end
@@ -4051,7 +4091,11 @@ local okBuild, errBuild = pcall(function()
         -- +12 run-out past the field ends (user: turn too tight → doubled
         -- the old +6): the turns happen off the field in open grass, and
         -- the trailing plow still covers the edge cells
-        local driveHalf = (alongX and baseSize.X or baseSize.Z) / 2 + 12
+        -- ▸ the HARVESTER gets NO run-out: it turns in place between rows, and
+        --   driving 12 studs past the plot is exactly the user's "it goes past
+        --   the specified field" — straight through the fence.
+        local runOut = job.selfPropelled and 0 or 12
+        local driveHalf = (alongX and baseSize.X or baseSize.Z) / 2 + runOut
         local rowSpan   = (alongX and baseSize.Z or baseSize.X)
         -- THE SPIRAL (user's drawing): concentric rectangular laps from
         -- the OUTSIDE IN — each lap's long sides cover their step band
@@ -4079,8 +4123,7 @@ local okBuild, errBuild = pcall(function()
             -- ▸ a harvest leg never touches the keys or the physics mover:
             --   straight tween, fixed heading, 10 studs/s (see tweenDriveLeg)
             if job.selfPropelled then
-                local okT = throttleRow(tr, seat, from, goal,
-                    math.min(7, (goal - from).Magnitude * 0.5))
+                local okT = throttleRow(tr, seat, from, goal)
                 if okT == nil then return nil end
                 return okT
             end
