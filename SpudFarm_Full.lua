@@ -1437,7 +1437,7 @@ local okBuild, errBuild = pcall(function()
             mark(cf.Position.X - ex / 2 - pad, cf.Position.X + ex / 2 + pad,
                  cf.Position.Z - ez / 2 - pad, cf.Position.Z + ez / 2 + pad)
         end
-        local function scan(container, depth)
+        local function scan(container)
             if not container then return end
             for _, m in ipairs(container:GetChildren()) do
                 if m ~= ignore1 and m ~= ignore2 then
@@ -1447,9 +1447,13 @@ local okBuild, errBuild = pcall(function()
                             markPart(m)
                         end
                     elseif m:IsA("Model") or m:IsA("Folder") then
-                        -- nested categories (Buildings.<type>.<building>)
-                        -- count too; a real barn isn't always a direct child
-                        if (depth or 0) < 2 then scan(m, (depth or 0) + 1) end
+                        -- ▸ ALL THE WAY DOWN, not two levels (regression: the
+                        --   depth cap stopped at Model/Folder, and a tractor's
+                        --   parts sit at Equipment.ZM80.Body.SkinGroups.Other
+                        --   — three deep — so almost nothing solid got marked
+                        --   and the route cut straight through parked gear and
+                        --   buildings. A barn is not a child-level Model.)
+                        scan(m)
                     end
                 end
             end
@@ -1709,8 +1713,12 @@ local okBuild, errBuild = pcall(function()
                 local k = ix * 100000 + iz
                 if blocked[k] then return false end
                 -- long shortcuts keep a real margin: never cut closer than
-                -- 2 clear cells to anything the mapper marked
-                if (clearDist[k] or 0) < 2 then return false end
+                -- 2 clear cells to anything the mapper marked. The two ENDS
+                -- are exempt — we are already standing on the start cell and
+                -- the goal is the target, so demanding clearance there made
+                -- lineClear fail on every hop whenever the ride was parked
+                -- beside a tool, and the route collapsed into 6-stud steps.
+                if i > 0 and i < steps and (clearDist[k] or 0) < 2 then return false end
             end
             return true
         end
@@ -3421,8 +3429,26 @@ local okBuild, errBuild = pcall(function()
                 end
             end
         end)
-        if #cands == 0 then return {} end
-        -- only pads whose NEAREST store is the crop store; if that filter
+        -- ▸ THE SELL BOARDS (live dump: Markers.GotoLocations.SellBoardSeeds /
+        --   SellBoardAnimal / SellBoardLumber). Stores.DropOffs,
+        --   SellValueBoards and BoostSellValues are EMPTY in the dump, and the
+        --   only AreaMarker is FarmCoParkingLot — so the crop sell pad had no
+        --   real candidate and the trip parked at the parking lot, where
+        --   nothing sells. The crop board is the harvester's sell point.
+        pcall(function()
+            local markers = workspace:FindFirstChild("Markers")
+            local gotos = markers and markers:FindFirstChild("GotoLocations")
+            local g = gotos and gotos:FindFirstChild("SellBoardSeeds")
+            if not (g and g:IsA("BasePart")) then return end
+            local top = g.Position + Vector3.new(0, g.Size.Y / 2, 0)
+            cands[#cands + 1] = {
+                p = top, what = "SellBoardSeeds (crop sell board)", named = true,
+                board = true, store = "FarmCo",
+                dist = farm and (top - farm).Magnitude or 1e9,
+                y = top.Y, area = g.Size.X * g.Size.Z,
+            }
+        end)
+        if #cands == 0 then return {} end        -- only pads whose NEAREST store is the crop store; if that filter
         -- empties the list, keep everything rather than refusing to sell
         local atFarm = {}
         for _, c in ipairs(cands) do
@@ -3432,6 +3458,8 @@ local okBuild, errBuild = pcall(function()
         end
         local pool = #atFarm > 0 and atFarm or cands
         table.sort(pool, function(a, b)
+            -- the named crop sell board outranks every unnamed pad
+            if a.board ~= b.board then return a.board and true or false end
             -- 40-stud buckets, so tiny differences don't reorder the list
             local ad, bd = math.floor(a.dist / 40), math.floor(b.dist / 40)
             if ad ~= bd then return ad < bd end
