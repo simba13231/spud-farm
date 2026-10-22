@@ -1757,12 +1757,19 @@ local okBuild, errBuild = pcall(function()
         end
         pts[#pts + 1] = { goalPos.X, goalPos.Z }
 
-        -- ▸ ROUND THE CORNERS, DROP DUPLICATES. A raw A* polyline turns in
-        --   place, so the align driver has to swing the nose through the
-        --   whole angle at every corner (and the towed tool swings wider
-        --   still). Each sharp vertex becomes a short chamfer — and the
-        --   chamfer is only used when it is ITSELF clear, so a rounded
-        --   corner can never clip what the polyline avoided.
+        -- ▸ CURVES, NOT SQUARES (user: "use curves not squares"). A chamfer
+        --   cut at most 10 studs off a corner — a ~45° kink that the nose has
+        --   to swing in one go, with the towed tool swinging wider still. Each
+        --   sharp vertex is now a QUADRATIC BEZIER arc (q1 → q → q2) sampled
+        --   every ~1.6 studs, and the radius is grown until the arc's own
+        --   samples are all free: try 22 studs, then 14, then 8, else keep the
+        --   vertex sharp. Long straights stay single segments, so the tween
+        --   driver still works leg by leg.
+        local function freeAt(x, z)
+            local ix, iz = cellOf(x, x0), cellOf(z, z0)
+            if ix < 0 or iz < 0 or ix >= nx or iz >= nz then return false end
+            return not blocked[ix * 100000 + iz]
+        end
         local out = { pts[1] }
         for i = 2, #pts - 1 do
             local p, q, r = pts[i - 1], pts[i], pts[i + 1]
@@ -1770,21 +1777,35 @@ local okBuild, errBuild = pcall(function()
             local d2x, d2z = r[1] - q[1], r[2] - q[2]
             local l1 = math.sqrt(d1x * d1x + d1z * d1z)
             local l2 = math.sqrt(d2x * d2x + d2z * d2z)
-            local rounded = false
-            if l1 > 8 and l2 > 8 then
+            local curved = false
+            if l1 > 6 and l2 > 6 then
                 local cosang = (d1x * d2x + d1z * d2z) / (l1 * l2)
-                if cosang < 0.7 then -- a turn sharper than ~45°
-                    local d = math.min(10, l1 * 0.35, l2 * 0.35)
-                    local q1 = { q[1] - d1x / l1 * d, q[2] - d1z / l1 * d }
-                    local q2 = { q[1] + d2x / l2 * d, q[2] + d2z / l2 * d }
-                    if lineClear(q1[1], q1[2], q2[1], q2[2]) then
-                        out[#out + 1] = q1
-                        out[#out + 1] = q2
-                        rounded = true
+                if cosang < 0.94 then -- anything past ~20° of turn
+                    for _, want in ipairs({ 22, 14, 8 }) do
+                        local d = math.min(want, l1 * 0.45, l2 * 0.45)
+                        local q1x, q1z = q[1] - d1x / l1 * d, q[2] - d1z / l1 * d
+                        local q2x, q2z = q[1] + d2x / l2 * d, q[2] + d2z / l2 * d
+                        local n = math.max(4, math.ceil(d / 1.6))
+                        local okArc = freeAt(q1x, q1z) and freeAt(q2x, q2z)
+                        local samples = {}
+                        for k = 1, n do
+                            local t = k / n
+                            local u = 1 - t
+                            local sx = u * u * q1x + 2 * u * t * q[1] + t * t * q2x
+                            local sz = u * u * q1z + 2 * u * t * q[2] + t * t * q2z
+                            samples[k] = { sx, sz }
+                            if okArc and not freeAt(sx, sz) then okArc = false end
+                        end
+                        if okArc then
+                            out[#out + 1] = { q1x, q1z }
+                            for _, sp in ipairs(samples) do out[#out + 1] = sp end
+                            curved = true
+                            break
+                        end
                     end
                 end
             end
-            if not rounded then out[#out + 1] = q end
+            if not curved then out[#out + 1] = q end
         end
         out[#out + 1] = pts[#pts]
         local final = { out[1] }
@@ -1875,6 +1896,33 @@ local okBuild, errBuild = pcall(function()
     -- nose may swing — that is the "tween to align": the chassis rotates
     -- smoothly instead of snapping. The pull is always along the NOSE: a
     -- wheeled tractor pushes forward, it never slides sideways.
+    -- ▸ AIM AT ONE POINT (pure pursuit). Steering only: the nose eases toward
+    --   the aim at ALIGN_YAW, thrust is always along the nose, and the speed
+    --   drops while the nose is still turning. alignDriveStep calls it with a
+    --   point on a straight leg; the route follower calls it with a point a
+    --   LOOKAHEAD ahead along the whole path — aiming at a point ahead, not at
+    --   the next leg end, is what turns a Bezier corner into one continuous
+    --   arc instead of "drive to the corner, then rotate".
+    local function alignDriveAim(h, tr, aimX, aimZ, dt)
+        local p = tr:GetPivot().Position
+        local want = Vector3.new(aimX - p.X, 0, aimZ - p.Z)
+        local dist = want.Magnitude
+        if dist < 0.5 then return 0 end
+        want = want / dist
+        local ang = math.acos(math.clamp(h.dir:Dot(want), -1, 1))
+        if ang > 1e-4 then
+            local t = math.min(1, math.rad(ALIGN_YAW) * (dt or 0.12) / ang)
+            h.dir = (h.dir * (1 - t) + want * t).Unit
+        end
+        -- creep while the nose is still turning (the key driver's rule)
+        h.pos.MaxVelocity = math.clamp(ALIGN_MAXVEL * (1 - ang / 1.6),
+            ALIGN_MAXVEL * 0.15, ALIGN_MAXVEL)
+        h.ori.CFrame = CFrame.lookAt(Vector3.zero, h.dir)
+        local goal = p + h.dir * math.clamp(dist, 2, ALIGN_AIM)
+        h.pos.Position = Vector3.new(goal.X, p.Y, goal.Z)
+        return ang
+    end
+
     local function alignDriveStep(h, tr, ax, az, bx, bz, dt)
         local p = tr:GetPivot().Position
         local A = Vector3.new(ax, 0, az)
@@ -1885,20 +1933,7 @@ local okBuild, errBuild = pcall(function()
         local dir = leg / legLen
         local along = (Vector3.new(p.X, 0, p.Z) - A):Dot(dir)
         local aim = A + dir * math.clamp(along + ALIGN_AIM, 0, legLen)
-        local want = Vector3.new(aim.X - p.X, 0, aim.Z - p.Z)
-        if want.Magnitude < 0.5 then return end
-        want = want.Unit
-        local ang = math.acos(math.clamp(h.dir:Dot(want), -1, 1))
-        if ang > 1e-4 then
-            local t = math.min(1, math.rad(ALIGN_YAW) * (dt or 0.12) / ang)
-            h.dir = (h.dir * (1 - t) + want * t).Unit
-        end
-        -- creep while the nose is still turning (the key driver's rule)
-        h.pos.MaxVelocity = math.clamp(ALIGN_MAXVEL * (1 - ang / 1.6),
-            ALIGN_MAXVEL * 0.15, ALIGN_MAXVEL)
-        h.ori.CFrame = CFrame.lookAt(Vector3.zero, h.dir)
-        local goal = p + h.dir * math.min((aim - p).Magnitude, ALIGN_AIM)
-        h.pos.Position = Vector3.new(goal.X, p.Y, goal.Z)
+        alignDriveAim(h, tr, aim.X, aim.Z, dt)
     end
 
     -- ▸ ONE STRAIGHT LEG ON THE ALIGN MOVER (user: "we got to change the way
@@ -2010,8 +2045,8 @@ local okBuild, errBuild = pcall(function()
                 return false, "no safe route (" .. tostring(info) .. ")"
             end
         else
-            log(string.format("path: %d legs, %d obstacle part(s) mapped (tool margin %d)",
-                #legs - 1, info, hull))
+            log(string.format("path: %d point(s) (corners are arcs), %d obstacle part(s) mapped (tool margin %d)",
+                #legs, info, hull))
         end
         local useKeys = driveLegKeys ~= nil
         -- ▸ the HARVESTER never uses the align mover or WASD here either: the
@@ -2043,9 +2078,63 @@ local okBuild, errBuild = pcall(function()
         local alignClock, alignMark = os.clock(), tr:GetPivot().Position
         -- telemetry: measured with the game's own positions, not our intent —
         -- the first run then says WHICH number is wrong instead of guessing
-        local telePrev, teleClock = tr:GetPivot().Position, os.clock()
+        local teleClock = os.clock()
         local teleMax, teleSum, teleN = 0, 0, 0
         local li, lastPlan, pass = 2, 0, 0
+        -- ▸ ARC LENGTH + PURE PURSUIT (user: "use curves not squares"). Every
+        --   point is measured along the path, and the driver aims at the point
+        --   LOOKAHEAD studs FURTHER ALONG IT instead of at the next leg end.
+        --   With the Bézier corner samples that turns a squared corner into one
+        --   continuous arc: the aim point slides around the corner while the
+        --   nose eases in, and the lookahead grows with speed so a fast leg is
+        --   entered smoothly instead of snapped into.
+        local cum = {}
+        local function remeasure()
+            cum = { 0 }
+            for i = 2, #legs do
+                local dx, dz = legs[i][1] - legs[i - 1][1], legs[i][2] - legs[i - 1][2]
+                cum[i] = cum[i - 1] + math.sqrt(dx * dx + dz * dz)
+            end
+        end
+        remeasure()
+        local function pointAt(s)
+            local last = #legs
+            if last < 2 or s <= 0 then return legs[1][1], legs[1][2] end
+            if s >= cum[last] then return legs[last][1], legs[last][2] end
+            local lo, hi = 1, last
+            while hi - lo > 1 do
+                local mid = math.floor((lo + hi) / 2)
+                if cum[mid] <= s then lo = mid else hi = mid end
+            end
+            local seg = cum[lo + 1] - cum[lo]
+            local t = seg > 1e-6 and (s - cum[lo]) / seg or 0
+            return legs[lo][1] + (legs[lo + 1][1] - legs[lo][1]) * t,
+                legs[lo][2] + (legs[lo + 1][2] - legs[lo][2]) * t
+        end
+        -- nearest point on the path, searched in a window around the cursor so
+        -- a path that crosses itself cannot steal the cursor
+        local function project(px, pz, hint)
+            if #legs < 2 then return 0, 0, hint end
+            local bestD, bestS, bestI = math.huge, 0, hint
+            local from = math.max(1, hint - 2)
+            local to = math.min(#legs - 1, hint + 30)
+            for i = from, to do
+                local ax, az = legs[i][1], legs[i][2]
+                local dx, dz = legs[i + 1][1] - ax, legs[i + 1][2] - az
+                local ll = dx * dx + dz * dz
+                local t = 0
+                if ll > 1e-6 then
+                    t = math.clamp(((px - ax) * dx + (pz - az) * dz) / ll, 0, 1)
+                end
+                local ex, ez = px - (ax + dx * t), pz - (az + dz * t)
+                local dd = math.sqrt(ex * ex + ez * ez)
+                if dd < bestD then
+                    bestD, bestS, bestI = dd, cum[i] + t * math.sqrt(ll), i + 1
+                end
+            end
+            return bestS, bestD, bestI
+        end
+        local spdPrev, spdClock, spdEma = tr:GetPivot().Position, os.clock(), 0
         local deadline = os.clock() + 120
         while os.clock() < deadline do
             pass += 1
@@ -2079,9 +2168,10 @@ local okBuild, errBuild = pcall(function()
                 if stopping() then alignDriveStop(ah) return nil end
                 if newLegs then
                     if info ~= n then
-                        log(string.format("re-routed: %d legs, %d obstacle part(s) mapped", #newLegs - 1, n))
+                        log(string.format("re-routed: %d point(s), %d obstacle part(s) mapped", #newLegs, n))
                     end
                     legs, info = newLegs, n
+                    remeasure()
                     -- follow the FRESH path from here (legs[1] = now). On a
                     -- failed replan the old legs keep their old first point,
                     -- so the cursor must not be reset to it.
@@ -2090,25 +2180,59 @@ local okBuild, errBuild = pcall(function()
                     log("re-plan failed (" .. tostring(n) .. ") — keeping the last path")
                 end
             end
-            local g = legs[math.min(li, #legs)]
-            local d = (Vector3.new(p.X, 0, p.Z) - Vector3.new(g[1], 0, g[2])).Magnitude
-            if d <= 6 then
-                if li < #legs then
-                    li += 1
-                    g = legs[li]
-                else
+            if useAlign then
+                -- ▸ PURE PURSUIT on the whole path.
+                local now = os.clock()
+                local dt2 = now - spdClock
+                if dt2 > 0.05 then
+                    spdEma = spdEma * 0.6 + ((p - spdPrev).Magnitude / dt2) * 0.4
+                    spdPrev, spdClock = p, now
+                end
+                local s, off, seg = project(p.X, p.Z, li)
+                li = math.min(seg, #legs)
+                teleMax = math.max(teleMax, off)
+                teleSum, teleN = teleSum + off, teleN + 1
+                if cum[#legs] - s <= 8 then
                     local dg = (Vector3.new(p.X, 0, p.Z) - Vector3.new(goal.X, 0, goal.Z)).Magnitude
-                    if dg <= 8 then
-                        if useAlign then
-                            log(string.format("route: arrived in %d ticks — worst line error %.1f studs",
-                                pass, teleMax))
-                        end
+                    if dg <= 12 then
+                        log(string.format("route: arrived in %d ticks — worst line error %.1f studs",
+                            pass, teleMax))
                         alignDriveStop(ah)
                         return true, pass
                     end
                 end
-            end
-            if isHarvestRide then
+                -- lookahead grows with measured speed (12 studs at rest → 30)
+                local Ld = math.clamp(12 + spdEma * 0.5, ALIGN_AIM, 30)
+                local axp, azp = pointAt(s + Ld)
+                if now - teleClock >= 1 then
+                    local nose = seat and seat.CFrame.LookVector or Vector3.new(0, 0, 1)
+                    local want = Vector3.new(axp - p.X, 0, azp - p.Z)
+                    local n2 = Vector3.new(nose.X, 0, nose.Z)
+                    local ang = 0
+                    if n2.Magnitude > 0.1 and want.Magnitude > 0.5 then
+                        ang = math.deg(math.acos(math.clamp(n2.Unit:Dot(want.Unit), -1, 1)))
+                    end
+                    log(string.format("route: line %.1f studs off · %.0f studs/s · nose %.0f° off · point %d/%d",
+                        teleSum / math.max(teleN, 1), spdEma, ang, li, #legs))
+                    teleClock = now
+                    teleSum, teleN = 0, 0
+                end
+                alignDriveAim(ah, tr, axp, azp, 0.12)
+            elseif isHarvestRide then
+                local g = legs[math.min(li, #legs)]
+                local d = (Vector3.new(p.X, 0, p.Z) - Vector3.new(g[1], 0, g[2])).Magnitude
+                if d <= 6 then
+                    if li < #legs then
+                        li += 1
+                        g = legs[li]
+                    else
+                        local dg = (Vector3.new(p.X, 0, p.Z) - Vector3.new(goal.X, 0, goal.Z)).Magnitude
+                        if dg <= 8 then
+                            alignDriveStop(ah)
+                            return true, pass
+                        end
+                    end
+                end
                 -- one A* leg per tween: land on the waypoint, the loop then
                 -- advances the cursor exactly as the driven path does
                 local okT = tweenDriveLeg(tr, p, Vector3.new(g[1], p.Y, g[2]), TRAVEL_TWEEN_SPEED)
@@ -2123,44 +2247,33 @@ local okBuild, errBuild = pcall(function()
                     return true, pass
                 end
                 task.wait(0.05) -- always yield, even on a zero-length leg
-            elseif useAlign then
-                -- cross-track error vs the leg we are on, once a second
-                local a1 = legs[math.max(li - 1, 1)]
-                local lx, lz = g[1] - a1[1], g[2] - a1[2]
-                local ll = math.sqrt(lx * lx + lz * lz)
-                if ll > 0.5 then
-                    lx, lz = lx / ll, lz / ll
-                    local off = math.abs((p.X - a1[1]) * lz - (p.Z - a1[2]) * lx)
-                    teleMax = math.max(teleMax, off)
-                    teleSum, teleN = teleSum + off, teleN + 1
-                end
-                local now = os.clock()
-                if now - teleClock >= 1 then
-                    local spd = (p - telePrev).Magnitude / (now - teleClock)
-                    local nose = seat and seat.CFrame.LookVector or Vector3.new(0, 0, 1)
-                    local want = Vector3.new(g[1] - p.X, 0, g[2] - p.Z)
-                    local n2 = Vector3.new(nose.X, 0, nose.Z)
-                    local ang = 0
-                    if n2.Magnitude > 0.1 and want.Magnitude > 0.5 then
-                        ang = math.deg(math.acos(math.clamp(n2.Unit:Dot(want.Unit), -1, 1)))
+            else
+                local g = legs[math.min(li, #legs)]
+                local d = (Vector3.new(p.X, 0, p.Z) - Vector3.new(g[1], 0, g[2])).Magnitude
+                if d <= 6 then
+                    if li < #legs then
+                        li += 1
+                        g = legs[li]
+                    else
+                        local dg = (Vector3.new(p.X, 0, p.Z) - Vector3.new(goal.X, 0, goal.Z)).Magnitude
+                        if dg <= 8 then
+                            alignDriveStop(ah)
+                            return true, pass
+                        end
                     end
-                    log(string.format("route: line %.1f studs off · %.0f studs/s · nose %.0f° off · leg %d/%d",
-                        teleSum / math.max(teleN, 1), spd, ang, li, #legs))
-                    telePrev, teleClock = p, now
-                    teleSum, teleN = 0, 0
                 end
-                alignDriveStep(ah, tr, a1[1], a1[2], g[1], g[2], 0.12)
-            elseif useKeys then
-                local res = driveLegKeys(tr, seat, p, Vector3.new(g[1], p.Y, g[2]), 6)
-                if res == nil then alignDriveStop(ah) return nil end
-                -- a leg cut short by the harvest watch is not "keys failed"
-                if res == false and not watchHit then
-                    useKeys = false
-                    log("keys didn't drive to the field — falling back to glide")
+                if useKeys then
+                    local res = driveLegKeys(tr, seat, p, Vector3.new(g[1], p.Y, g[2]), 6)
+                    if res == nil then alignDriveStop(ah) return nil end
+                    -- a leg cut short by the harvest watch is not "keys failed"
+                    if res == false and not watchHit then
+                        useKeys = false
+                        log("keys didn't drive to the field — falling back to glide")
+                    end
                 end
-            end
-            if not useAlign and not useKeys then
-                glideTractor(tr, Vector3.new(g[1], p.Y, g[2]))
+                if not useKeys then
+                    glideTractor(tr, Vector3.new(g[1], p.Y, g[2]))
+                end
             end
             task.wait(0.12)
         end
