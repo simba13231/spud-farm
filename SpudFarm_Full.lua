@@ -163,14 +163,41 @@ local okBuild, errBuild = pcall(function()
     --   sweep with the tank full. A failed trip now parks the whole idea for
     --   a minute and the harvesting carries on.
     local sellCooldownUntil = 0
+    -- ▸ WHICH MODEL IS THE HARVESTER? The attribute is the game's own answer,
+    --   but ONE missing attribute used to switch off BOTH behaviours that
+    --   depend on it — the 10 studs/s swath tween and the 1-second full-tank
+    --   watch — and the two failures look unrelated in game (the harvester
+    --   steers itself off the row; a full tank never sells). The dump's own
+    --   model name and the caller's intent are fallbacks, and the first
+    --   decision is logged so one line says which one matched.
+    local HARVEST_MODEL_NAMES = { ZM80 = true }
+    local harvestDetectLogged = false
+    local function isHarvester(tr, impl)
+        if not tr then return false end
+        local how
+        if impl and impl == tr then
+            how = "this pass drives the tool itself"
+        else
+            local okT, etype = pcall(function() return tr:GetAttribute("EquipmentType") end)
+            if okT and etype == "Harvester" then
+                how = "EquipmentType attribute"
+            elseif HARVEST_MODEL_NAMES[tostring(tr.Name)] then
+                how = "model name " .. tostring(tr.Name)
+            end
+        end
+        if how and not harvestDetectLogged then
+            harvestDetectLogged = true
+            log("harvest ride: " .. tostring(tr.Name) .. " recognised by " .. how)
+        end
+        return how ~= nil
+    end
     local function driveWatchTick(tr)
         if watchHit then return true end
         if sellingNow or not tr then return false end
         if os.clock() < sellCooldownUntil then return false end
         if os.clock() - watchLast < 1 then return false end
         watchLast = os.clock()
-        local okType, etype = pcall(function() return tr:GetAttribute("EquipmentType") end)
-        if not (okType and etype == "Harvester") then return false end
+        if not isHarvester(tr) then return false end
         local ok, cur, max = pcall(function()
             local conf = tr:FindFirstChild("Configurations")
             if not conf then return nil end
@@ -1978,10 +2005,7 @@ local okBuild, errBuild = pcall(function()
         --   route legs are tweened instead, at a faster rate than the 10
         --   studs/s swath speed because these legs are travel, not harvest.
         local TRAVEL_TWEEN_SPEED = 60
-        local isHarvestRide = false
-        pcall(function()
-            isHarvestRide = tr:GetAttribute("EquipmentType") == "Harvester"
-        end)
+        local isHarvestRide = isHarvester(tr, impl)
         local ah, alignWhy
         if isHarvestRide then
             -- NO align constraints at all on a tweened ride: AlignPosition

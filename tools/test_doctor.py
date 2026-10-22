@@ -14,6 +14,8 @@ SRC = ROOT / "SpudFarm_Full.lua"
 LUAU = pathlib.Path(r"C:/Users/MIOUTH~1/AppData/Local/Temp/luau-check/luau.exe")
 
 START = "    local okPanel, errPanel = pcall(function()"
+HSTART = "    local HARVEST_MODEL_NAMES = { ZM80 = true }"
+HEND = "    local function driveWatchTick(tr)"
 END = "    -- ON = spawn the loop on its own thread"
 
 text = SRC.read_text(encoding="utf-8")
@@ -21,6 +23,10 @@ i = text.index(START)
 j = text.index(END, i)
 block = text[i:j]
 block = "\n".join(l[4:] if l.startswith("    ") else l for l in block.splitlines())
+# the harvester-detection helper lives earlier in the same closure
+hi = text.index(HSTART)
+hj = text.index(HEND, hi)
+hblock = "\n".join(l[4:] if l.startswith("    ") else l for l in text[hi:hj].splitlines())
 
 PRE = """
 -- ── stubs ────────────────────────────────────────────────────────────────
@@ -171,6 +177,24 @@ local function hasNot(needle, label)
     (label or needle) .. " should not be in the report:!" .. string.char(10) .. PARAVAL)
 end
 
+-- harvester detection: attribute, model name, and caller intent
+local function fakeModel(name, etype)
+  return { Name = name, GetAttribute = function(_, k)
+    if k == "EquipmentType" then return etype end
+    return nil
+  end }
+end
+local byAttr = fakeModel("SOMEHULL", "Harvester")
+local byName = fakeModel("ZM80", nil)
+local plow = fakeModel("PLOWY", "Plow")
+assert(isHarvester(byAttr) == true, "EquipmentType attribute not honoured")
+assert(isHarvester(byName) == true, "ZM80 model name not honoured when the attribute is missing")
+assert(isHarvester(plow) == false, "a plow was classified as the harvester")
+local selfProp = fakeModel("NOTHING", nil)
+assert(isHarvester(selfProp, selfProp) == true,
+  "a self-propelled pass (impl == tr) was not recognised")
+assert(isHarvester(nil) == false, "nil ride classified as a harvester")
+
 assert(type(BTN) == "table" and type(BTN.Callback) == "function", "no doctor button was created")
 BTN.Callback()
 assert(NOTIFY and NOTIFY.Title == "SPUD DOCTOR", "the click produced no notification")
@@ -259,7 +283,7 @@ print("----------------------------------------")
 print(PARAVAL)
 """
 
-full = PRE + block + POST
+full = PRE + hblock + chr(10) + block + POST
 out = pathlib.Path(tempfile.gettempdir()) / "doctor_harness.lua"
 out.write_text(full, encoding="utf-8")
 
