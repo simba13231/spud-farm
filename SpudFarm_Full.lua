@@ -77,6 +77,19 @@ local okBuild, errBuild = pcall(function()
         pcall(function() logPara:SetValue(table.concat(LOG, "\n")) end)
     end
 
+    -- ▸ STAGE (user: "sometimes it just end with this" + "it looks to stay
+    --   on but does nothing"): a stalled run and a dead run looked
+    --   IDENTICAL — toggle still ON, console silent. runStage names where
+    --   the loop last was, and one watcher thread prints it every 10 s
+    --   while the body runs, so the console can never just go quiet:
+    --     · the line keeps coming = alive and stuck in THAT stage
+    --     · it stops coming       = the thread died (a body error prints
+    --       its own ⚠ line first; stopping by hand is silent on purpose)
+    local runStage = "not started yet"
+    local function setStage(s)
+        runStage = s
+    end
+
     -- ▸ HOME: recent commits + last edit, fetched live from GitHub
     local homePara = Tabs.Home:CreateParagraph("HomeUpdates", {
         Title = "Recent updates",
@@ -676,10 +689,12 @@ local okBuild, errBuild = pcall(function()
             impl.Name, verb,
             stored and "IN STORAGE"
                 or string.format("%.0f studs away (>%d)", dist, RESPAWN_RANGE)))
+        setStage("Equipment Manager: respawning " .. impl.Name)
         local respawned = managerAction(impl.Name)
         if respawned == false then
             log(string.format("equipment manager: the respawn for %s failed — see the lines above for why", impl.Name))
         end
+        setStage("waiting for " .. impl.Name .. " to come back out of the Equipment Manager")
         for i = 1, 30 do -- ~15 s for the respawn to land
             if stopping() then return nil end
             local impl2, dist2, basis2 =
@@ -2375,18 +2390,37 @@ local okBuild, errBuild = pcall(function()
         -- the walk below can take a while on a streamed-in town and prints
         -- nothing until it is done — say we started, so a slow shop trip
         -- can't look like the script stopping
+        setStage("searching the town for a " .. tostring(seedName) .. " crate")
         log("seed crate: searching the town for a " .. tostring(seedName) .. " crate…")
-        for _, d in ipairs(workspace:GetDescendants()) do
-            walked += 1
-            if d.Name == "SeedType" then
-                local m = d.Parent and d.Parent.Parent
-                if m and m:IsA("Model") then tagged[m] = true end
-            elseif d:IsA("Model") and d ~= LocalPlayer.Character then
-                local n = d.Name:lower()
-                if n:find("seedbox", 1, true) or n:find("crate", 1, true) then
-                    models[d] = true
+        -- ▸ SHELVES FIRST (live dump): every seed crate in the game sits in
+        --   Objects.DraggableObjects or GameplayVisuals.LockedDraggables —
+        --   60 of them, a couple of hundred instances total. Walking ALL of
+        --   workspace (16k+ instances) before anything printed was the
+        --   silent multi-second pause that made the shop trip look dead;
+        --   the whole-map walk is now only the fallback for a layout the
+        --   dump hasn't shown.
+        local function scanCrates(container)
+            if not container then return end
+            for _, d in ipairs(container:GetDescendants()) do
+                walked += 1
+                if d.Name == "SeedType" then
+                    local m = d.Parent and d.Parent.Parent
+                    if m and m:IsA("Model") then tagged[m] = true end
+                elseif d:IsA("Model") and d ~= LocalPlayer.Character then
+                    local n = d.Name:lower()
+                    if n:find("seedbox", 1, true) or n:find("crate", 1, true) then
+                        models[d] = true
+                    end
                 end
             end
+        end
+        local objFolder = workspace:FindFirstChild("Objects")
+        local visFolder = workspace:FindFirstChild("GameplayVisuals")
+        scanCrates(objFolder and objFolder:FindFirstChild("DraggableObjects"))
+        scanCrates(visFolder and visFolder:FindFirstChild("LockedDraggables"))
+        if next(models) == nil then
+            log("seed crate: neither shelf folder had a crate — walking all of workspace as a fallback")
+            scanCrates(workspace)
         end
         for m in pairs(tagged) do models[m] = true end
         -- ▸ DIAGNOSTIC (user: "it isnt going to the crate"): the walk itself
@@ -2395,7 +2429,7 @@ local okBuild, errBuild = pcall(function()
         local nTag, nMod = 0, 0
         for _ in pairs(tagged) do nTag += 1 end
         for _ in pairs(models) do nMod += 1 end
-        log(string.format("seed crate: walked %d workspace instance(s) — %d crate-like model(s), %d with a seed tag",
+        log(string.format("seed crate: scanned %d instance(s) (shelves first) — %d crate-like model(s), %d with a seed tag",
             walked, nMod, nTag))
         local cands, seedHit, labelHit = {}, nil, nil
         for m in pairs(models) do
@@ -2439,6 +2473,7 @@ local okBuild, errBuild = pcall(function()
             log("seed shop: FarmCo not found (Markers.GotoLocations / Stores.NPCs) — stand in town once, then run the loop again")
             return false
         end
+        setStage("shop trip: tp to FarmCo")
         log(string.format("seed shop: FarmCo at %s (%.0f studs) — tp'ing there for %s",
             where, (root.Position - pos).Magnitude, seedName))
         tpChar(pos)
@@ -2507,12 +2542,14 @@ local okBuild, errBuild = pcall(function()
             log("seed crate: that is more than the balance — not buying it (pick a cheaper seed or sell something first)")
             return false
         end
+        setStage("shop trip: tp to the " .. tostring(seedName) .. " crate")
         tpChar(hit.pos)
         task.wait(1.0)
         if stopping() then return false end
         local acts = contextActions()
         log("seed crate: E at the crate to pick it up — the game offers: "
             .. (acts and (#acts > 0 and table.concat(acts, " · ") or "nothing") or "unreadable"))
+        setStage("shop trip: picking the crate up (E)")
         if not carryCrate("seed crate") then
             log("seed crate: couldn't pick it up after 3 tries — stopping the shop trip here (nothing bought)")
             return false
@@ -2520,6 +2557,7 @@ local okBuild, errBuild = pcall(function()
         -- ▸ STAGE 2 — PUT IT ON THE COUNTER (user: "place crate on counter"):
         --   tp to the owner; if the crate rides along, the carry took
         if oPart then
+            setStage("shop trip: putting the crate on the FarmCo counter")
             tpChar(oPart.Position)
             task.wait(1.2)
             if stopping() then return false end
@@ -2538,6 +2576,7 @@ local okBuild, errBuild = pcall(function()
         end
         -- open the owner's menu
         local before = coinBalance()
+        setStage("shop trip: talking to the FarmCo Owner (F)")
         log("seed shop: F at the owner (InteractWithNPC) — balance "
             .. (before and (before .. " coins") or "unreadable"))
         pressKey(Enum.KeyCode.F)
@@ -2616,6 +2655,7 @@ local okBuild, errBuild = pcall(function()
                 log("seed shop: the '" .. seedName .. "' row has no Buy button in it — nothing clicked in the menu")
             end
         end
+        setStage("shop trip: waiting for the " .. tostring(seedName) .. " purchase to land")
         -- verify: the balance drops, or a box of that seed appears next to us
         local after, box
         for _ = 1, 12 do -- ~6 s
@@ -2680,6 +2720,7 @@ local okBuild, errBuild = pcall(function()
             log("seeder fill: the seeder is IN STORAGE — respawn it, then fill it by hand (V); the crate is with you")
             return true
         end
+        setStage("shop trip: tp to the seeder to pour the crate in")
         tpChar(seeder:GetPivot().Position)
         task.wait(1.2)
         if stopping() then return false end
@@ -2755,6 +2796,8 @@ local okBuild, errBuild = pcall(function()
         -- ▸ READ-ONLY OUTSIDE THE PLANTING STAGE. No dismount (F there would
         --   kick the driver out of the tractor for nothing) and no shop trip.
         if not allowBuy then return false end
+        setStage(seated and "getting out of the tractor to go seed shopping"
+            or "shop trip: the seeder is empty")
         if seated then
             pressKey(Enum.KeyCode.F)
             task.wait(0.8)
@@ -2793,18 +2836,21 @@ local okBuild, errBuild = pcall(function()
         -- world — bring it back from storage first. If that fails, do NOT
         -- buy: the crate would land on the counter with nothing to pour it
         -- into.
+        setStage("bringing the seeder out of storage before buying")
         local seederOut = ensureToolNearby(tr, "Planter", "seeder")
         if stopping() then return false end
         if not seederOut then
             log("the seeder couldn't be brought out of storage — not buying a crate it can't be poured into")
             return false
         end
+        setStage("shop trip: buying " .. tostring(seedChoice) .. " seeds")
         buySeedAndFill(seedChoice)
         if stopping() then return false end
         -- ▸ GET BACK IN AND SEED (user's step list ends with it: "get back in
         --   and seed"). The shop trip leaves the character on foot next to
         --   the seeder; walk back, sit down, and the check-back re-enters the
         --   planting stage in THIS run now that the seeder is full.
+        setStage("getting back in the tractor after the shop trip")
         local char2 = LocalPlayer.Character
         local hum2 = char2 and char2:FindFirstChildOfClass("Humanoid")
         if hum2 and tr.Parent
@@ -3453,6 +3499,7 @@ local okBuild, errBuild = pcall(function()
     -- stopping() is checked at every wait/step so switching the toggle off
     -- kills the loop at its next step instead of letting it run on.
     local function runFarmingBody()
+        setStage("starting the run")
         seedShopTried = false -- each run gets at most one seed-shop trip
         local char = LocalPlayer.Character
         local hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -3505,6 +3552,7 @@ local okBuild, errBuild = pcall(function()
         --   state is logged). Checked BEFORE mount so an idle run never
         --   even walks to the tractor. Failed counts never skip (unknown
         --   = work to try).
+        setStage("checking what work is left on the fields")
         local needPlow, needCult, needSeed, needHarv =
             probeWork(tr:GetPivot().Position)
         if not needPlow and not needCult and not needSeed and not needHarv then
@@ -3571,6 +3619,7 @@ local okBuild, errBuild = pcall(function()
         --   job passes the harvester instead: it is self-propelled, so it
         --   IS the tool — nothing is hitched and nothing is dropped.
         local function runPass(job, ride, rideSeat)
+            setStage(job.verb .. " pass")
             ride = ride or tr
             rideSeat = rideSeat or hum.SeatPart
             -- ▸ the TOUR (user request: “combine A+B+C to make the most
@@ -3874,14 +3923,28 @@ local okBuild, errBuild = pcall(function()
     --   the end of the body, so EVERY exit of the body — a finished run or
     --   an honest stop — gets the cleanup.
     local function runFarmingLoop()
+        -- ▸ HEARTBEAT — the run can no longer go quiet without saying where
+        --   it is. NOTE: stopping() is false only on the loop thread itself,
+        --   so the watcher uses its own flag.
+        local beat = true
+        task.spawn(function()
+            while beat do
+                task.wait(10)
+                if beat then
+                    log("… still working (" .. runStage .. ")")
+                end
+            end
+        end)
         -- ▸ AN ERROR STILL CLEANS UP. A crash inside the body used to kill
         --   the thread with the toggle frozen ON and every tool left
         --   standing in the world; now the tools go back to storage and the
         --   caller clears the thread id.
         local okRun, errRun = pcall(runFarmingBody)
+        beat = false
         if not okRun then
             log("⚠ farming loop error: " .. tostring(errRun))
         end
+        log("run ended — the last stage it reached was: " .. runStage)
         storeUnusedTools()
     end
 
