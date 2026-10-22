@@ -3352,6 +3352,22 @@ local okBuild, errBuild = pcall(function()
         return false
     end
 
+    -- ▸ "CHECK IF IT'S FULL, THEN GO SELL" (user) — ONE rule, called at every
+    --   point the load can reach the cap: before a field's first leg, before
+    --   each leg, before the touch-up, and at the end of the sweep. The old
+    --   code only looked at the start of a spiral LEG, so a tank that filled
+    --   during the last leg or in the touch-up stayed full until the next
+    --   run — which is exactly "it doesn't go and sell".
+    --   Returns tried (it WAS full, so the caller counts an attempt) and sold.
+    local function harvestSellIfFull(ride, seat, field, note)
+        local cur, max = harvesterLoad(ride)
+        if not (cur and max and max > 0) then return false, false end
+        if cur < max then return false, false end
+        log(string.format("harvester is FULL (%d/%d%s) — going to sell", cur, max,
+            note and (", " .. note) or ""))
+        return true, sellHarvester(ride, seat, field)
+    end
+
     local function sweepField(tr, field, seat, job)
         local baseCF, baseSize = fieldFrame(field)
         if not baseCF then return false, "no bounds" end
@@ -3421,6 +3437,12 @@ local okBuild, errBuild = pcall(function()
         end
         -- precompute the whole spiral ONCE, then just FOLLOW the list
         local at = tr:GetPivot().Position
+        -- ▸ the tank can already be full on arrival (it filled on the way in)
+        if job.selfPropelled and sellTries < 6 then
+            local tried, sold = harvestSellIfFull(tr, seat, field, "on arrival")
+            if tried then sellTries += 1 end
+            if sold then at = tr:GetPivot().Position end
+        end
         local rel0 = at - c -- sides picked along the PLATE's axes, not world
         local E = rel0:Dot(driveDir) >= 0 and 1 or -1 -- which end I arrived at
         local S = rel0:Dot(stepDir) >= 0 and 1 or -1  -- which step side
@@ -3454,12 +3476,10 @@ local okBuild, errBuild = pcall(function()
             -- full harvester: sell and come back (the user's loop). The spiral
             -- is already computed, so after the trip the sweep just resumes at
             -- THIS leg — from where the vehicle actually is now.
-            if job.selfPropelled and sellTries < 4 then
-                local cur, max = harvesterLoad(tr)
-                if cur and max and max > 0 and cur >= max then
-                    sellTries += 1
-                    if sellHarvester(tr, seat, field) then at = tr:GetPivot().Position end
-                end
+            if job.selfPropelled and sellTries < 6 then
+                local tried, sold = harvestSellIfFull(tr, seat, field, "before leg " .. i)
+                if tried then sellTries += 1 end
+                if sold then at = tr:GetPivot().Position end
             end
             if not doLeg(at, leg[1], leg[2]) then dbgClear() return nil end
             at = leg[1]
@@ -3498,6 +3518,13 @@ local okBuild, errBuild = pcall(function()
             local barMap = {}
             for i, r in ipairs(route) do barMap[i] = { r.goal, 6, nil } end
             dbgShow(tr, barMap, at)
+            -- the touch-up drives the whole field again, so it can fill the
+            -- tank just as easily as the spiral did
+            if job.selfPropelled and sellTries < 6 then
+                local tried, sold = harvestSellIfFull(tr, seat, field, "before the touch-up")
+                if tried then sellTries += 1 end
+                if sold then at = tr:GetPivot().Position end
+            end
             local through = 0
             for i, r in ipairs(route) do
                 dbgLeg(i)
@@ -3517,6 +3544,11 @@ local okBuild, errBuild = pcall(function()
         if lineStats.flips > 0 or lineStats.worst > 0 then
             log(string.format("field line: %d crossings, worst %.1f studs off%s",
                 lineStats.flips, lineStats.worst, useAlign and "" or " (keys after the fallback)"))
+        end
+        -- ▸ END OF THE SWEEP: an empty tank is the honest end state — a full
+        --   one just carries the load into the next run.
+        if job.selfPropelled and sellTries < 6 then
+            harvestSellIfFull(tr, seat, field, "end of the sweep")
         end
         local st1 = countStages(field)
         if st1 then
