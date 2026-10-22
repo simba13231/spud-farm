@@ -152,9 +152,16 @@ local okBuild, errBuild = pcall(function()
     --   doing anything else. sellingNow mutes it during the sell trip itself
     --   (the tank is still full while driving to the pad).
     local watchLast, watchHit, sellingNow = 0, false, false
+    -- ▸ SELL COOLDOWN. The watch and the retry cap used to multiply: a pad
+    --   that wouldn't sell got re-triggered one second after every failed
+    --   trip, so six attempts × four pads × 16 s could eat six minutes of a
+    --   sweep with the tank full. A failed trip now parks the whole idea for
+    --   a minute and the harvesting carries on.
+    local sellCooldownUntil = 0
     local function driveWatchTick(tr)
         if watchHit then return true end
         if sellingNow or not tr then return false end
+        if os.clock() < sellCooldownUntil then return false end
         if os.clock() - watchLast < 1 then return false end
         watchLast = os.clock()
         local okType, etype = pcall(function() return tr:GetAttribute("EquipmentType") end)
@@ -707,12 +714,21 @@ local okBuild, errBuild = pcall(function()
     --   Returns the new position, or nil after every attempt failed.
     local function respawnTool(name, getPos, attempts)
         attempts = attempts or 5
+        local uiFails = 0
         local p0 = getPos()
         for i = 1, attempts do
             if stopping() then return nil end
             log(string.format("respawn %s: attempt %d/%d (Equipment Manager → Spawn)",
                 name, i, attempts))
-            managerAction(name, "Spawn")
+            -- if the MANAGER itself won't open/drive (not the vehicle), 5
+            -- attempts just burn 40 s of the run
+            if managerAction(name, "Spawn") == false then
+                uiFails += 1
+                if uiFails >= 2 then
+                    log(string.format("%s: the Equipment Manager wouldn't drive for this vehicle — giving up for now", name))
+                    return nil
+                end
+            end
             if stopping() then return nil end
             for _ = 1, 16 do -- ~8 s for THIS attempt to land
                 if stopping() then return nil end
@@ -3611,12 +3627,18 @@ local okBuild, errBuild = pcall(function()
     --   run — which is exactly "it doesn't go and sell".
     --   Returns tried (it WAS full, so the caller counts an attempt) and sold.
     local function harvestSellIfFull(ride, seat, field, note)
+        if os.clock() < sellCooldownUntil then return false, false end
         local cur, max = harvesterLoad(ride)
         if not (cur and max and max > 0) then return false, false end
         if cur < max then return false, false end
         log(string.format("harvester is FULL (%d/%d%s) — going to sell", cur, max,
             note and (", " .. note) or ""))
-        return true, sellHarvester(ride, seat, field)
+        local sold = sellHarvester(ride, seat, field)
+        if not sold then
+            sellCooldownUntil = os.clock() + 60
+            log("no sale landed — backing off for 60 s instead of hammering the pads (the harvest carries on with the load it has)")
+        end
+        return true, sold
     end
 
     local function sweepField(tr, field, seat, job)
