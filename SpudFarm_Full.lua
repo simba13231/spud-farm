@@ -802,6 +802,40 @@ local okBuild, errBuild = pcall(function()
         end
     end
 
+    -- ▸ THE HARVESTER IS TWEENED, NOT STEERED (user: "make the harvester
+    --   force the angle that it harvests at and not turn, so instead of
+    --   using WASD it uses tween but slow like 10 studs/sec"). WASD drives
+    --   by pushing a physics body: the nose wobbles, the turn overshoots the
+    --   row, and the swath ends up crooked. A harvester leg is now a plain
+    --   positional tween down the leg at a SET heading — the angle is
+    --   written every step, never steered — at 10 studs/s.
+    local HARVEST_TWEEN_SPEED = 10 -- studs per second (user's number)
+
+    local function tweenDriveLeg(tr, from, goal, speed)
+        speed = speed or HARVEST_TWEEN_SPEED
+        local startCF = tr:GetPivot()
+        local y = startCF.Position.Y -- stay on the field plane: no hopping
+        local a = Vector3.new(from.X, y, from.Z)
+        local b = Vector3.new(goal.X, y, goal.Z)
+        local delta = b - a
+        local dist = delta.Magnitude
+        if dist < 0.5 then return true end
+        local dir = delta / dist
+        local rot = CFrame.lookAt(Vector3.zero, dir) -- the fixed heading
+        local travelled, tick = 0, 0.1
+        while travelled < dist do
+            if stopping() then return nil end
+            -- the 1-second full-tank watch works here too
+            if driveWatchTick(tr) then return false end
+            travelled = math.min(dist, travelled + speed * tick)
+            local p = a + dir * travelled
+            tr:PivotTo(CFrame.new(p) * rot)
+            task.wait(tick)
+        end
+        tr:PivotTo(CFrame.new(b) * rot) -- land exactly on the leg end
+        return true
+    end
+
     -- fly-over ARC (user's plan, smoothed): ONE smooth curve — rise,
     -- travel, settle (smoothstep lerp + sinusoidal lift), NOT three hard
     -- legs. ONLY for hops with NOTHING trailing behind (player on foot,
@@ -3587,6 +3621,13 @@ local okBuild, errBuild = pcall(function()
         local lineStats = { worst = 0, flips = 0 }
         local function doLeg(from, goal, tol)
             if stopping() then return nil end
+            -- ▸ a harvest leg never touches the keys or the physics mover:
+            --   straight tween, fixed heading, 10 studs/s (see tweenDriveLeg)
+            if job.selfPropelled then
+                local okT = tweenDriveLeg(tr, from, goal, HARVEST_TWEEN_SPEED)
+                if okT == nil then return nil end
+                return okT
+            end
             -- never accept more than half a leg early (the short step onto
             -- the next ring would get cut otherwise)
             tol = math.min(tol or 7, (goal - from).Magnitude * 0.5)
