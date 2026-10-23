@@ -2296,6 +2296,282 @@ pcall(function()
     w("  DO NOW: if nothing opened, look at the screen and say what the pad shows")
 end)
 
+-- 21. MILK (live) — the two things the milk loop still cannot see:
+--     (a) where a stall really is and HOW the game marks it dirty,
+--     (b) why the animal menu only answers for some cows.
+--     Prints the 12 Adornee_BarnStallMenu parts + their barn, the plot's
+--     cows, then TP-probes ONE cow (menu latency + what the menu is adorneed
+--     to) and ONE stall (every prompt that is up, then a single V press).
+--     TURN THE MILK LOOP OFF before running this: it moves the same body.
+------------------------------------------------------------------
+pcall(function()
+    header("MILK (stalls, cows, and the game's own Clean prompt)")
+    local lp = game:GetService("Players").LocalPlayer
+    local vim = game:GetService("VirtualInputManager")
+    local ch = lp.Character
+    local r0 = ch and ch:FindFirstChild("HumanoidRootPart")
+    if not r0 then w("  no HumanoidRootPart - skipped") return end
+    local pg = lp:FindFirstChildOfClass("PlayerGui")
+
+    local function ownerOf(inst)
+        local p = inst
+        for _ = 1, 10 do
+            if not p then break end
+            local conf = p:FindFirstChild("Configurations")
+            local o = conf and conf:FindFirstChild("Owner")
+            if o and o:IsA("ObjectValue") and o.Value then return o.Value.Name end
+            p = p.Parent
+        end
+        return nil
+    end
+    local function attrsOf(inst, cap)
+        local keys = {}
+        for k in pairs(inst:GetAttributes()) do keys[#keys + 1] = k end
+        table.sort(keys)
+        local bits = {}
+        for i, k in ipairs(keys) do
+            if i > (cap or 12) then
+                bits[#bits + 1] = "+" .. (#keys - i + 1) .. " more"
+                break
+            end
+            bits[#bits + 1] = k .. "=" .. tostring(inst:GetAttribute(k))
+        end
+        return #bits > 0 and table.concat(bits, "; ") or "(no attrs)"
+    end
+    local function confOf(inst)
+        local c = inst:FindFirstChild("Configurations")
+        if not c then return "no Configurations" end
+        local bits = {}
+        for _, v in ipairs(c:GetChildren()) do
+            bits[#bits + 1] = v.Name .. "[" .. v.ClassName .. "]=" .. tostring(v.Value)
+        end
+        return #bits > 0 and table.concat(bits, "; ") or "empty"
+    end
+
+    -- 1. the stall parts
+    local stalls = {}
+    for _, d in ipairs(workspace:GetDescendants()) do
+        if d.Name == "Adornee_BarnStallMenu" then stalls[#stalls + 1] = d end
+    end
+    w(string.format("  Adornee_BarnStallMenu instances: %d", #stalls))
+    for i, d in ipairs(stalls) do
+        local pos = (d:IsA("BasePart")) and d.Position or nil
+        w(string.format("  [%d] %s %s %s", i, d.ClassName, pathOf(d, 6),
+            pos and string.format("(%.1f, %.1f, %.1f) %.1fx%.1fx%.1f", pos.X, pos.Y, pos.Z,
+                d.Size.X, d.Size.Y, d.Size.Z) or "no position"))
+        w("       owner=" .. tostring(ownerOf(d)) .. "  attrs=" .. attrsOf(d))
+        if i <= 3 then
+            local chain, p = {}, d
+            for _ = 1, 5 do
+                p = p and p.Parent
+                if not p or p == game then break end
+                chain[#chain + 1] = p.Name .. "[" .. p.ClassName .. "]"
+            end
+            w("       up: " .. table.concat(chain, " < "))
+        end
+    end
+
+    -- 2. what sits around the first three stalls (this is where a dirt marker
+    --    would live, if the game has one)
+    for i = 1, math.min(3, #stalls) do
+        local d = stalls[i]
+        if d:IsA("BasePart") then
+            local hits, n = {}, 0
+            for _, o in ipairs(workspace:GetDescendants()) do
+                local p
+                if o:IsA("BasePart") then
+                    p = o.Position
+                elseif o:IsA("BillboardGui") then
+                    local a = o.Adornee
+                    if a and a:IsA("BasePart") then p = a.Position end
+                end
+                if p and (p - d.Position).Magnitude <= 14 then
+                    n += 1
+                    if #hits < 12 then
+                        hits[#hits + 1] = string.format("       %-26s %-11s attrs=%s",
+                            o.Name, o.ClassName, attrsOf(o, 4))
+                    end
+                end
+            end
+            w(string.format("  --- around stall [%d] (14 studs, %d hit(s))", i, n))
+            for _, l in ipairs(hits) do w(l) end
+        end
+    end
+
+    -- 3. the barn model that owns the stalls
+    local barn = stalls[1] and stalls[1]:FindFirstAncestorOfClass("Model")
+    if barn then
+        w("  stall barn: " .. pathOf(barn) .. " [" .. barn.ClassName .. "] attrs=" .. attrsOf(barn, 16))
+        w("    Configurations: " .. confOf(barn))
+        local groups, keys = {}, {}
+        for _, c in ipairs(barn:GetDescendants()) do
+            local b = baseName(c.Name)
+            if not groups[b] then keys[#keys + 1] = b end
+            groups[b] = (groups[b] or 0) + 1
+        end
+        table.sort(keys)
+        local bits = {}
+        for i, k in ipairs(keys) do
+            if i > 40 then break end
+            bits[#bits + 1] = k .. " x" .. groups[k]
+        end
+        w("    descendants: " .. table.concat(bits, ", "))
+    else
+        w("  stall barn: no Model ancestor found")
+    end
+
+    -- 4. the cows (same rule the script uses: any model with cow in its name)
+    local objects = workspace:FindFirstChild("Objects")
+    local animals = objects and objects:FindFirstChild("Animals")
+    local cows = {}
+    for _, m in ipairs((animals and animals:GetChildren()) or {}) do
+        if m:IsA("Model") and m.Name:lower():find("cow", 1, true) then
+            cows[#cows + 1] = { model = m, pos = m:GetPivot().Position }
+        end
+    end
+    w(string.format("  cow models in Objects.Animals: %d of %d models", #cows,
+        animals and #animals:GetChildren() or 0))
+    for i, c in ipairs(cows) do
+        w(string.format("  cow %d (%s) at (%.0f, %.0f, %.0f) owner=%s attrs=%s",
+            i, c.model.Name, c.pos.X, c.pos.Y, c.pos.Z,
+            tostring(ownerOf(c.model)), attrsOf(c.model, 10)))
+        if i <= 4 then
+            w("       Configurations: " .. confOf(c.model))
+            local labs = {}
+            for _, d in ipairs(c.model:GetDescendants()) do
+                if (d:IsA("TextLabel") or d:IsA("SurfaceGui") or d:IsA("BillboardGui")) and #labs < 8 then
+                    local t = d:IsA("TextLabel") and (" text='" .. d.Text .. "'") or ""
+                    labs[#labs + 1] = d.Name .. "[" .. d.ClassName .. "]" .. t
+                end
+            end
+            w("       gui/labels: " .. (#labs > 0 and table.concat(labs, " | ") or "none"))
+        end
+    end
+
+    -- 5. LIVE cow probe: watch the animal menu for 3 s from one cow
+    local function menuOf()
+        local gv = pg and pg:FindFirstChild("GuiViews")
+        local g = gv and gv:FindFirstChild("Animal")
+        local ai = g and g:FindFirstChild("AnimalInteractions")
+        local ag = ai and ai:FindFirstChild("AnimalInteractionGuis")
+        return ag and ag:FindFirstChild("AnimalInteractionMenu")
+    end
+    if cows[1] then
+        w("  --- TP probe: cow 1")
+        r0.CFrame = CFrame.new(cows[1].pos + Vector3.new(0, 3, 0))
+        local last
+        for t = 1, 12 do
+            task.wait(0.25)
+            local menu = menuOf()
+            local enabled, ad, nameT, prodT = nil, "nil", "?", "?"
+            if menu then
+                enabled = menu.Enabled
+                pcall(function()
+                    local a = menu.Adornee
+                    ad = a and pathOf(a, 4) or "nil"
+                end)
+                pcall(function()
+                    local al = menu.QuickInfo.AnimalLabel
+                    nameT = al.NameLabel.Text
+                    prodT = al.ProductionFrame.ProductionVisual.ProgressLabel.Text
+                end)
+            end
+            local sig = tostring(enabled) .. "|" .. ad .. "|" .. nameT .. "|" .. prodT
+            if sig ~= last then
+                w(string.format("       t=%.2fs menu=%s enabled=%s adornee=%s name='%s' prod='%s'",
+                    t * 0.25, tostring(menu ~= nil), tostring(enabled), tostring(ad), nameT, prodT))
+                last = sig
+            end
+        end
+        local menu = menuOf()
+        if menu then
+            local labs, attrs = {}, {}
+            for _, d in ipairs(menu:GetDescendants()) do
+                if d:IsA("TextLabel") and d.Text ~= "" and #labs < 16 then
+                    labs[#labs + 1] = d.Name .. "='" .. d.Text .. "'"
+                end
+            end
+            for k, v in pairs(menu:GetAttributes()) do attrs[#attrs + 1] = k .. "=" .. tostring(v) end
+            w("       menu labels: " .. (#labs > 0 and table.concat(labs, " | ") or "none"))
+            w("       menu attrs: " .. (#attrs > 0 and table.concat(attrs, "; ") or "none"))
+        end
+    end
+
+    -- 6. LIVE stall probe: what is offered at stall 1, then ONE V press
+    local s1 = stalls[1]
+    if s1 and s1:IsA("BasePart") then
+        w("  --- TP probe: stall 1")
+        r0.CFrame = CFrame.new(s1.Position + Vector3.new(0, 3, 0))
+        task.wait(1.0)
+        local function promptsUp()
+            local on = {}
+            pcall(function()
+                local bills = pg.GuiViews.HUD.PCGP_ContextActions.Billboards
+                for _, b in ipairs(bills:GetChildren()) do
+                    local e = (b:IsA("LayerCollector") and b.Enabled)
+                        or (b:IsA("GuiObject") and b.Visible)
+                    if e then on[#on + 1] = b.Name end
+                end
+            end)
+            return #on > 0 and table.concat(on, " | ") or "NONE"
+        end
+        w("       prompts UP: " .. promptsUp())
+        local btns = {}
+        pcall(function()
+            for _, b in ipairs(pg.GuiViews.HUD.PCGP_ContextActions.Buttons:GetChildren()) do
+                local n = b.Name:lower()
+                if (n:find("clean") or n:find("dirt") or n:find("filth") or n:find("muck"))
+                    and #btns < 10 then
+                    btns[#btns + 1] = b.Name .. " visible=" .. tostring(b.Visible)
+                end
+            end
+        end)
+        w("       clean-ish buttons: " .. (#btns > 0 and table.concat(btns, " | ") or "none"))
+        local hits = {}
+        for _, d in ipairs(pg:GetDescendants()) do
+            local n = d.Name:lower()
+            if (n:find("stall") or n:find("filth") or n:find("dirt") or n:find("manure"))
+                and #hits < 12 then
+                hits[#hits + 1] = pathOf(d, 5) .. "[" .. d.ClassName .. "] enabled="
+                    .. tostring(d.Enabled) .. " visible=" .. tostring(d.Visible)
+            end
+        end
+        w("       stall/dirt gui hits: " .. (#hits > 0 and table.concat(hits, " | ") or "none"))
+        w("       stall part attrs before V: " .. attrsOf(s1, 16))
+        vim:SendKeyEvent(true, Enum.KeyCode.V, false, game)
+        task.wait(0.08)
+        vim:SendKeyEvent(false, Enum.KeyCode.V, false, game)
+        task.wait(1.4)
+        w("       after V, prompts UP: " .. promptsUp())
+        w("       stall part attrs after V: " .. attrsOf(s1, 16))
+    end
+
+    -- 7. food for the animals (parked for later, but cheap to capture now)
+    local buildings = objects and objects:FindFirstChild("Buildings")
+    local disp = buildings and buildings:FindFirstChild("FeedDispenser")
+    if disp then
+        local lbl = "?"
+        for _, d in ipairs(disp:GetDescendants()) do
+            if d:IsA("TextLabel") and d.Text ~= "" then
+                lbl = d.Name .. "='" .. d.Text .. "'"
+                break
+            end
+        end
+        w("  food: FeedDispenser attrs=" .. attrsOf(disp, 8)
+            .. "  Configurations: " .. confOf(disp) .. "  label=" .. lbl)
+    end
+    local feeders = {}
+    for _, m in ipairs((buildings and buildings:GetChildren()) or {}) do
+        if m.Name:lower():find("feeder") then feeders[#feeders + 1] = m end
+    end
+    w(string.format("  feeder models: %d", #feeders))
+    for _, m in ipairs(feeders) do
+        w("    " .. pathOf(m) .. " owner=" .. tostring(ownerOf(m)) .. " attrs=" .. attrsOf(m, 6))
+    end
+
+    w("  DO NOW: paste this whole section. You are left standing at stall 1.")
+end)
+
 local text = table.concat(out, "\n")
 
 ------------------------------------------------------------------
