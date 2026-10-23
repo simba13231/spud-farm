@@ -6125,19 +6125,27 @@ local okBuild, errBuild = pcall(function()
             and math.abs(rel.Z) <= size.Z / 2 + pad
     end
 
-    -- the production number the player sees on the animal menu (fallbacks: a
-    -- % label under the cow, then the game's own attributes)
+    -- ▸ THE "300%" lives ON THE COW (dump 21: every Cow model has
+    --   Configurations.Production = 300 and Configurations.Mood). So the whole
+    --   read costs nothing: no menu, no teleport, no waiting.
     local function milkPercentOf(m)
-        for _, d in ipairs(m:GetDescendants()) do
-            if d:IsA("TextLabel") and d.Text and d.Text ~= "" then
-                local n = tonumber(d.Text:match("(%d+)%%"))
-                if n then return n end
-            end
+        local conf = m:FindFirstChild("Configurations")
+        local prod = conf and conf:FindFirstChild("Production")
+        if prod and prod:IsA("NumberValue") then
+            return math.floor(prod.Value + 0.5)
         end
         for _, a in ipairs({ "Production", "ProductionPercent", "Milk" }) do
             local v = m:GetAttribute(a)
-            if type(v) == "number" then return v end
+            if type(v) == "number" then return math.floor(v + 0.5) end
         end
+        return nil
+    end
+
+    -- "Wander" = out in the field, "IdleLocked" = parked in a barn stall
+    local function milkStateOf(m)
+        local conf = m:FindFirstChild("Configurations")
+        local st = conf and conf:FindFirstChild("AnimoidState")
+        if st and st:IsA("StringValue") and st.Value ~= "" then return st.Value end
         return nil
     end
 
@@ -6185,6 +6193,36 @@ local okBuild, errBuild = pcall(function()
         return pct, label, shown
     end
 
+    -- ▸ A DIRTY STALL is visible in the barn itself (dump 21: the barn carries
+    --   Filth x12 + FilthEffect x12, one set per spot, and the dirty spot has a
+    --   "Stain" part beside it). A part you can see (Transparency < 1) is dirt.
+    --   Counts are returned so the log can show what was actually measured --
+    --   never "cleaned" unless the game's own prompt agrees.
+    local function milkFilth(spot)
+        if not spot then return 0, 0 end
+        local visible, total = 0, 0
+        local function bump(inst)
+            if inst:IsA("BasePart") then
+                total += 1
+                if inst.Transparency < 0.95 then visible += 1 end
+            else
+                for _, p in ipairs(inst:GetDescendants()) do
+                    if p:IsA("BasePart") then
+                        total += 1
+                        if p.Transparency < 0.95 then visible += 1 end
+                    end
+                end
+            end
+        end
+        for _, d in ipairs(spot:GetDescendants()) do
+            if d.Name == "Filth" or d.Name == "FilthEffect"
+                or d.Name == "Dirt" or d.Name == "Stain" then
+                bump(d)
+            end
+        end
+        return visible, total
+    end
+
     local function milkStalls(wantOwner, cf, size)
         local out, skipped = {}, 0
         for _, d in ipairs(workspace:GetDescendants()) do
@@ -6201,11 +6239,15 @@ local okBuild, errBuild = pcall(function()
                         if ad and ad:IsA("BasePart") then pos = ad.Position end
                     end
                 end)
+                -- the numbered folder above it ("Spots.2") holds that stall's
+                -- Filth / FilthEffect / Hay / Occupant
+                local par = d.Parent
+                local spot = (par and par.Parent and par.Parent.Name == "Spots") and par or nil
                 local owner = milkOwnerOf(d)
                 local mine = owner and wantOwner and owner:lower() == wantOwner:lower()
                 local near = (owner == nil) and cf and pos and milkInBox(pos, cf, size, 80)
                 if mine or near then
-                    out[#out + 1] = { pos = pos, owner = owner, part = d }
+                    out[#out + 1] = { pos = pos, owner = owner, part = d, spot = spot }
                 else
                     skipped += 1
                 end
@@ -6226,7 +6268,12 @@ local okBuild, errBuild = pcall(function()
                 local mine = owner and wantOwner and owner:lower() == wantOwner:lower()
                 local near = (owner == nil) and cf and milkInBox(p, cf, size, 80)
                 if mine or near then
-                    out[#out + 1] = { model = m, pos = p, percent = milkPercentOf(m) }
+                    out[#out + 1] = {
+                        model = m,
+                        pos = p,
+                        percent = milkPercentOf(m),
+                        state = milkStateOf(m),
+                    }
                 end
             end
         end
@@ -6250,44 +6297,50 @@ local okBuild, errBuild = pcall(function()
         return true
     end
 
-    -- ▸ every cow, one visit each: tp beside it, let the game's animal menu
-    --   fill in, read the production number. Untrusted readings stay nil (the
-    --   menu not up yet) instead of borrowing the previous cow's number.
+    -- ▸ OLD: visit every cow to let the shared menu fill in. The production
+    --   number is on the cow itself now, so this is just the honest summary of
+    --   what the game currently holds (no teleports, no waiting, no guesses).
     local function milkCowScan(cows)
         for _, c in ipairs(cows) do
-            if milkStopping() then return end
-            milkTp(c.pos + Vector3.new(0, 3, 0))
-            task.wait(0.55)
-            local pct, label, shown = milkMenuRead()
-            if shown == true and pct then
-                c.percent = pct
-                c.label = label
+            if c.percent == nil then
+                c.label = "no Production value"
             else
-                c.percent = nil
-                c.label = (shown == false) and "menu did not open" or "menu unreadable"
+                c.label = (c.percent >= 300) and "READY" or nil
             end
         end
     end
 
-    -- THE RULE: a dirty stall is cleaned BEFORE anything else happens
+    -- THE RULE: a dirty stall is cleaned BEFORE anything else happens.
+    -- Detection is the barn's own Filth parts (free, no teleport); the game's
+    -- Clean prompt is still the only thing allowed to declare a stall clean.
     local function milkClean(stalls)
         local dirty, cleaned, unknown = 0, 0, 0
         for i, s in ipairs(stalls) do
             if milkStopping() then break end
-            if not s.pos then
+            local seen, total = milkFilth(s.spot)
+            s.filth = (total > 0) and (seen > 0) or nil
+            if s.filth == false then
+                -- clean stall: skip it entirely, no teleport, no key press
+            elseif not s.pos then
                 unknown += 1
-                log(string.format("milk: stall %d has no readable position", i))
+                log(string.format("milk: stall %d - %d/%d filth visible, but no readable position",
+                    i, seen, total))
             else
-                -- stand AT the stall: the game only lights Clean when dirty
+                dirty += 1
                 milkTp(s.pos + Vector3.new(0, 3, 0))
                 task.wait(0.9)
                 local up = promptUp("CleanAnimalContainer")
                 if up == nil then
                     unknown += 1
-                    log(string.format("milk: stall %d - the game's Clean prompt is unreadable", i))
-                elseif up then
-                    dirty += 1
-                    log(string.format("milk: stall %d is DIRTY - cleaning it now (the game's own V)", i))
+                    log(string.format("milk: stall %d - %d/%d filth visible, the game's Clean prompt is unreadable",
+                        i, seen, total))
+                elseif up == false then
+                    unknown += 1
+                    log(string.format("milk: stall %d - %d/%d filth visible, but the game offers no Clean prompt",
+                        i, seen, total))
+                else
+                    log(string.format("milk: stall %d is DIRTY (%d/%d filth) - cleaning it now (the game's own V)",
+                        i, seen, total))
                     local done = false
                     for attempt = 1, 3 do
                         if milkStopping() then break end
@@ -6299,11 +6352,14 @@ local okBuild, errBuild = pcall(function()
                         end
                         log(string.format("milk: stall %d still dirty after %d press(es)", i, attempt))
                     end
+                    local nowSeen, nowTotal = milkFilth(s.spot)
                     if done then
                         cleaned += 1
-                        log(string.format("OK milk: stall %d cleaned", i))
+                        log(string.format("OK milk: stall %d cleaned (filth %d/%d -> %d/%d)",
+                            i, seen, total, nowSeen, nowTotal))
                     else
-                        log(string.format("milk: stall %d would not clean - next cycle tries again", i))
+                        log(string.format("milk: stall %d would not clean (filth %d/%d -> %d/%d) - next cycle tries again",
+                            i, seen, total, nowSeen, nowTotal))
                     end
                 end
             end
@@ -6340,10 +6396,13 @@ local okBuild, errBuild = pcall(function()
         lines[#lines + 1] = string.format("%s - plot %s - %d stall(s) - %d cow(s)", owner,
             plot and plot.Name or ("NOT FOUND [" .. tostring(plotsSeen) .. "]"), #stalls, #cows)
         for i, c in ipairs(cows) do
-            lines[#lines + 1] = string.format("cow %d: %s%s", i,
+            local where = (c.state == "IdleLocked") and " [barn]"
+                or (c.state and (" [" .. c.state:lower() .. "]") or "")
+            lines[#lines + 1] = string.format("cow %d: %s%s%s", i,
                 c.percent and (tostring(c.percent) .. "%") or "?%",
                 c.percent and ((c.percent >= 300) and " READY" or "")
-                    or (" (" .. tostring(c.label or "unread") .. ")"))
+                    or (" (" .. tostring(c.label or "unread") .. ")"),
+                where)
         end
         if #cows == 0 then
             lines[#lines + 1] = "no cow attributed to this plot yet"
