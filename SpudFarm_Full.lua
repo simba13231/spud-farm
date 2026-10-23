@@ -6002,6 +6002,14 @@ local okBuild, errBuild = pcall(function()
     })
     log("milk: users — " .. table.concat(milkChoices0, ", "))
 
+    -- ▸ the tab SHOWS what the loop sees (user: "it should show cows and a
+    --   dirty stall"): the plot it picked, every cow and its production %, and
+    --   the stall verdict. The console keeps the same text.
+    local milkPara = Tabs.Milk:CreateParagraph("MilkStatus", {
+        Title = "Status",
+        Content = "idle",
+    })
+
     -- players join and leave mid-session: keep the picker true. Fluent's
     -- refreshing method differs between builds, so both names are tried and
     -- the failure is SAID once instead of pretending the list is live.
@@ -6033,14 +6041,264 @@ local okBuild, errBuild = pcall(function()
         if p ~= LocalPlayer then refreshMilkUsers() end
     end)
 
-    -- the body is EMPTY on purpose: it idles, it holds the toggle, it stops
-    -- the instant the toggle goes off. No in-game action of any kind yet.
-    local function runMilkLoop()
-        log("milk loop: on — user " .. tostring(milkUser)
-            .. " (GUI only — no steps built yet)")
-        while not milkStopping() do
-            task.wait(1)
+    ------------------------------------------------------------
+    -- MILK - STEP 1: SEE, THEN CLEAN
+    -- user: "it should show cows and a dirty stall. if there is a dirty stall
+    -- EVER in the milk loop IT MUST clean it IMEDIATLY before doing anything.
+    -- it should also see food for the animals, we save that for later tho"
+    --
+    -- The dump names the pieces: Objects.Animals holds the Cow models, every
+    -- stall has an "Adornee_BarnStallMenu" billboard (12 of them), the animal
+    -- menu exposes Herd / Pet / Rename, the production number is the "(45%)"
+    -- text on ...ProductionVisual.ProgressLabel, and cleaning is the game's
+    -- OWN prompt: CleanAnimalContainer, bound to V.
+    --
+    -- Nothing here invents state and nothing fires a remote: a stall is DIRTY
+    -- when the game itself offers Clean at it, and cleaning is the V press the
+    -- game itself asks for. Cows are attributed through Configurations.Owner
+    -- (the same tag the fields use), with a distance fallback to the picked
+    -- plot for anything the game leaves untagged.
+    ------------------------------------------------------------
+    local function milkSetStatus(txt)
+        pcall(function() milkPara:SetValue(txt) end)
+    end
+
+    -- the game's "what can I do right now" billboards, the same tree the
+    -- farming loop reads for FillSeeder / Hitch
+    local function promptUp(name)
+        local ok, b = pcall(function()
+            local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+            local gv = pg and pg:FindFirstChild("GuiViews")
+            local hud = gv and gv:FindFirstChild("HUD")
+            local gw = hud and hud:FindFirstChild("MainHUD")
+            local cpa = (gw and gw:FindFirstChild("PCGP_ContextActions"))
+                or (hud and hud:FindFirstChild("PCGP_ContextActions"))
+            local bills = cpa and cpa:FindFirstChild("Billboards")
+            return bills and bills:FindFirstChild(name)
+        end)
+        if ok and b then
+            if b:IsA("LayerCollector") then return b.Enabled == true end
+            if b:IsA("GuiObject") then return b.Visible == true end
         end
+        return nil -- unreadable: never guess
+    end
+
+    -- Configurations.Owner, walked up a few parents (plot / field / vehicle /
+    -- animal all carry it in the dump)
+    local function milkOwnerOf(inst)
+        local p = inst
+        for _ = 1, 8 do
+            if not p then break end
+            local conf = p:FindFirstChild("Configurations")
+            local o = conf and conf:FindFirstChild("Owner")
+            if o and o:IsA("ObjectValue") and o.Value then return o.Value.Name end
+            p = p.Parent
+        end
+        return nil
+    end
+
+    local function milkPlotOf(ownerName)
+        local plots = workspace:FindFirstChild("Plots")
+        if not plots then return nil, "Workspace.Plots is missing" end
+        local seen = {}
+        for _, m in ipairs(plots:GetChildren()) do
+            if m:IsA("Model") then
+                local who = milkOwnerOf(m)
+                -- the billboard carries the DISPLAY name ("Simba"), the Owner
+                -- value carries the account: accept either, case-insensitive
+                local bill = m:FindFirstChild("PlotBillboard")
+                local lab = bill and bill:FindFirstChild("Owner")
+                local txt = (lab and lab:IsA("TextLabel")) and lab.Text or nil
+                seen[#seen + 1] = string.format("%s=%s", m.Name, tostring(who or txt or "?"))
+                local hit = (who and who:lower() == ownerName:lower())
+                    or (txt and txt ~= "" and txt:lower():find(ownerName:lower(), 1, true) ~= nil)
+                if hit then return m, table.concat(seen, " ") end
+            end
+        end
+        return nil, table.concat(seen, " ")
+    end
+
+    local function milkInBox(pos, cf, size, pad)
+        if not pos or not cf or not size then return false end
+        local rel = cf:PointToObjectSpace(pos)
+        return math.abs(rel.X) <= size.X / 2 + pad
+            and math.abs(rel.Z) <= size.Z / 2 + pad
+    end
+
+    -- the production number the player sees on the animal menu
+    local function milkPercentOf(m)
+        for _, d in ipairs(m:GetDescendants()) do
+            if d:IsA("TextLabel") and d.Text and d.Text ~= "" then
+                local n = tonumber(d.Text:match("(%d+)%%"))
+                if n then return n end
+            end
+        end
+        for _, a in ipairs({ "Production", "ProductionPercent", "Milk" }) do
+            local v = m:GetAttribute(a)
+            if type(v) == "number" then return v end
+        end
+        return nil
+    end
+
+    local function milkStalls(wantOwner, cf, size)
+        local out, skipped = {}, 0
+        for _, d in ipairs(workspace:GetDescendants()) do
+            if d.Name == "Adornee_BarnStallMenu" then
+                local pos
+                pcall(function()
+                    if d:IsA("BillboardGui") or d:IsA("SurfaceGui") then
+                        local ad = d.Adornee
+                        if ad and ad:IsA("BasePart") then pos = ad.Position end
+                    end
+                end)
+                local owner = milkOwnerOf(d)
+                local mine = owner and wantOwner and owner:lower() == wantOwner:lower()
+                local near = (owner == nil) and cf and pos and milkInBox(pos, cf, size, 80)
+                if mine or near then
+                    out[#out + 1] = { pos = pos, owner = owner }
+                else
+                    skipped += 1
+                end
+            end
+        end
+        return out, skipped
+    end
+
+    local function milkCows(wantOwner, cf, size)
+        local objects = workspace:FindFirstChild("Objects")
+        local folder = objects and objects:FindFirstChild("Animals")
+        if not folder then return {}, "Objects.Animals is missing" end
+        local out = {}
+        for _, m in ipairs(folder:GetChildren()) do
+            if m:IsA("Model") and m.Name:lower():find("cow", 1, true) then
+                local owner = milkOwnerOf(m)
+                local p = m:GetPivot().Position
+                local mine = owner and wantOwner and owner:lower() == wantOwner:lower()
+                local near = (owner == nil) and cf and milkInBox(p, cf, size, 80)
+                if mine or near then
+                    out[#out + 1] = { model = m, pos = p, percent = milkPercentOf(m) }
+                end
+            end
+        end
+        return out
+    end
+
+    -- ▸ WALK, DON'T FLY. moveTo()/arcTween lifts 30 studs and aborts on
+    --   stopping() — which belongs to the FARMING thread, so with the farm
+    --   loop off every stall hop would die on its first step. This is a short,
+    --   low, ground-level glide that answers to the milk toggle instead.
+    local function milkWalkTo(target)
+        local ch = LocalPlayer.Character
+        local root = ch and ch:FindFirstChild("HumanoidRootPart")
+        if not root then return false end
+        local hum = ch:FindFirstChildOfClass("Humanoid")
+        if hum and hum.SeatPart then return false end -- seated: not on foot
+        local from = root.Position
+        local steps = math.clamp(math.floor((target - from).Magnitude / 1.5), 6, 40)
+        for i = 1, steps do
+            if milkStopping() then return false end
+            local t = i / steps
+            local ease = t * t * (3 - 2 * t)
+            root.CFrame = CFrame.new(from:Lerp(target, ease))
+            task.wait(0.03)
+        end
+        return true
+    end
+
+    -- THE RULE: a dirty stall is cleaned BEFORE anything else happens
+    local function milkClean(stalls)
+        local dirty, cleaned, unknown = 0, 0, 0
+        for i, s in ipairs(stalls) do
+            if milkStopping() then break end
+            if not s.pos then
+                unknown += 1
+                log(string.format("milk: stall %d has no readable position", i))
+            else
+                -- stand AT the stall: the game only lights Clean when dirty
+                milkWalkTo(s.pos + Vector3.new(0, 3, 0))
+                task.wait(0.9)
+                local up = promptUp("CleanAnimalContainer")
+                if up == nil then
+                    unknown += 1
+                    log(string.format("milk: stall %d - the game's Clean prompt is unreadable", i))
+                elseif up then
+                    dirty += 1
+                    log(string.format("milk: stall %d is DIRTY - cleaning it now (the game's own V)", i))
+                    local done = false
+                    for attempt = 1, 3 do
+                        if milkStopping() then break end
+                        pressKey(Enum.KeyCode.V)
+                        task.wait(1.3)
+                        if promptUp("CleanAnimalContainer") == false then
+                            done = true
+                            break
+                        end
+                        log(string.format("milk: stall %d still dirty after %d press(es)", i, attempt))
+                    end
+                    if done then
+                        cleaned += 1
+                        log(string.format("OK milk: stall %d cleaned", i))
+                    else
+                        log(string.format("milk: stall %d would not clean - next cycle tries again", i))
+                    end
+                end
+            end
+        end
+        return dirty, cleaned, unknown
+    end
+
+    local function milkCycle()
+        local owner = milkUser
+        if not owner or owner:sub(1, 1) == "(" then
+            milkSetStatus("no user picked")
+            log("milk: no user picked - the dropdown above names whose plot to work on")
+            return false
+        end
+        local plot, plotsSeen = milkPlotOf(owner)
+        local cf, size
+        if plot then cf, size = plot:GetBoundingBox() end
+        local stalls, skipped = milkStalls(owner, cf, size)
+        local cows = milkCows(owner, cf, size)
+        -- SHOW first, so even a clean run is readable...
+        local lines = {}
+        lines[#lines + 1] = string.format("%s - plot %s - %d stall(s) - %d cow(s)", owner,
+            plot and plot.Name or ("NOT FOUND [" .. tostring(plotsSeen) .. "]"), #stalls, #cows)
+        for i, c in ipairs(cows) do
+            lines[#lines + 1] = string.format("cow %d: %s%%", i,
+                c.percent and tostring(c.percent) or "?")
+        end
+        if #cows == 0 then
+            lines[#lines + 1] = "no cow attributed to this plot yet"
+        end
+        milkSetStatus(table.concat(lines, "\n"))
+        log("milk: " .. table.concat(lines, " | "))
+        if #stalls == 0 then
+            log("milk: no stall found for this plot - nothing to clean"
+                .. (skipped > 0 and (" (" .. skipped .. " stall(s) belong to someone else)") or ""))
+            return true
+        end
+        -- ...then CLEAN, before anything else
+        local dirty, cleaned, unknown = milkClean(stalls)
+        log(string.format("milk: stalls - %d dirty, %d cleaned, %d unreadable",
+            dirty, cleaned, unknown))
+        return true
+    end
+
+    -- the loop: see + clean every 30 s (cows / herd / milk land next). The
+    -- body stops the instant the toggle goes off.
+    local function runMilkLoop()
+        log("milk loop: on - user " .. tostring(milkUser))
+        while not milkStopping() do
+            local okCycle, errCycle = pcall(milkCycle)
+            if not okCycle then
+                log("milk cycle failed: " .. tostring(errCycle))
+            end
+            for _ = 1, 60 do -- 30 s, in slices so OFF reacts at once
+                if milkStopping() then break end
+                task.wait(0.5)
+            end
+        end
+        milkSetStatus("idle")
     end
 
     local milkToggle
@@ -6050,6 +6308,16 @@ local okBuild, errBuild = pcall(function()
         Callback = function(on)
             if on then
                 if milkThread then return end -- already running
+                -- ▸ ONE CHARACTER, ONE DRIVER: the farm loop moves the same
+                --   body around. Refusing is honest; both running would fight.
+                if loopThread then
+                    log("milk loop: the farming loop is running - stop it first (one character, one driver)")
+                    pcall(function()
+                        (Fluent.Options and Fluent.Options.milkLoop
+                            or milkToggle):SetValue(false)
+                    end)
+                    return
+                end
                 if not milkUser or milkUser:sub(1, 1) == "(" then
                     log("milk loop: pick a user first — the dropdown names whose plot to work on")
                     pcall(function()
