@@ -54,6 +54,11 @@ local okBuild, errBuild = pcall(function()
         --   a farm control, and it must be findable in one look
         Doctor   = Window:CreateTab({ Title = "Doctor", Icon = "stethoscope" }),
         Farm     = Window:CreateTab({ Title = "Farm", Icon = "wheat" }),
+        -- ▸ MILK (user: "is is a feature, im preparing the dump. it will be a
+        --   section called 'Milk' that will go on my friends plot, find a cow
+        --   at 300% then tell it to go to the barn then it will milk the cow,
+        --   send it back to the feild and repeat"). GUI SHELL ONLY for now.
+        Milk     = Window:CreateTab({ Title = "Milk", Icon = "droplet" }),
         Player   = Window:CreateTab({ Title = "Player", Icon = "user" }),
         Console  = Window:CreateTab({ Title = "Console", Icon = "terminal" }),
         Settings = Window:CreateTab({ Title = "Settings", Icon = "settings" }),
@@ -5953,6 +5958,130 @@ local okBuild, errBuild = pcall(function()
     })
 
     log("gui: farming toggle ok")
+
+    ------------------------------------------------------------
+    -- MILK TAB — SHELL ONLY
+    -- user: "to know the users feild there will be a dropdown asking wich user
+    -- it is. it's a loop like the farming loop build that but nothing inside,
+    -- only gui". So: the user picker, the loop toggle, and the thread
+    -- plumbing that makes ON/OFF honest — and NOTHING in the body. The Milk
+    -- steps (cow at 300 %, barn, milk, back to the field) land one at a time
+    -- once the dump says what those things actually are.
+    ------------------------------------------------------------
+    local milkUser -- the picked player's name (nil = nothing picked)
+    -- own thread id + own stop test: stopping() belongs to the FARMING loop,
+    -- and a milk thread would read it as "stopped" on its very first tick.
+    local milkThread = nil
+    local function milkStopping()
+        if not milkThread then return true end
+        return coroutine.running() ~= milkThread
+    end
+
+    -- everyone but me — the farm loop already owns MY plot
+    local function milkUserChoices()
+        local out = {}
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LocalPlayer then out[#out + 1] = p.Name end
+        end
+        table.sort(out)
+        if #out == 0 then out[1] = "(nobody else is here)" end
+        return out
+    end
+
+    local milkChoices0 = milkUserChoices()
+    milkUser = milkChoices0[1]
+    local milkDrop = Tabs.Milk:CreateDropdown("milkUser", {
+        Title = "User",
+        Values = milkChoices0,
+        Multi = false,
+        Default = milkUser,
+        Callback = function(v)
+            milkUser = v
+            log("milk: user = " .. tostring(v))
+        end,
+    })
+    log("milk: users — " .. table.concat(milkChoices0, ", "))
+
+    -- players join and leave mid-session: keep the picker true. Fluent's
+    -- refreshing method differs between builds, so both names are tried and
+    -- the failure is SAID once instead of pretending the list is live.
+    local milkRefreshWorks = true
+    local function refreshMilkUsers()
+        if not milkRefreshWorks then return end
+        local list = milkUserChoices()
+        local ok = pcall(function() milkDrop:SetValues(list) end)
+        if not ok then ok = pcall(function() milkDrop:Refresh(list) end) end
+        if not ok then
+            milkRefreshWorks = false
+            log("milk: this build's dropdown can't be refilled — reload the script to see players who joined later")
+            return
+        end
+        local found = false
+        for _, n in ipairs(list) do
+            if n == milkUser then found = true break end
+        end
+        if not found then
+            milkUser = list[1]
+            log("milk: the picked user left — now on " .. tostring(milkUser))
+            pcall(function() Fluent.Options.milkUser:SetValue(milkUser) end)
+        end
+    end
+    Players.PlayerAdded:Connect(function(p)
+        if p ~= LocalPlayer then refreshMilkUsers() end
+    end)
+    Players.PlayerRemoving:Connect(function(p)
+        if p ~= LocalPlayer then refreshMilkUsers() end
+    end)
+
+    -- the body is EMPTY on purpose: it idles, it holds the toggle, it stops
+    -- the instant the toggle goes off. No in-game action of any kind yet.
+    local function runMilkLoop()
+        log("milk loop: on — user " .. tostring(milkUser)
+            .. " (GUI only — no steps built yet)")
+        while not milkStopping() do
+            task.wait(1)
+        end
+    end
+
+    local milkToggle
+    milkToggle = Tabs.Milk:CreateToggle("milkLoop", {
+        Title = "milk loop",
+        Default = false,
+        Callback = function(on)
+            if on then
+                if milkThread then return end -- already running
+                if not milkUser or milkUser:sub(1, 1) == "(" then
+                    log("milk loop: pick a user first — the dropdown names whose plot to work on")
+                    pcall(function()
+                        (Fluent.Options and Fluent.Options.milkLoop
+                            or milkToggle):SetValue(false)
+                    end)
+                    return
+                end
+                log("milk loop: starting")
+                task.spawn(function()
+                    milkThread = coroutine.running()
+                    local okRun, errRun = pcall(runMilkLoop)
+                    if not okRun then
+                        log("⚠ milk loop crashed: " .. tostring(errRun))
+                    end
+                    if milkThread == coroutine.running() then
+                        milkThread = nil
+                        pcall(function()
+                            (Fluent.Options and Fluent.Options.milkLoop
+                                or milkToggle):SetValue(false)
+                        end)
+                    end
+                end)
+            else
+                if not milkThread then return end -- already off (echo-safe)
+                milkThread = nil
+                log("milk loop: off — stopped")
+            end
+        end,
+    })
+
+    log("gui: milk tab ok (shell only)")
 
     -- Settings: reload + unload
     local function destroyUI()
