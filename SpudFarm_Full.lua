@@ -6125,7 +6125,8 @@ local okBuild, errBuild = pcall(function()
             and math.abs(rel.Z) <= size.Z / 2 + pad
     end
 
-    -- the production number the player sees on the animal menu
+    -- the production number the player sees on the animal menu (fallbacks: a
+    -- % label under the cow, then the game's own attributes)
     local function milkPercentOf(m)
         for _, d in ipairs(m:GetDescendants()) do
             if d:IsA("TextLabel") and d.Text and d.Text ~= "" then
@@ -6140,13 +6141,62 @@ local okBuild, errBuild = pcall(function()
         return nil
     end
 
+    -- ▸ THE "300%" (user: "find a cow at 300%"). It is NOT on the cow model:
+    --   the game prints it on the shared animal menu
+    --   GuiViews.Animal.AnimalInteractions.AnimalInteractionGuis.
+    --   AnimalInteractionMenu.QuickInfo.AnimalLabel.ProductionFrame.
+    --   ProductionVisual.ProgressLabel  =  "[PROD_TYPE] (45%)"
+    --   and that menu only fills in while you stand next to the animal. So we
+    --   go there and read it; the slider fill is the fallback when the label
+    --   still shows its template text.
+    local function milkMenuRead()
+        local ok, pct, label, shown = pcall(function()
+            local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+            local gv = pg and pg:FindFirstChild("GuiViews")
+            local g = gv and gv:FindFirstChild("Animal")
+            local ai = g and g:FindFirstChild("AnimalInteractions")
+            local ag = ai and ai:FindFirstChild("AnimalInteractionGuis")
+            local menu = ag and ag:FindFirstChild("AnimalInteractionMenu")
+            if not menu then return nil end
+            local qi = menu:FindFirstChild("QuickInfo")
+            local al = qi and qi:FindFirstChild("AnimalLabel")
+            local pf = al and al:FindFirstChild("ProductionFrame")
+            local pv = pf and pf:FindFirstChild("ProductionVisual")
+            local lab = pv and pv:FindFirstChild("ProgressLabel")
+            local txt = (lab and lab:IsA("TextLabel")) and lab.Text or ""
+            local n = tonumber(tostring(txt):match("(%d+)%%"))
+            if not n then
+                local sb = pv and pv:FindFirstChild("SliderBackground")
+                local sf = pv and pv:FindFirstChild("SliderForeground")
+                if sb and sf and sb:IsA("GuiObject") and sf:IsA("GuiObject")
+                    and sb.AbsoluteSize.X > 0 then
+                    n = math.floor(sf.AbsoluteSize.X / sb.AbsoluteSize.X * 100 + 0.5)
+                end
+            end
+            local on
+            if menu:IsA("LayerCollector") then
+                on = menu.Enabled == true
+            elseif menu:IsA("GuiObject") then
+                on = menu.Visible == true
+            end
+            return n, txt, on
+        end)
+        if not ok then return nil, "menu unreadable", nil end
+        return pct, label, shown
+    end
+
     local function milkStalls(wantOwner, cf, size)
         local out, skipped = {}, 0
         for _, d in ipairs(workspace:GetDescendants()) do
             if d.Name == "Adornee_BarnStallMenu" then
+                -- dump: 12 parts carry this name (the ADORNEE targets), so a
+                -- BasePart IS the stall position; the billboard variant reads
+                -- its Adornee. Both shapes are covered.
                 local pos
                 pcall(function()
-                    if d:IsA("BillboardGui") or d:IsA("SurfaceGui") then
+                    if d:IsA("BasePart") then
+                        pos = d.Position
+                    elseif d:IsA("BillboardGui") or d:IsA("SurfaceGui") then
                         local ad = d.Adornee
                         if ad and ad:IsA("BasePart") then pos = ad.Position end
                     end
@@ -6155,7 +6205,7 @@ local okBuild, errBuild = pcall(function()
                 local mine = owner and wantOwner and owner:lower() == wantOwner:lower()
                 local near = (owner == nil) and cf and pos and milkInBox(pos, cf, size, 80)
                 if mine or near then
-                    out[#out + 1] = { pos = pos, owner = owner }
+                    out[#out + 1] = { pos = pos, owner = owner, part = d }
                 else
                     skipped += 1
                 end
@@ -6198,6 +6248,25 @@ local okBuild, errBuild = pcall(function()
             task.wait(0.2)
         end
         return true
+    end
+
+    -- ▸ every cow, one visit each: tp beside it, let the game's animal menu
+    --   fill in, read the production number. Untrusted readings stay nil (the
+    --   menu not up yet) instead of borrowing the previous cow's number.
+    local function milkCowScan(cows)
+        for _, c in ipairs(cows) do
+            if milkStopping() then return end
+            milkTp(c.pos + Vector3.new(0, 3, 0))
+            task.wait(0.55)
+            local pct, label, shown = milkMenuRead()
+            if shown == true and pct then
+                c.percent = pct
+                c.label = label
+            else
+                c.percent = nil
+                c.label = (shown == false) and "menu did not open" or "menu unreadable"
+            end
+        end
     end
 
     -- THE RULE: a dirty stall is cleaned BEFORE anything else happens
@@ -6253,29 +6322,41 @@ local okBuild, errBuild = pcall(function()
         local cf, size
         if plot then cf, size = plot:GetBoundingBox() end
         local stalls, skipped = milkStalls(owner, cf, size)
+
+        -- ▸ 1. CLEAN FIRST. The user's rule is absolute: a dirty stall is
+        --   cleaned before the loop does anything else at all.
+        local dirty, cleaned, unknown = 0, 0, 0
+        if #stalls > 0 then
+            log(string.format("milk: %d stall(s) - checking them before anything else", #stalls))
+            dirty, cleaned, unknown = milkClean(stalls)
+        end
+
+        -- ▸ 2. cows + their production number
         local cows = milkCows(owner, cf, size)
-        -- SHOW first, so even a clean run is readable...
+        milkCowScan(cows)
+
+        -- ▸ 3. show it
         local lines = {}
         lines[#lines + 1] = string.format("%s - plot %s - %d stall(s) - %d cow(s)", owner,
             plot and plot.Name or ("NOT FOUND [" .. tostring(plotsSeen) .. "]"), #stalls, #cows)
         for i, c in ipairs(cows) do
-            lines[#lines + 1] = string.format("cow %d: %s%%", i,
-                c.percent and tostring(c.percent) or "?")
+            lines[#lines + 1] = string.format("cow %d: %s%s", i,
+                c.percent and (tostring(c.percent) .. "%") or "?%",
+                c.percent and ((c.percent >= 300) and " READY" or "")
+                    or (" (" .. tostring(c.label or "unread") .. ")"))
         end
         if #cows == 0 then
             lines[#lines + 1] = "no cow attributed to this plot yet"
         end
+        if #stalls == 0 then
+            lines[#lines + 1] = "no stall found for this plot - nothing to clean"
+                .. (skipped > 0 and (" (" .. skipped .. " belong to someone else)") or "")
+        else
+            lines[#lines + 1] = string.format("stalls: %d dirty, %d cleaned, %d unreadable",
+                dirty, cleaned, unknown)
+        end
         milkSetStatus(table.concat(lines, "\n"))
         log("milk: " .. table.concat(lines, " | "))
-        if #stalls == 0 then
-            log("milk: no stall found for this plot - nothing to clean"
-                .. (skipped > 0 and (" (" .. skipped .. " stall(s) belong to someone else)") or ""))
-            return true
-        end
-        -- ...then CLEAN, before anything else
-        local dirty, cleaned, unknown = milkClean(stalls)
-        log(string.format("milk: stalls - %d dirty, %d cleaned, %d unreadable",
-            dirty, cleaned, unknown))
         return true
     end
 
@@ -6288,7 +6369,7 @@ local okBuild, errBuild = pcall(function()
             if not okCycle then
                 log("milk cycle failed: " .. tostring(errCycle))
             end
-            for _ = 1, 60 do -- 30 s, in slices so OFF reacts at once
+            for _ = 1, 12 do -- 6 s on top of a ~30 s cycle, in slices so OFF reacts at once
                 if milkStopping() then break end
                 task.wait(0.5)
             end
