@@ -10,7 +10,19 @@ local VERSION    = "rebuild v1.6 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
-local LocalPlayer = Players.LocalPlayer or Players:GetPlayerAdded():Wait()
+local LocalPlayer = Players.LocalPlayer
+if not LocalPlayer then
+    -- GetPlayerAdded does NOT exist: that typo used to kill the whole load
+    -- before a single pixel was drawn
+    local okWait, who = pcall(function() return Players.PlayerAdded:Wait() end)
+    LocalPlayer = okWait and who or nil
+end
+if not LocalPlayer then
+    warn("[spud] no LocalPlayer yet - aborting before the GUI")
+    return
+end
+
+print("[spud] start " .. VERSION)
 
 local function plainNotify(title, text) -- used before/outside the library
     pcall(function()
@@ -21,15 +33,25 @@ end
 ------------------------------------------------------------
 -- load the GUI library
 ------------------------------------------------------------
-local okLib, Fluent = pcall(function()
-    local src = game:HttpGet(LIB_URL, true)
-    return assert(loadstring(src))()
-end)
+local okLib, Fluent
+local libErr
+for attempt = 1, 3 do
+    okLib, Fluent = pcall(function()
+        local src = game:HttpGet(LIB_URL, true)
+        assert(type(src) == "string" and #src > 1000, "HttpGet returned " .. tostring(src and #src))
+        return assert(loadstring(src))()
+    end)
+    if okLib and type(Fluent) == "table" then break end
+    libErr = Fluent
+    warn(string.format("[spud] GUI library attempt %d failed: %s", attempt, tostring(Fluent)))
+    task.wait(2)
+end
 if not okLib or type(Fluent) ~= "table" then
-    warn("[spud] GUI library failed: " .. tostring(Fluent))
-    plainNotify("SPUD FARM", "GUI library failed to load — check executor HTTP / Delta console")
+    warn("[spud] GUI library failed for good: " .. tostring(libErr))
+    plainNotify("SPUD FARM", "GUI library failed: " .. tostring(libErr):sub(1, 90))
     return
 end
+print("[spud] library loaded")
 
 ------------------------------------------------------------
 -- build the interface (wrapped so any error is SHOWN, not swallowed)
@@ -47,6 +69,7 @@ local okBuild, errBuild = pcall(function()
         Theme = "Dark",
         MinimizeKey = Enum.KeyCode.RightShift,
     })
+    print("[spud] window created")
 
     local Tabs = {
         Home     = Window:CreateTab({ Title = "Home", Icon = "house" }),
@@ -7066,4 +7089,6 @@ end)
 if not okBuild then
     warn("[spud] GUI build error: " .. tostring(errBuild))
     plainNotify("SPUD FARM", "GUI build error: " .. tostring(errBuild):sub(1, 130))
+else
+    print("[spud] GUI ready")
 end
