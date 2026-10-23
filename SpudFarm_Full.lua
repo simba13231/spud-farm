@@ -6259,11 +6259,11 @@ local okBuild, errBuild = pcall(function()
         return out, skipped
     end
 
-    local function milkCows(wantOwner, cf, size)
+    local function milkCows(wantOwner, cf, size, stalls)
         local objects = workspace:FindFirstChild("Objects")
         local folder = objects and objects:FindFirstChild("Animals")
         if not folder then return {}, "Objects.Animals is missing" end
-        local out = {}
+        local out, seen = {}, {}
         for _, m in ipairs(folder:GetChildren()) do
             if m:IsA("Model") and m.Name:lower():find("cow", 1, true) then
                 local owner = milkOwnerOf(m)
@@ -6271,13 +6271,56 @@ local okBuild, errBuild = pcall(function()
                 local mine = owner and wantOwner and owner:lower() == wantOwner:lower()
                 local near = (owner == nil) and cf and milkInBox(p, cf, size, 80)
                 if mine or near then
-                    out[#out + 1] = {
+                    local c = {
                         index = #out + 1,
                         model = m,
                         pos = p,
                         percent = milkPercentOf(m),
                         state = milkStateOf(m),
                     }
+                    seen[m] = c
+                    out[#out + 1] = c
+                end
+            end
+        end
+
+        -- ▸ COWS IN A BARN ARE TAKEN OUT OF Objects.Animals (user: "it does not
+        --   see when a cow is in the barn"). The stall's Occupant is the truth;
+        --   a parked cow that is not linked to a spot yet is found under the
+        --   barn's AnimalContainer. They keep their stall so the milk step can
+        --   walk straight to the right door.
+        local function add(m, spot)
+            if not m or not m:IsA("Model") then return end
+            local hit = seen[m]
+            if hit then
+                hit.stall = hit.stall or spot
+                hit.inBarn = true
+                hit.state = hit.state or "IdleLocked"
+                return
+            end
+            local c = {
+                index = #out + 1,
+                model = m,
+                pos = m:GetPivot().Position,
+                percent = milkPercentOf(m),
+                state = milkStateOf(m) or "IdleLocked",
+                stall = spot,
+                inBarn = true,
+            }
+            seen[m] = c
+            out[#out + 1] = c
+        end
+        local containers = {}
+        for _, s in ipairs(stalls or {}) do
+            local o = s.spot and s.spot:FindFirstChild("Occupant")
+            if o and o:IsA("ObjectValue") and o.Value then add(o.Value, s.spot) end
+            local cont = s.spot and s.spot.Parent and s.spot.Parent.Parent
+            if cont and not containers[cont] then
+                containers[cont] = true
+                for _, ch in ipairs(cont:GetChildren()) do
+                    if ch:IsA("Model") and ch.Name:lower():find("cow", 1, true) then
+                        add(ch, nil)
+                    end
                 end
             end
         end
@@ -6581,8 +6624,9 @@ local okBuild, errBuild = pcall(function()
             dirty, cleaned, unknown = milkClean(stalls)
         end
 
-        -- ▸ 2. cows + their production number
-        local cows = milkCows(owner, cf, size)
+        -- ▸ 2. cows + their production number (field ones AND the ones parked
+        --   in a barn stall, which the game has moved out of Objects.Animals)
+        local cows = milkCows(owner, cf, size, stalls)
         milkCowScan(cows)
 
         -- ▸ 2b. HERD: one ready cow into one free stall per cycle. Both ends
@@ -6601,7 +6645,8 @@ local okBuild, errBuild = pcall(function()
             end
             local pick
             for _, c in ipairs(cows) do
-                if c.state ~= "IdleLocked" and (c.percent or 0) >= 300 then
+                if not c.inBarn and not c.stall and c.state ~= "IdleLocked"
+                    and (c.percent or 0) >= 300 then
                     pick = c
                     break
                 end
@@ -6619,10 +6664,13 @@ local okBuild, errBuild = pcall(function()
 
         -- ▸ 3. show it
         local lines = {}
-        lines[#lines + 1] = string.format("%s - plot %s - %d stall(s) - %d cow(s)", owner,
-            plot and plot.Name or ("NOT FOUND [" .. tostring(plotsSeen) .. "]"), #stalls, #cows)
+        local parked = 0
+        for _, c in ipairs(cows) do if c.inBarn then parked += 1 end end
+        lines[#lines + 1] = string.format("%s - plot %s - %d stall(s) - %d cow(s), %d in a barn", owner,
+            plot and plot.Name or ("NOT FOUND [" .. tostring(plotsSeen) .. "]"), #stalls, #cows, parked)
         for i, c in ipairs(cows) do
-            local where = (c.state == "IdleLocked") and " [barn]"
+            local where = c.stall and (" [barn " .. tostring(c.stall.Name) .. "]")
+                or (c.state == "IdleLocked") and " [barn]"
                 or (c.state and (" [" .. c.state:lower() .. "]") or "")
             lines[#lines + 1] = string.format("cow %d: %s%s%s", i,
                 c.percent and (tostring(c.percent) .. "%") or "?%",
