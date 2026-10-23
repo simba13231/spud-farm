@@ -6419,7 +6419,7 @@ local okBuild, errBuild = pcall(function()
         end
         milkSetStatus(table.concat(lines, "\n"))
         log("milk: " .. table.concat(lines, " | "))
-        return true
+        return true, dirty, unknown
     end
 
     -- the loop: see + clean every 30 s (cows / herd / milk land next). The
@@ -6427,11 +6427,17 @@ local okBuild, errBuild = pcall(function()
     local function runMilkLoop()
         log("milk loop: on - user " .. tostring(milkUser))
         while not milkStopping() do
-            local okCycle, errCycle = pcall(milkCycle)
+            local okCycle, ran, dirty, unknown = pcall(milkCycle)
             if not okCycle then
-                log("milk cycle failed: " .. tostring(errCycle))
+                log("milk cycle failed: " .. tostring(ran))
             end
-            for _ = 1, 12 do -- 6 s on top of a ~30 s cycle, in slices so OFF reacts at once
+            -- nothing dirty and nothing unreadable: re-walking all 12 triggers
+            -- every 6 s just looks stuck, so back off to one minute
+            local busy = ((tonumber(dirty) or 0) + (tonumber(unknown) or 0)) > 0
+            local idle = busy and 6 or 60
+            log(string.format("milk: %s - next barn check in %d s",
+                busy and "issues found" or "no dirty stall seen", idle))
+            for _ = 1, idle * 2 do -- half-second slices so OFF reacts at once
                 if milkStopping() then break end
                 task.wait(0.5)
             end
