@@ -6272,6 +6272,7 @@ local okBuild, errBuild = pcall(function()
                 local near = (owner == nil) and cf and milkInBox(p, cf, size, 80)
                 if mine or near then
                     out[#out + 1] = {
+                        index = #out + 1,
                         model = m,
                         pos = p,
                         percent = milkPercentOf(m),
@@ -6298,6 +6299,106 @@ local okBuild, errBuild = pcall(function()
             task.wait(0.2)
         end
         return true
+    end
+
+    -- ▸ HERD (user: "go to the cow click the herd button then bring them to
+    --   the barn"). The game has ONE shared animal menu that points at whatever
+    --   animal the player stands next to, so herd = stand on the cow, call the
+    --   menu's OWN Herd button, then LEAD it in short hops: the cow follows the
+    --   player, so one 300-stud teleport would leave it behind in the field.
+    local function milkHerdMenu()
+        local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+        local gv = pg and pg:FindFirstChild("GuiViews")
+        local an = gv and gv:FindFirstChild("Animal")
+        local ai = an and an:FindFirstChild("AnimalInteractions")
+        local gs = ai and ai:FindFirstChild("AnimalInteractionGuis")
+        return gs and gs:FindFirstChild("AnimalInteractionMenu")
+    end
+
+    local function milkMenuPointsAt(menu, model)
+        local ok, ad = pcall(function() return menu.Adornee end)
+        if not ok or not ad then return false end
+        if ad == model then return true end
+        local okHit, hit = pcall(function() return model:FindFirstChild("Hitbox", true) end)
+        if okHit and hit and ad == hit then return true end
+        local okIn, inside = pcall(function()
+            return ad:IsDescendantOf(model) or model:IsDescendantOf(ad)
+        end)
+        return okIn and inside == true
+    end
+
+    local function milkHerd(cow, spot)
+        local model, name = cow.model, string.format("cow %d", cow.index or 0)
+        local trig = spot:FindFirstChild("ProximityPart", true)
+        local centre = spot:FindFirstChild("Center", true)
+        local dest = (trig and trig.Position) or (centre and centre.Position)
+        if not dest then
+            log(string.format("milk: stall %s has no readable spot to herd into", spot.Name))
+            return false
+        end
+        milkTp(model:GetPivot().Position + Vector3.new(0, 3, 0))
+        task.wait(0.6)
+        local menu = milkHerdMenu()
+        if not menu then
+            log("milk: the animal menu does not exist - cannot herd")
+            return false
+        end
+        for _ = 1, 12 do -- up to 3 s for the menu to catch up with the tp
+            if milkStopping() or milkMenuPointsAt(menu, model) then break end
+            task.wait(0.25)
+        end
+        if not milkMenuPointsAt(menu, model) then
+            log(string.format("milk: %s - the animal menu never pointed at it", name))
+            return false
+        end
+        local list = menu:FindFirstChild("Interactions")
+        list = list and list:FindFirstChild("InteractionsList")
+        local btn = list and list:FindFirstChild("Herd")
+        if not btn then
+            log("milk: the animal menu has no Herd button")
+            return false
+        end
+        local clicked, how = invokeHandlers(btn)
+        if not clicked then
+            pcall(function() btn:Activate() end)
+            how = "activate()"
+        end
+        log(string.format("milk: %s - Herd clicked (%s) - leading it to stall %s",
+            name, tostring(how), spot.Name))
+        task.wait(0.6)
+
+        local ch = LocalPlayer.Character
+        local root = ch and ch:FindFirstChild("HumanoidRootPart")
+        if not root then return false end
+        local function entered()
+            local o = spot:FindFirstChild("Occupant")
+            return o and o:IsA("ObjectValue") and o.Value == model
+        end
+        local t0, beat = os.clock(), 0
+        while os.clock() - t0 < 45 do
+            if milkStopping() then return false end
+            if entered() then
+                log(string.format("OK milk: %s is in stall %s", name, spot.Name))
+                return true
+            end
+            local p = root.Position
+            local d = Vector3.new(dest.X, p.Y, dest.Z) - p
+            if d.Magnitude > 3 then
+                local step = d.Unit * math.min(3, d.Magnitude)
+                root.CFrame = CFrame.new(p + step) * (root.CFrame - p)
+            end
+            if os.clock() - beat > 5 then
+                beat = os.clock()
+                log(string.format("milk: %s - %d to stall %s, cow %d behind", name,
+                    math.floor(d.Magnitude), spot.Name,
+                    math.floor((model:GetPivot().Position - root.Position).Magnitude)))
+            end
+            task.wait(0.35)
+        end
+        log(string.format("milk: %s did not enter stall %s (%d studs away, state %s)", name,
+            spot.Name, math.floor((model:GetPivot().Position - root.Position).Magnitude),
+            tostring(milkStateOf(model))))
+        return false
     end
 
     -- ▸ OLD: visit every cow to let the shared menu fill in. The production
@@ -6394,6 +6495,38 @@ local okBuild, errBuild = pcall(function()
         local cows = milkCows(owner, cf, size)
         milkCowScan(cows)
 
+        -- ▸ 2b. HERD: one ready cow into one free stall per cycle. Both ends
+        --   are explicit: the stall must have an empty Occupant, and the cow
+        --   must be READY and still in the field (IdleLocked = already in).
+        local herdLine, herded = nil, false
+        do
+            local free
+            for _, s in ipairs(stalls) do
+                if s.spot then
+                    local o = s.spot:FindFirstChild("Occupant")
+                    if not (o and o:IsA("ObjectValue") and o.Value) then
+                        free = free or s
+                    end
+                end
+            end
+            local pick
+            for _, c in ipairs(cows) do
+                if c.state ~= "IdleLocked" and (c.percent or 0) >= 300 then
+                    pick = c
+                    break
+                end
+            end
+            if not free then
+                herdLine = "herd: every stall is taken"
+            elseif not pick then
+                herdLine = "herd: no ready cow left in the field"
+            else
+                herded = milkHerd(pick, free.spot)
+                herdLine = string.format("herd: cow %d -> stall %s %s", pick.index or 0,
+                    free.spot.Name, herded and "ok" or "failed")
+            end
+        end
+
         -- ▸ 3. show it
         local lines = {}
         lines[#lines + 1] = string.format("%s - plot %s - %d stall(s) - %d cow(s)", owner,
@@ -6417,9 +6550,10 @@ local okBuild, errBuild = pcall(function()
             lines[#lines + 1] = string.format("stalls: %d dirty, %d cleaned, %d unreadable",
                 dirty, cleaned, unknown)
         end
+        if herdLine then lines[#lines + 1] = herdLine end
         milkSetStatus(table.concat(lines, "\n"))
         log("milk: " .. table.concat(lines, " | "))
-        return true, dirty, unknown
+        return true, dirty, unknown, herded
     end
 
     -- the loop: see + clean every 30 s (cows / herd / milk land next). The
@@ -6427,16 +6561,19 @@ local okBuild, errBuild = pcall(function()
     local function runMilkLoop()
         log("milk loop: on - user " .. tostring(milkUser))
         while not milkStopping() do
-            local okCycle, ran, dirty, unknown = pcall(milkCycle)
+            local okCycle, ran, dirty, unknown, herded = pcall(milkCycle)
             if not okCycle then
                 log("milk cycle failed: " .. tostring(ran))
             end
-            -- nothing dirty and nothing unreadable: re-walking all 12 triggers
-            -- every 6 s just looks stuck, so back off to one minute
+            -- a successful herd means "go again at once" (fill the barn), an
+            -- issue means retry soon, nothing to do means once a minute - the
+            -- 12-trigger walk just looks stuck if it repeats every 6 s
             local busy = ((tonumber(dirty) or 0) + (tonumber(unknown) or 0)) > 0
-            local idle = busy and 6 or 60
+            local idle = 60
+            if herded == true then idle = 2
+            elseif busy then idle = 6 end
             log(string.format("milk: %s - next barn check in %d s",
-                busy and "issues found" or "no dirty stall seen", idle))
+                busy and "issues found" or (herded and "herded one" or "no dirty stall seen"), idle))
             for _ = 1, idle * 2 do -- half-second slices so OFF reacts at once
                 if milkStopping() then break end
                 task.wait(0.5)
