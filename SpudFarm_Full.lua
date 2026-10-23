@@ -6193,34 +6193,31 @@ local okBuild, errBuild = pcall(function()
         return pct, label, shown
     end
 
-    -- ▸ A DIRTY STALL is visible in the barn itself (dump 21: the barn carries
-    --   Filth x12 + FilthEffect x12, one set per spot, and the dirty spot has a
-    --   "Stain" part beside it). A part you can see (Transparency < 1) is dirt.
-    --   Counts are returned so the log can show what was actually measured --
-    --   never "cleaned" unless the game's own prompt agrees.
-    local function milkFilth(spot)
-        if not spot then return 0, 0 end
-        local visible, total = 0, 0
-        local function bump(inst)
-            if inst:IsA("BasePart") then
-                total += 1
-                if inst.Transparency < 0.95 then visible += 1 end
-            else
-                for _, p in ipairs(inst:GetDescendants()) do
-                    if p:IsA("BasePart") then
-                        total += 1
-                        if p.Transparency < 0.95 then visible += 1 end
-                    end
-                end
-            end
-        end
+    -- ▸ A DIRTY STALL shows a "Stain" part at that spot (dump 21: a Stain sits
+    --   beside the one dirty stall and NOT beside the clean ones). The Filth /
+    --   FilthEffect parts are always present and always visible, so counting
+    --   them marked all 12 stalls dirty - they are not a dirt signal.
+    local function milkStain(spot)
+        if not spot then return 0 end
+        local n = 0
         for _, d in ipairs(spot:GetDescendants()) do
-            if d.Name == "Filth" or d.Name == "FilthEffect"
-                or d.Name == "Dirt" or d.Name == "Stain" then
-                bump(d)
+            if d.Name == "Stain" and d:IsA("BasePart") and d.Transparency < 0.95 then
+                n += 1
             end
         end
-        return visible, total
+        return n
+    end
+
+    -- the game only offers Clean when you stand in the stall's own trigger
+    -- volume (Spot.ProximityPart), NOT at the menu adornee panel - standing at
+    -- the panel is why the prompt never lit.
+    local function milkTrigger(spot)
+        if not spot then return nil end
+        local ok, part = pcall(function()
+            local t = spot:FindFirstChild("ProximityPart", true)
+            return (t and t:IsA("BasePart")) and t or nil
+        end)
+        return ok and part or nil
     end
 
     local function milkStalls(wantOwner, cf, size)
@@ -6240,14 +6237,20 @@ local okBuild, errBuild = pcall(function()
                     end
                 end)
                 -- the numbered folder above it ("Spots.2") holds that stall's
-                -- Filth / FilthEffect / Hay / Occupant
+                -- ProximityPart / Filth / Hay / Occupant
                 local par = d.Parent
                 local spot = (par and par.Parent and par.Parent.Name == "Spots") and par or nil
                 local owner = milkOwnerOf(d)
                 local mine = owner and wantOwner and owner:lower() == wantOwner:lower()
                 local near = (owner == nil) and cf and pos and milkInBox(pos, cf, size, 80)
                 if mine or near then
-                    out[#out + 1] = { pos = pos, owner = owner, part = d, spot = spot }
+                    out[#out + 1] = {
+                        pos = pos,
+                        owner = owner,
+                        part = d,
+                        spot = spot,
+                        trigger = milkTrigger(spot),
+                    }
                 else
                     skipped += 1
                 end
@@ -6311,36 +6314,35 @@ local okBuild, errBuild = pcall(function()
     end
 
     -- THE RULE: a dirty stall is cleaned BEFORE anything else happens.
-    -- Detection is the barn's own Filth parts (free, no teleport); the game's
-    -- Clean prompt is still the only thing allowed to declare a stall clean.
+    -- We stand inside the stall's own trigger volume and let the GAME answer:
+    -- Clean prompt up = dirty. A Stain part with no prompt is logged, never
+    -- guessed, and never counted as cleaned.
     local function milkClean(stalls)
         local dirty, cleaned, unknown = 0, 0, 0
         for i, s in ipairs(stalls) do
             if milkStopping() then break end
-            local seen, total = milkFilth(s.spot)
-            s.filth = (total > 0) and (seen > 0) or nil
-            if s.filth == false then
-                -- clean stall: skip it entirely, no teleport, no key press
-            elseif not s.pos then
+            local stains = milkStain(s.spot)
+            local stand = (s.trigger and s.trigger.Position) or s.pos
+            if not stand then
                 unknown += 1
-                log(string.format("milk: stall %d - %d/%d filth visible, but no readable position",
-                    i, seen, total))
+                log(string.format("milk: stall %d has no readable position", i))
             else
-                dirty += 1
-                milkTp(s.pos + Vector3.new(0, 3, 0))
-                task.wait(0.9)
+                milkTp(stand + Vector3.new(0, 3, 0))
+                task.wait(0.8)
                 local up = promptUp("CleanAnimalContainer")
                 if up == nil then
                     unknown += 1
-                    log(string.format("milk: stall %d - %d/%d filth visible, the game's Clean prompt is unreadable",
-                        i, seen, total))
+                    log(string.format("milk: stall %d - the game's Clean prompt is unreadable", i))
                 elseif up == false then
-                    unknown += 1
-                    log(string.format("milk: stall %d - %d/%d filth visible, but the game offers no Clean prompt",
-                        i, seen, total))
+                    if stains > 0 then
+                        unknown += 1
+                        log(string.format("milk: stall %d - %d stain(s) visible but the game offers no Clean prompt",
+                            i, stains))
+                    end
                 else
-                    log(string.format("milk: stall %d is DIRTY (%d/%d filth) - cleaning it now (the game's own V)",
-                        i, seen, total))
+                    dirty += 1
+                    log(string.format("milk: stall %d is DIRTY (%d stain(s)) - cleaning it now (the game's own V)",
+                        i, stains))
                     local done = false
                     for attempt = 1, 3 do
                         if milkStopping() then break end
@@ -6352,14 +6354,12 @@ local okBuild, errBuild = pcall(function()
                         end
                         log(string.format("milk: stall %d still dirty after %d press(es)", i, attempt))
                     end
-                    local nowSeen, nowTotal = milkFilth(s.spot)
                     if done then
                         cleaned += 1
-                        log(string.format("OK milk: stall %d cleaned (filth %d/%d -> %d/%d)",
-                            i, seen, total, nowSeen, nowTotal))
+                        log(string.format("OK milk: stall %d cleaned (%d stain(s) -> %d)",
+                            i, stains, milkStain(s.spot)))
                     else
-                        log(string.format("milk: stall %d would not clean (filth %d/%d -> %d/%d) - next cycle tries again",
-                            i, seen, total, nowSeen, nowTotal))
+                        log(string.format("milk: stall %d would not clean - next cycle tries again", i))
                     end
                 end
             end
@@ -6383,7 +6383,10 @@ local okBuild, errBuild = pcall(function()
         --   cleaned before the loop does anything else at all.
         local dirty, cleaned, unknown = 0, 0, 0
         if #stalls > 0 then
-            log(string.format("milk: %d stall(s) - checking them before anything else", #stalls))
+            local trig = 0
+            for _, s in ipairs(stalls) do if s.trigger then trig += 1 end end
+            log(string.format("milk: %d stall(s) - checking them before anything else (%d with a trigger volume)",
+                #stalls, trig))
             dirty, cleaned, unknown = milkClean(stalls)
         end
 
