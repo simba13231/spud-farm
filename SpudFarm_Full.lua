@@ -6327,6 +6327,39 @@ local okBuild, errBuild = pcall(function()
         return okIn and inside == true
     end
 
+    -- what the game offers as a CLICKABLE thing right now (the herd/lasso icon
+    -- only exists while a cow is herded, so this is how we learn its name)
+    local function milkLogButtons(tag)
+        local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+        if not pg then return end
+        local found = 0
+        for _, d in ipairs(pg:GetDescendants()) do
+            if found >= 20 then break end
+            if d:IsA("GuiButton") and d.Visible then
+                local vis, o = true, d
+                while o and not o:IsA("ScreenGui") do
+                    if o:IsA("GuiObject") and not o.Visible then vis = false break end
+                    o = o.Parent
+                end
+                if vis and o and o:IsA("ScreenGui") and not o.Enabled then vis = false end
+                local bill, b = nil, d
+                for _ = 1, 6 do
+                    b = b.Parent
+                    if not b then break end
+                    if b:IsA("BillboardGui") then bill = b break end
+                end
+                if vis and (bill == nil or bill.Enabled) then
+                    found += 1
+                    log(string.format("milk: [%s] button %s '%s'%s", tag, d.Name,
+                        d:IsA("TextButton") and d.Text or "",
+                        bill and (" -> adornee " .. tostring(bill.Adornee and bill.Adornee.Name))
+                            or ""))
+                end
+            end
+        end
+        if found == 0 then log("milk: [" .. tag .. "] no visible button in PlayerGui") end
+    end
+
     local function milkHerd(cow, spot)
         local model, name = cow.model, string.format("cow %d", cow.index or 0)
         local trig = spot:FindFirstChild("ProximityPart", true)
@@ -6366,6 +6399,7 @@ local okBuild, errBuild = pcall(function()
         log(string.format("milk: %s - Herd clicked (%s) - leading it to stall %s",
             name, tostring(how), spot.Name))
         task.wait(0.6)
+        milkLogButtons("after Herd")
 
         local ch = LocalPlayer.Character
         local root = ch and ch:FindFirstChild("HumanoidRootPart")
@@ -6375,11 +6409,16 @@ local okBuild, errBuild = pcall(function()
             return o and o:IsA("ObjectValue") and o.Value == model
         end
         local t0, beat = os.clock(), 0
+        local logged = false
         while os.clock() - t0 < 45 do
             if milkStopping() then return false end
             if entered() then
                 log(string.format("OK milk: %s is in stall %s", name, spot.Name))
                 return true
+            end
+            if not logged and os.clock() - t0 > 2 then
+                logged = true
+                milkLogButtons("while leading")
             end
             local p = root.Position
             local d = Vector3.new(dest.X, p.Y, dest.Z) - p
