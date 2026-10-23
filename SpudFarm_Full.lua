@@ -6360,6 +6360,31 @@ local okBuild, errBuild = pcall(function()
         if found == 0 then log("milk: [" .. tag .. "] no visible button in PlayerGui") end
     end
 
+    -- the send-to-barn action the game shows once a cow is herded. It is not
+    -- the cow menu's Herd button (clicking that again would just re-arm), so
+    -- anything inside the animal menu is ignored.
+    local function milkSendBtn()
+        local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+        if not pg then return nil end
+        for _, d in ipairs(pg:GetDescendants()) do
+            if d:IsA("GuiButton") and d.Visible then
+                local inMenu, o = false, d
+                for _ = 1, 8 do
+                    o = o.Parent
+                    if not o then break end
+                    if o.Name == "AnimalInteractionMenu" then inMenu = true break end
+                end
+                if not inMenu then
+                    local nm = (d.Name .. " " .. (d:IsA("TextButton") and d.Text or "")):lower()
+                    if nm:find("herd") or nm:find("lasso") or nm:find("barn")
+                        or nm:find("stall") or nm:find("send") then
+                        return d
+                    end
+                end
+            end
+        end
+    end
+
     local function milkHerd(cow, spot)
         local model, name = cow.model, string.format("cow %d", cow.index or 0)
         local trig = spot:FindFirstChild("ProximityPart", true)
@@ -6408,17 +6433,43 @@ local okBuild, errBuild = pcall(function()
             local o = spot:FindFirstChild("Occupant")
             return o and o:IsA("ObjectValue") and o.Value == model
         end
+        local function inStall(seconds)
+            local ts = os.clock()
+            while os.clock() - ts < seconds do
+                if milkStopping() then return false end
+                if entered() then
+                    log(string.format("OK milk: %s is in stall %s", name, spot.Name))
+                    return true
+                end
+                task.wait(0.5)
+            end
+            return false
+        end
+
+        -- the trip: the lasso is clicked at the barn, not by dragging the cow
+        -- there (wiki: "tap the cow, the lasso button, then the lasso button on
+        -- the barn door"), so one tp to the stall is the whole walk
+        milkTp(dest + Vector3.new(0, 3, 0))
+        task.wait(1.0)
+        local send = milkSendBtn()
+        if send then
+            local c2, how2 = invokeHandlers(send)
+            if not c2 then pcall(function() send:Activate() end) end
+            log(string.format("milk: %s - clicked '%s' at stall %s (%s)", name, send.Name,
+                spot.Name, tostring(how2 or "activate()")))
+        else
+            log(string.format("milk: %s - no send-to-barn button at stall %s", name, spot.Name))
+        end
+        milkLogButtons("at the stall")
+        if inStall(15) then return true end
+
+        -- fallback: if the door click did nothing, walk it in (the cow follows)
         local t0, beat = os.clock(), 0
-        local logged = false
         while os.clock() - t0 < 45 do
             if milkStopping() then return false end
             if entered() then
                 log(string.format("OK milk: %s is in stall %s", name, spot.Name))
                 return true
-            end
-            if not logged and os.clock() - t0 > 2 then
-                logged = true
-                milkLogButtons("while leading")
             end
             local p = root.Position
             local d = Vector3.new(dest.X, p.Y, dest.Z) - p
