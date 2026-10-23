@@ -108,6 +108,16 @@ local okBuild, errBuild = pcall(function()
             Body = payload,
         })
         if not ok then return false, tostring(res) end
+        -- ▸ A DISCORD REJECTION IS NOT A DELIVERY. 429 (rate limit) and 5xx
+        --   used to count as "sent" because the request itself succeeded, so a
+        --   burst quietly vanished and the console looked complete. Any 4xx/5xx
+        --   now fails the post, and the batch is put back in the queue.
+        if type(res) == "table" then
+            local code = tonumber(res.StatusCode or res.status or res.statusCode)
+            if code and (code == 429 or code >= 400) then
+                return false, "HTTP " .. tostring(code)
+            end
+        end
         return true
     end
     -- one batch = as many queued lines as fit in one Discord message
@@ -134,6 +144,14 @@ local okBuild, errBuild = pcall(function()
         if ok then
             hookFails = 0
         else
+            -- put the batch back at the FRONT: a rate limit must not eat logs
+            for i = #batch, 1, -1 do
+                table.insert(hookQueue, 1, batch[i])
+            end
+            while #hookQueue > 300 do
+                table.remove(hookQueue)
+                hookDropped += 1
+            end
             hookFails += 1
             if hookFails >= 5 then
                 hookHealthy = false
@@ -171,8 +189,15 @@ local okBuild, errBuild = pcall(function()
         local g = (getgenv and getgenv()) or _G
         if g then
             g.spudWebhook = function(url)
+                -- ▸ never echo the URL itself: it is a live credential and the
+                --   console gets screenshotted into reports.
+                local function mask(u)
+                    u = tostring(u or "")
+                    if #u < 24 then return "set (hidden)" end
+                    return u:sub(1, 33) .. "…" .. u:sub(-6)
+                end
                 if url == nil then
-                    print("[spud] webhook: " .. (hookURL == "" and "not set" or hookURL))
+                    print("[spud] webhook: " .. (hookURL == "" and "not set" or mask(hookURL)))
                     return hookURL
                 end
                 local ok, why = setHookURL(url)
@@ -3825,7 +3850,15 @@ local okBuild, errBuild = pcall(function()
         if legLen < 1 then return true end
         local dir = leg / legLen
         local perp = Vector3.new(-dir.Z, 0, dir.X)
-        local BRAKE, ACCEPT = 20, 5
+        -- ▸ THE LEG SCALES ITS OWN BRAKE ZONE. A fixed BRAKE = 20 meant W was
+        --   never pressed on any leg shorter than ~25 studs — and the skip-row
+        --   Ω turns are 8–20 studs — so the harvester sat still, the brake-zone
+        --   timer called the leg "done", and every following leg was measured
+        --   from a point it never reached. Here: 40 % of the leg, 4–20 studs,
+        --   and the tolerance shrinks with it so a turn leg isn't "finished"
+        --   5 studs early.
+        local BRAKE = math.clamp(legLen * 0.4, 4, 20)
+        local ACCEPT = math.clamp(legLen * 0.25, 2, 5)
         local stallP, stallT = tr:GetPivot().Position, os.clock()
         local startP, startT = stallP, stallT
         local turnSince, stalls = nil, 0
@@ -3834,7 +3867,10 @@ local okBuild, errBuild = pcall(function()
         claimOwnership(tr)
         while os.clock() < deadline do
             if stopping() then releaseDriveKeys() return nil end
-            if driveWatchTick(tr) then releaseDriveKeys() return false end
+            -- ▸ "full" is its OWN signal. It used to return false, which the
+            --   caller read as "holding W moved nothing" and answered with the
+            --   seat throttle — driving a full tank around the field.
+            if driveWatchTick(tr) then releaseDriveKeys() return "full" end
             local cf = tr:GetPivot()
             local p = cf.Position
             local rel = Vector3.new(p.X, 0, p.Z) - A
@@ -4626,15 +4662,23 @@ local okBuild, errBuild = pcall(function()
         --   edge, then rows 1,3,5 … and 2,4,6 … so each turn is a wide Ω
         --   across a skipped row instead of a 180 in a 10-stud gap. Rows stay
         --   dead straight; only the turns use the headland band.
-        local rowHalf = rowSpan / 2 - 5 -- step half-extent of the headland lap
+        -- ▸ SMALL FIELDS. The old constants could put the turn lane OUTSIDE the
+        --   fence when driveHalf < 14, and build two identical rows when the
+        --   field was too narrow to hold a headland band (inner = 0). Both are
+        --   clamped to the field now.
+        local rowHalf = math.max(rowSpan / 2 - 5, 2) -- step half-extent of the headland lap
         local HEAD_BAND = 10             -- one perimeter lap before the rows
-        local axRow = math.max(driveHalf - 12, 8) -- rows end inside the headland
-        local lane = math.max(driveHalf - 4, 10)  -- turn lane, just inside the fence
+        local axRow = math.min(math.max(driveHalf - 12, 8), math.max(driveHalf - 6, 4))
+        local lane = math.min(math.max(driveHalf - 4, 10), math.max(driveHalf - 2, 3))
         local inner = math.max(rowHalf - HEAD_BAND, 0)
         local lines = {}
         do
-            local n = math.max(math.floor(inner * 2 / 10 + 0.5), 1)
-            for i = 0, n do lines[#lines + 1] = inner - i * (2 * inner / n) end
+            if inner <= 1 then
+                lines[1] = 0 -- too narrow for rows: one centre pass, not two
+            else
+                local n = math.max(math.floor(inner * 2 / 10 + 0.5), 1)
+                for i = 0, n do lines[#lines + 1] = inner - i * (2 * inner / n) end
+            end
         end
         local function pt(along, step) -- field-local (along, step) → world
             return c + driveDir * along + stepDir * step
@@ -4672,6 +4716,11 @@ local okBuild, errBuild = pcall(function()
             if job.selfPropelled then
                 local okT = keyRow(tr, seat, from, goal)
                 if okT == nil then return nil end
+                if okT == "full" then
+                    -- the tank filled mid-leg; the sweep sells and resumes.
+                    -- Never treat this as "the keys don't work".
+                    return "full"
+                end
                 if okT == false then
                     log("harvester: holding W moved nothing — trying the seat throttle for this row")
                     okT = throttleRow(tr, seat, from, goal)
@@ -4781,8 +4830,14 @@ local okBuild, errBuild = pcall(function()
             elseif not okLeg then
                 dbgClear() return nil
             else
-                at = leg[1]
-                if leg[3] == "headland" then
+                -- ▸ MEASURE THE NEXT LEG FROM WHERE THE VEHICLE ACTUALLY IS.
+                --   This used to be `at = leg[1]`, the point the leg was aiming
+                --   at — but a leg can end early (tank full, brake-zone stop,
+                --   tween assist), and every following leg then inherited the
+                --   error: directions, lengths, turn lane, all shifted. Reading
+                --   the pivot makes each leg honest, whatever ended the last.
+                at = tr:GetPivot().Position
+                if leg[3] == "headland" and okLeg == true then
                     log("headland lap done — interior rows next (skip-row)")
                 end
             end
@@ -5452,9 +5507,17 @@ local okBuild, errBuild = pcall(function()
     --   when the crops are done (false = user stopped).
     local growthQuiet = false -- the heartbeat stays out of the way while waiting
     local GROWTH_CAP = 60 * 60 -- give up waiting after an hour
+    local GROWTH_SOAK = 90     -- s: never believe "nothing is seeded" sooner
     local function waitForGrowth()
         local t0 = os.clock()
         local lastLog = -60
+        -- ▸ A FAILED (OR STILL SETTLING) PLANT PASS USED TO READ AS "GROWN".
+        --   `seeded == 0` on the very first poll — planting failed, or the game
+        --   hadn't written the stage yet — matched "all done growing", so the
+        --   loop restarted instantly, forever, over an empty field. Now "done"
+        --   needs either one Seeded cell actually seen during this wait, or the
+        --   soak window to pass.
+        local sawSeeded = false
         growthQuiet = true
         setStage("waiting for the crops to grow")
         log("🌱 waiting for the crops to finish growing — reading every field once a minute")
@@ -5476,11 +5539,21 @@ local okBuild, errBuild = pcall(function()
                 end
             end
             local elapsed = os.clock() - t0
+            if seeded > 0 then sawSeeded = true end
             if total > 0 and seeded == 0 then
-                log(string.format("🌱 all %d cell(s) are done growing (%d standing) after %dm %ds — restarting the loop",
-                    total, grown, math.floor(elapsed / 60), math.floor(elapsed % 60)))
-                growthQuiet = false
-                return true
+                if sawSeeded or elapsed >= GROWTH_SOAK then
+                    log(string.format("🌱 all %d cell(s) are done growing (%d standing) after %dm %ds — restarting the loop",
+                        total, grown, math.floor(elapsed / 60), math.floor(elapsed % 60)))
+                    growthQuiet = false
+                    return true
+                end
+                -- nothing has read as Seeded yet: this is a failed plant or a
+                -- stage the game hasn't written. Wait the soak out, then say so.
+                if elapsed - lastLog >= 60 then
+                    lastLog = elapsed
+                    log(string.format("🌱 no cell reads as Seeded yet (%d cell(s), %d grown) — waiting %ds before believing the field is done",
+                        total, grown, math.ceil(GROWTH_SOAK - elapsed)))
+                end
             end
             if elapsed - lastLog >= 60 then
                 lastLog = elapsed
