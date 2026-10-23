@@ -6534,6 +6534,141 @@ local okBuild, errBuild = pcall(function()
         return false
     end
 
+    -- ▸ THE MILK STEP (wiki: "go inside the barn to the stall the cow is in and
+    --   press the Milk button"). Nothing in the dumps names that action yet, so
+    --   the first run PRINTS everything the stall offers (its prompts + visible
+    --   buttons) and then takes the best shot: a visible milk-ish button, then
+    --   the stall's own milk prompt key. Only a real change counts as done -
+    --   Production dropping or a MilkContainer appearing.
+    local function milkNearPrompts(spot)
+        local set, list = {}, {}
+        local roots = {}
+        if spot then
+            roots[1] = spot
+            if spot.Parent then
+                roots[2] = spot.Parent
+                if spot.Parent.Parent then roots[3] = spot.Parent.Parent end
+            end
+        end
+        for _, root in ipairs(roots) do
+            for _, d in ipairs(root:GetDescendants()) do
+                if d:IsA("ProximityPrompt") and not set[d] then
+                    set[d] = true
+                    list[#list + 1] = d
+                end
+            end
+        end
+        return list
+    end
+
+    local function milkFindButton(word)
+        local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+        if not pg then return nil end
+        for _, d in ipairs(pg:GetDescendants()) do
+            if d:IsA("GuiButton") and d.Visible then
+                local nm = (d.Name .. " " .. (d:IsA("TextButton") and d.Text or "")):lower()
+                if nm:find(word, 1, true) then
+                    local vis, o, mine = true, d, false
+                    while o and not o:IsA("ScreenGui") do
+                        if o:IsA("GuiObject") and not o.Visible then vis = false break end
+                        -- never touch this script's own Fluent window: its
+                        -- "milk loop" toggle would match the word "milk"
+                        local low = tostring(o.Name):lower()
+                        if low:find("fluent", 1, true) or low:find("spud", 1, true) then
+                            mine = true
+                            break
+                        end
+                        o = o.Parent
+                    end
+                    if o and o:IsA("ScreenGui") then
+                        local low = tostring(o.Name):lower()
+                        if low:find("fluent", 1, true) or low:find("spud", 1, true) then mine = true end
+                        if not o.Enabled then vis = false end
+                    end
+                    if vis and not mine then return d end
+                end
+            end
+        end
+    end
+
+    local function milkDrops()
+        local objs = workspace:FindFirstChild("Objects")
+        local box = objs and objs:FindFirstChild("DraggableObjects")
+        local n = 0
+        if box then
+            for _, ch in ipairs(box:GetChildren()) do
+                if ch.Name:lower():find("milk", 1, true) then n += 1 end
+            end
+        end
+        return n
+    end
+
+    local function milkCowInStall(cow)
+        local spot, model = cow.stall, cow.model
+        if not (spot and model) then return false end
+        local trig = milkTrigger(spot)
+        local stand = (trig and trig.Position) or cow.pos
+        if not stand then
+            log("milk: that stall has no readable position")
+            return false
+        end
+        milkTp(stand + Vector3.new(0, 3, 0))
+        task.wait(1.0)
+
+        local label = string.format("cow %d", cow.index or 0)
+        local before, dropsBefore = milkPercentOf(model), milkDrops()
+        for _, p in ipairs(milkNearPrompts(spot)) do
+            local okKey, key = pcall(function() return p.KeyboardKeyCode.Name end)
+            log(string.format("milk: %s prompt %s '%s' key=%s on=%s", spot.Name, p.Name,
+                tostring(p.ActionText), tostring(okKey and key or "?"), tostring(p.Enabled)))
+        end
+        milkLogButtons("milking " .. spot.Name)
+
+        local used
+        for _, word in ipairs({ "milk", "collect", "production" }) do
+            local b = milkFindButton(word)
+            if b then
+                local okC, how = invokeHandlers(b)
+                if not okC then
+                    pcall(function() b:Activate() end)
+                    how = "activate()"
+                end
+                used = string.format("button %s (%s)", b.Name, tostring(how))
+                break
+            end
+        end
+        if not used then
+            for _, p in ipairs(milkNearPrompts(spot)) do
+                local txt = tostring(p.ActionText):lower()
+                if p.Enabled and txt:find("milk", 1, true) then
+                    local okKey, key = pcall(function() return p.KeyboardKeyCode end)
+                    if okKey and key then
+                        pressKey(key)
+                        used = "key " .. key.Name
+                        break
+                    end
+                end
+            end
+        end
+        log(string.format("milk: %s in %s - %s", label, spot.Name,
+            used and ("sent " .. used) or "no milk action visible, nothing sent"))
+
+        for _ = 1, 20 do -- 10 s for the game to answer
+            if milkStopping() then return false end
+            local now = milkPercentOf(model)
+            local drops = milkDrops()
+            if (before and now and now < before) or drops > dropsBefore then
+                log(string.format("OK milk: %s milked (%s%% -> %s%%, %d new drop(s) in the world)",
+                    label, tostring(before or "?"), tostring(now or "?"), drops - dropsBefore))
+                return true
+            end
+            task.wait(0.5)
+        end
+        log(string.format("milk: %s still %s%% in %s after the action - no milk seen",
+            label, tostring(milkPercentOf(model) or "?"), spot.Name))
+        return false
+    end
+
     -- ▸ OLD: visit every cow to let the shared menu fill in. The production
     --   number is on the cow itself now, so this is just the honest summary of
     --   what the game currently holds (no teleports, no waiting, no guesses).
@@ -6662,6 +6797,26 @@ local okBuild, errBuild = pcall(function()
             end
         end
 
+        -- ▸ 2c. MILK: one READY cow that is ALREADY parked in a stall. Cows in
+        --   the field are the herd step's job, not this one's.
+        local milkLine, milked = nil, false
+        do
+            local pick
+            for _, c in ipairs(cows) do
+                if c.stall and (c.percent or 0) >= 300 then
+                    pick = c
+                    break
+                end
+            end
+            if not pick then
+                milkLine = "milk: no ready cow parked in a stall"
+            else
+                milked = milkCowInStall(pick)
+                milkLine = string.format("milk: cow %d in %s %s", pick.index or 0,
+                    tostring(pick.stall.Name), milked and "milked" or "not milked")
+            end
+        end
+
         -- ▸ 3. show it
         local lines = {}
         local parked = 0
@@ -6689,9 +6844,10 @@ local okBuild, errBuild = pcall(function()
                 dirty, cleaned, unknown)
         end
         if herdLine then lines[#lines + 1] = herdLine end
+        if milkLine then lines[#lines + 1] = milkLine end
         milkSetStatus(table.concat(lines, "\n"))
         log("milk: " .. table.concat(lines, " | "))
-        return true, dirty, unknown, herded
+        return true, dirty, unknown, (herded or milked)
     end
 
     -- the loop: see + clean every 30 s (cows / herd / milk land next). The
@@ -6711,7 +6867,7 @@ local okBuild, errBuild = pcall(function()
             if herded == true then idle = 2
             elseif busy then idle = 6 end
             log(string.format("milk: %s - next barn check in %d s",
-                busy and "issues found" or (herded and "herded one" or "no dirty stall seen"), idle))
+                busy and "issues found" or (herded and "one barn job done" or "no dirty stall seen"), idle))
             for _ = 1, idle * 2 do -- half-second slices so OFF reacts at once
                 if milkStopping() then break end
                 task.wait(0.5)
