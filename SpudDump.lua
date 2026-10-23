@@ -2572,6 +2572,221 @@ pcall(function()
     w("  DO NOW: paste this whole section. You are left standing at stall 1.")
 end)
 
+------------------------------------------------------------------
+-- 22. MILK DIRT (live) — the milk loop still cannot tell WHICH stall is
+--     dirty. This prints, in one run:
+--       (a) every Filth / Dirt / Stain / Manure-ish instance in the world,
+--           with its REAL parent (that is what reveals the dirty spot),
+--       (b) one line per stall spot: children + their values / visibility,
+--       (c) each spot's Occupant and LinkedGui, plus that gui's controls,
+--       (d) a live stand-in-the-trigger probe of ALL 12 spots (what action
+--           the game offers at each), and
+--       (e) the dirt markers per spot, then ONE V press where a marker is,
+--           with the marker state before/after.
+--     TURN THE MILK LOOP OFF first: it moves the same body.
+------------------------------------------------------------------
+pcall(function()
+    header("MILK DIRT (what marks a stall dirty, and what action cleans it)")
+    local Players = game:GetService("Players")
+    local lp = Players.LocalPlayer
+    local vim = game:GetService("VirtualInputManager")
+    local ch = lp.Character
+    local r0 = ch and ch:FindFirstChild("HumanoidRootPart")
+    if not r0 then w("  no HumanoidRootPart - skipped") return end
+    local pg = lp:FindFirstChild("PlayerGui") or lp:FindFirstChildOfClass("PlayerGui")
+
+    local function attrsOf(inst, cap)
+        local keys = {}
+        for k in pairs(inst:GetAttributes()) do keys[#keys + 1] = k end
+        table.sort(keys)
+        local bits = {}
+        for i, k in ipairs(keys) do
+            if i > (cap or 12) then
+                bits[#bits + 1] = "+" .. (#keys - i + 1) .. " more"
+                break
+            end
+            bits[#bits + 1] = k .. "=" .. tostring(inst:GetAttribute(k))
+        end
+        return #bits > 0 and table.concat(bits, "; ") or "(no attrs)"
+    end
+
+    local function valOf(inst)
+        if inst:IsA("ValueBase") then return tostring(inst.Value) end
+        if inst:IsA("BasePart") then return string.format("T=%.2f", inst.Transparency) end
+        if inst:IsA("GuiObject") then return "vis=" .. tostring(inst.Visible) end
+        if inst:IsA("LayerCollector") then return "en=" .. tostring(inst.Enabled) end
+        return ""
+    end
+    local function spotOf(inst)
+        local p, last = inst, inst
+        for _ = 1, 10 do
+            p = p.Parent
+            if not p then break end
+            if p.Name == "Spots" then return last end
+            last = p
+        end
+        return nil
+    end
+
+    -- (a) the 12 stalls, ordered by spot number
+    local spots = {}
+    for _, d in ipairs(workspace:GetDescendants()) do
+        if d.Name == "Adornee_BarnStallMenu" then
+            local par = d.Parent
+            spots[#spots + 1] = {
+                ad = d,
+                spot = (par and par.Parent and par.Parent.Name == "Spots") and par or nil,
+                pos = d:IsA("BasePart") and d.Position or nil,
+            }
+        end
+    end
+    table.sort(spots, function(a, b)
+        return (tonumber(a.spot and a.spot.Name) or 99) < (tonumber(b.spot and b.spot.Name) or 99)
+    end)
+    w(string.format("  Adornee_BarnStallMenu: %d  (with a Spots.<n> folder: %d)", #spots,
+        (function() local n = 0 for _, s in ipairs(spots) do if s.spot then n += 1 end end return n end)()))
+
+    -- (b) every dirt-ish thing this game has, with its real parent
+    local dirtNames = {
+        Filth = true, FilthEffect = true, Dirt = true, Stain = true,
+        Manure = true, Muck = true, Poop = true, Dirty = true, Clean = true,
+    }
+    local dirt, dn = {}, 0
+    for _, d in ipairs(workspace:GetDescendants()) do
+        if dirtNames[d.Name] then
+            dn += 1
+            if #dirt < 40 then dirt[#dirt + 1] = d end
+        end
+    end
+    w(string.format("  dirt-ish instances in workspace: %d (showing %d)", dn, #dirt))
+    for _, d in ipairs(dirt) do
+        local bits = { pathOf(d, 6), "[" .. d.ClassName .. "]" }
+        if d:IsA("BasePart") then
+            bits[#bits + 1] = string.format("T=%.2f size=%.1fx%.1fx%.1f pos=(%.1f, %.1f, %.1f) collide=%s",
+                d.Transparency, d.Size.X, d.Size.Y, d.Size.Z,
+                d.Position.X, d.Position.Y, d.Position.Z, tostring(d.CanCollide))
+        elseif d:IsA("Decal") or d:IsA("Texture") then
+            bits[#bits + 1] = string.format("T=%.2f tex=%s", d.Transparency, tostring(d.Texture))
+        end
+        local sp = spotOf(d)
+        bits[#bits + 1] = "spot=" .. (sp and sp.Name or "-")
+        bits[#bits + 1] = "attrs=" .. attrsOf(d, 6)
+        w("    " .. table.concat(bits, "  "))
+    end
+    local perSpot, marked = {}, nil
+    for _, d in ipairs(dirt) do
+        local sp = spotOf(d)
+        if sp then
+            perSpot[sp.Name] = (perSpot[sp.Name] or 0) + 1
+            marked = marked or sp
+        end
+    end
+    local pk = {}
+    for k, v in pairs(perSpot) do pk[#pk + 1] = "spot " .. k .. "=" .. v end
+    table.sort(pk)
+    w("  dirt markers per spot: " .. (#pk > 0 and table.concat(pk, ", ") or "none inside Spots"))
+
+    -- (c) one line per spot: children, values, occupant, linked gui
+    for _, s in ipairs(spots) do
+        local sp = s.spot
+        w(string.format("  --- spot %s  stall part @%s", sp and sp.Name or "?",
+            s.pos and string.format("(%.1f, %.1f, %.1f)", s.pos.X, s.pos.Y, s.pos.Z) or "?"))
+        if sp then
+            local kids = {}
+            for _, c in ipairs(sp:GetChildren()) do
+                local v = valOf(c)
+                kids[#kids + 1] = c.Name .. "[" .. c.ClassName .. "]" .. (v ~= "" and ("=" .. v) or "")
+            end
+            w("       children: " .. (#kids > 0 and table.concat(kids, " | ") or "none"))
+            local occ = sp:FindFirstChild("Occupant", true)
+            if occ then w("       occupant: " .. occ.ClassName .. "=" .. valOf(occ)) end
+            local link = sp:FindFirstChild("LinkedGui", true)
+            if link then
+                if link:IsA("ObjectValue") and link.Value then
+                    local g = link.Value
+                    local gb = {}
+                    for _, d in ipairs(g:GetDescendants()) do
+                        if (d:IsA("TextButton") or d:IsA("ImageButton") or d:IsA("TextLabel"))
+                            and #gb < 10 then
+                            gb[#gb + 1] = string.format("%s[%s]'%s' vis=%s", d.Name, d.ClassName,
+                                d:IsA("TextLabel") and d.Text or "", tostring(d.Visible))
+                        end
+                    end
+                    w(string.format("       LinkedGui -> %s [%s] %s", pathOf(g, 5), g.ClassName, valOf(g)))
+                    w("       linked controls: " .. (#gb > 0 and table.concat(gb, " | ") or "none"))
+                else
+                    w("       LinkedGui = " .. valOf(link))
+                end
+            else
+                w("       LinkedGui -> none")
+            end
+        end
+        local trig = sp and sp:FindFirstChild("ProximityPart", true)
+        w("       trigger: " .. (trig and (pathOf(trig, 4) .. " @"
+            .. string.format("(%.1f, %.1f, %.1f)", trig.Position.X, trig.Position.Y, trig.Position.Z)) or "none"))
+    end
+
+    -- (d) LIVE: stand in every spot's trigger and list what the game offers
+    local function offered()
+        local on = {}
+        pcall(function()
+            local cpa = pg.GuiViews.HUD.PCGP_ContextActions
+            for _, b in ipairs(cpa.Billboards:GetChildren()) do
+                local e = (b:IsA("LayerCollector") and b.Enabled)
+                    or (b:IsA("GuiObject") and b.Visible)
+                if e then on[#on + 1] = b.Name end
+            end
+            for _, b in ipairs(cpa.Buttons:GetChildren()) do
+                if b:IsA("GuiObject") and b.Visible then on[#on + 1] = "btn:" .. b.Name end
+            end
+        end)
+        return #on > 0 and table.concat(on, " | ") or "NONE"
+    end
+    for _, s in ipairs(spots) do
+        local trig = s.spot and s.spot:FindFirstChild("ProximityPart", true)
+        local stand = (trig and trig:IsA("BasePart") and trig.Position) or s.pos
+        if stand then
+            r0.CFrame = CFrame.new(stand + Vector3.new(0, 3, 0))
+            task.wait(0.6)
+            w(string.format("  probe spot %-3s @(%.1f, %.1f, %.1f): %s",
+                s.spot and s.spot.Name or "?", stand.X, stand.Y, stand.Z, offered()))
+        end
+    end
+
+    -- (e) one V press ON the spot that carries a dirt marker
+    if marked then
+        local ad = marked:FindFirstChild("Adornee_BarnStallMenu", true)
+        local trig = marked:FindFirstChild("ProximityPart", true)
+        local stand = (trig and trig.Position) or (ad and ad.Position)
+        if stand then
+            w(string.format("  --- V press at spot %s (the one with a dirt marker)", marked.Name))
+            r0.CFrame = CFrame.new(stand + Vector3.new(0, 3, 0))
+            task.wait(1.0)
+            local function markerState()
+                local bits = {}
+                for _, d in ipairs(marked:GetDescendants()) do
+                    if dirtNames[d.Name] then
+                        bits[#bits + 1] = d.Name .. ":" .. valOf(d)
+                    end
+                end
+                return #bits > 0 and table.concat(bits, ", ") or "none"
+            end
+            w("       before V: markers=" .. markerState() .. "  offered=" .. offered())
+            vim:SendKeyEvent(true, Enum.KeyCode.V, false, game)
+            task.wait(0.08)
+            vim:SendKeyEvent(false, Enum.KeyCode.V, false, game)
+            task.wait(1.6)
+            w("       after V:  markers=" .. markerState() .. "  offered=" .. offered())
+        end
+    else
+        w("  --- no dirt marker found inside any Spots folder - the dirty spot is marked elsewhere")
+    end
+
+    w("  DO NOW: paste this whole MILK DIRT block. Keep the dirty stall dirty")
+    w("  (do not clean it by hand) if you can, and say which stall number looks")
+    w("  dirty to you on screen (the numbers are the Spots.<n> folder names).")
+end)
+
 local text = table.concat(out, "\n")
 
 ------------------------------------------------------------------
