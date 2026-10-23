@@ -2787,6 +2787,107 @@ pcall(function()
     w("  dirty to you on screen (the numbers are the Spots.<n> folder names).")
 end)
 
+------------------------------------------------------------------
+-- 23. MILK MEMORY (live) — stop asking the world for permission and
+--     read the game's OWN state: require its animal/filth modules and
+--     scan the Lua GC for the table that holds per-stall filth /
+--     animal state. Everything below is READ ONLY (no remotes, no keys).
+------------------------------------------------------------------
+pcall(function()
+    header("MILK MEMORY (game modules + GC scan for filth / animal state)")
+    local RS = game:GetService("ReplicatedStorage")
+    local barn
+    do
+        local o = workspace:FindFirstChild("Objects")
+        local b = o and o:FindFirstChild("Buildings")
+        barn = b and b:FindFirstChild("AutoWoodenBarn")
+    end
+    local words = { "animal", "filth", "clean", "barn", "herd", "milk", "cow", "animoid", "storage" }
+    local function looks(s)
+        s = tostring(s):lower()
+        for _, k in ipairs(words) do if s:find(k, 1, true) then return true end end
+        return false
+    end
+
+    -- (a) the game's own modules whose name looks animal / filth-ish
+    local mods, hit = {}, 0
+    for _, d in ipairs(RS:GetDescendants()) do
+        if d:IsA("ModuleScript") and looks(d.Name) then
+            hit += 1
+            if #mods < 30 then mods[#mods + 1] = d end
+        end
+    end
+    w(string.format("  animal/filth-ish ModuleScripts in ReplicatedStorage: %d (requiring %d)", hit, #mods))
+    for _, m in ipairs(mods) do
+        local okReq, mod = pcall(require, m)
+        if not okReq or type(mod) ~= "table" then
+            w(string.format("  require %s -> %s", m:GetFullName(), tostring(mod)))
+        else
+            local keys = {}
+            for k, v in pairs(mod) do keys[#keys + 1] = tostring(k) .. "(" .. type(v) .. ")" end
+            table.sort(keys)
+            w(string.format("  require %s -> table %d keys: %s", m:GetFullName(), #keys,
+                #keys > 0 and table.concat(keys, ", ", 1, math.min(#keys, 40)) or "(empty)"))
+        end
+    end
+
+    -- (b) the live table that references the barn / a stall / a filth name
+    local getgcF = getgc or (getgenv and getgenv().getgc)
+    if type(getgcF) ~= "function" then
+        w("  GC scan skipped: this executor has no getgc()")
+        w("  (Delta: getgc exists — if this printed, the executor stripped it)")
+        return
+    end
+    local sample
+    if barn then
+        local container = barn:FindFirstChild("AnimalContainer")
+        local spots = container and container:FindFirstChild("Spots")
+        sample = (spots and spots:FindFirstChild("1")) or container
+    end
+    local okGc, all = pcall(getgcF, true)
+    if not okGc or type(all) ~= "table" then
+        w("  GC scan failed: " .. tostring(all))
+        return
+    end
+    local found, ntab = {}, 0
+    for _, v in ipairs(all) do
+        if type(v) == "table" then
+            ntab += 1
+            local score, bits, n = 0, {}, 0
+            for k, val in pairs(v) do
+                local ks, vs = tostring(k), ""
+                if type(val) == "Instance" then
+                    vs = val.Name
+                    if sample and (val == sample or (barn and val:IsDescendantOf(barn))) then
+                        score += 2
+                    end
+                elseif type(val) == "string" then
+                    vs = val
+                    if looks(val) then score += 1 end
+                elseif type(val) == "number" or type(val) == "boolean" then
+                    vs = tostring(val)
+                end
+                if looks(ks) then score += 1 end
+                if n < 14 then
+                    bits[#bits + 1] = ks .. "=" .. string.sub(vs, 1, 28)
+                    n += 1
+                end
+            end
+            if score > 0 then
+                found[#found + 1] = { score = score, text = table.concat(bits, ", ") }
+            end
+        end
+    end
+    table.sort(found, function(a, b) return a.score > b.score end)
+    w(string.format("  GC tables scanned: %d, candidates: %d (top 15 by filth/barn references)",
+        ntab, #found))
+    for i = 1, math.min(#found, 15) do
+        w(string.format("   [%d] score=%d  {%s}", i, found[i].score, found[i].text))
+    end
+    w("  DO NOW: paste this MILK MEMORY block. The candidate that holds one")
+    w("  entry per Spots.<n> (true/false, 0/1, or a dirt count) is the real flag.")
+end)
+
 local text = table.concat(out, "\n")
 
 ------------------------------------------------------------------
