@@ -6183,24 +6183,19 @@ local okBuild, errBuild = pcall(function()
         return out
     end
 
-    -- ▸ WALK, DON'T FLY. moveTo()/arcTween lifts 30 studs and aborts on
-    --   stopping() — which belongs to the FARMING thread, so with the farm
-    --   loop off every stall hop would die on its first step. This is a short,
-    --   low, ground-level glide that answers to the milk toggle instead.
-    local function milkWalkTo(target)
+    -- ▸ TELEPORT (user: "with the milk loop you can make it tp, no tools will
+    --   be used"). One CFrame write, then a short beat so the game's own
+    --   prompts catch up with the new position. Still refuses from a vehicle
+    --   seat: the milk loop works on foot and no tool is ever equipped.
+    local function milkTp(target)
         local ch = LocalPlayer.Character
         local root = ch and ch:FindFirstChild("HumanoidRootPart")
         if not root then return false end
         local hum = ch:FindFirstChildOfClass("Humanoid")
-        if hum and hum.SeatPart then return false end -- seated: not on foot
-        local from = root.Position
-        local steps = math.clamp(math.floor((target - from).Magnitude / 1.5), 6, 40)
-        for i = 1, steps do
-            if milkStopping() then return false end
-            local t = i / steps
-            local ease = t * t * (3 - 2 * t)
-            root.CFrame = CFrame.new(from:Lerp(target, ease))
-            task.wait(0.03)
+        if hum and hum.SeatPart then return false end
+        if (target - root.Position).Magnitude > 4 then
+            root.CFrame = CFrame.new(target) * (root.CFrame - root.CFrame.Position)
+            task.wait(0.2)
         end
         return true
     end
@@ -6215,7 +6210,7 @@ local okBuild, errBuild = pcall(function()
                 log(string.format("milk: stall %d has no readable position", i))
             else
                 -- stand AT the stall: the game only lights Clean when dirty
-                milkWalkTo(s.pos + Vector3.new(0, 3, 0))
+                milkTp(s.pos + Vector3.new(0, 3, 0))
                 task.wait(0.9)
                 local up = promptUp("CleanAnimalContainer")
                 if up == nil then
