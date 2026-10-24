@@ -307,9 +307,19 @@ local okBuild, errBuild = pcall(function()
         Title = "Nothing here yet",
     })
 
+    -- ▸ REGISTER BUDGET. The whole GUI build used to be ONE function, and the
+    --   executor's Luau caps a function at 200 local variables (total decla-
+    --   rations, not live ones) - the milk tab pushed it over and the script
+    --   died at load with "Out of local registers ... exceeded limit 200".
+    --   So the feature code now lives in its own do-block and only the nine
+    --   names the rest of the file needs stay at this level.
+    local stopping, loopThread, pressKey, Move, invokeHandlers
+    local findMyFields, runDoctor, milkThread, milkStopping
+    do
+
     -- ▸ AUTO-FARM STEP 1 (and nothing more): mount the tractor
     local VIM = game:GetService("VirtualInputManager")
-    local function pressKey(key)
+    pressKey = function(key)
         VIM:SendKeyEvent(true, key, false, game)
         task.wait(0.08)
         VIM:SendKeyEvent(false, key, false, game)
@@ -320,8 +330,8 @@ local okBuild, errBuild = pcall(function()
     -- kills the loop at its next step instead of letting it keep going.
     -- coroutine identity (not just a bool) so a zombie loop can never be
     -- revived by turning the toggle back on for a NEW loop.
-    local loopThread = nil
-    local function stopping()
+    loopThread = nil -- the live farming-loop thread (nil = no loop running)
+    stopping = function()
         if not loopThread then return true end
         return coroutine.running() ~= loopThread
     end
@@ -404,7 +414,7 @@ local okBuild, errBuild = pcall(function()
     -- ▸ AUTO-FARM STEP 2: movement (Tween = fly-over ARC — up, across at
     --   altitude, down onto the target; the player carries nothing so
     --   nothing smashes. VFly = legacy BodyVelocity steps.)
-    local Move = { Mode = "Tween", Speed = 200 }
+    Move = { Mode = "Tween", Speed = 200 }
     local arcTween -- assigned after glideTractor (below)
 
     local function moveTo(target)
@@ -599,8 +609,8 @@ local okBuild, errBuild = pcall(function()
 
     -- call the game's OWN connections for a button (capture-proven).
     -- Prefers one event's set (the first non-empty), never mixing events
-    -- — so the game's logic can't run twice.
-    local function invokeHandlers(btn)
+    -- - so the game's logic can't run twice.
+    invokeHandlers = function(btn)
         if type(getconnections) ~= "function" then return false end
         local evs = { "MouseButton1Click", "Activated", "MouseButton1Down" }
         local obj, hop = btn, 0
@@ -1630,7 +1640,7 @@ local okBuild, errBuild = pcall(function()
     -- Returns ALL my fields, EVERY type, sorted nearest-first (the tour
     -- below groups them by type); every candidate is logged so a wrong
     -- pick is visible.
-    local function findMyFields(nearPos)
+    findMyFields = function(nearPos)
         local seen, mine = {}, {}
         local function consider(d)
             if d:IsA("Model") and d:FindFirstChild("Configurations") then
@@ -5895,7 +5905,7 @@ local okBuild, errBuild = pcall(function()
     --   built — made the button look dead, with the reason hidden in the
     --   executor console. Every path now ends in a notification: the summary,
     --   or the actual error text.
-    local function runDoctor(mirror)
+    runDoctor = function(mirror)
         local ok, res = pcall(doctorReport, mirror)
         if ok then
             local summary = tostring(res)
@@ -5994,11 +6004,13 @@ local okBuild, errBuild = pcall(function()
     local milkUser -- the picked player's name (nil = nothing picked)
     -- own thread id + own stop test: stopping() belongs to the FARMING loop,
     -- and a milk thread would read it as "stopped" on its very first tick.
-    local milkThread = nil
-    local function milkStopping()
+    milkThread = nil
+    milkStopping = function()
         if not milkThread then return true end
         return coroutine.running() ~= milkThread
     end
+    end -- ▸ end of the do-block above: its 128 locals die here and the
+        --   executor's 200-locals-per-function budget never blows again
 
     -- everyone but me — the farm loop already owns MY plot
     local function milkUserChoices()
