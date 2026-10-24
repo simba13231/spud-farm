@@ -311,10 +311,10 @@ local okBuild, errBuild = pcall(function()
     --   executor's Luau caps a function at 200 local variables (total decla-
     --   rations, not live ones) - the milk tab pushed it over and the script
     --   died at load with "Out of local registers ... exceeded limit 200".
-    --   So the feature code now lives in its own do-block and only the nine
-    --   names the rest of the file needs stay at this level.
+    --   so the feature code now lives in its own do-block and only the names
+    --   the rest of the file needs stay at this level.
     local stopping, loopThread, pressKey, Move, invokeHandlers
-    local findMyFields, runDoctor, milkThread, milkStopping
+    local findMyFields, runDoctor, milkThread, milkStopping, farmResting
     do
 
     -- ▸ AUTO-FARM STEP 1 (and nothing more): mount the tractor
@@ -5557,10 +5557,11 @@ local okBuild, errBuild = pcall(function()
         --   soak window to pass.
         local sawSeeded = false
         growthQuiet = true
+        farmResting = true -- the milk loop's green light (it steps in here)
         setStage("waiting for the crops to grow")
         log("🌱 waiting for the crops to finish growing — reading every field once a minute")
         while true do
-            if stopping() then growthQuiet = false return false end
+            if stopping() then growthQuiet = false farmResting = false return false end
             local ch = LocalPlayer.Character
             local root = ch and ch:FindFirstChild("HumanoidRootPart")
             local crops = findMyFields(root and root.Position or Vector3.zero)
@@ -5583,6 +5584,7 @@ local okBuild, errBuild = pcall(function()
                     log(string.format("🌱 all %d cell(s) are done growing (%d standing) after %dm %ds — restarting the loop",
                         total, grown, math.floor(elapsed / 60), math.floor(elapsed % 60)))
                     growthQuiet = false
+                    farmResting = false
                     return true
                 end
                 -- nothing has read as Seeded yet: this is a failed plant or a
@@ -5608,10 +5610,11 @@ local okBuild, errBuild = pcall(function()
             if elapsed >= GROWTH_CAP then
                 log("🌱 still not grown after an hour — restarting the loop anyway instead of waiting forever")
                 growthQuiet = false
+                farmResting = false
                 return true
             end
             for _ = 1, 120 do -- 60 s in 0.5 s slices: STOP reacts at once
-                if stopping() then growthQuiet = false return false end
+                if stopping() then growthQuiet = false farmResting = false return false end
                 task.wait(0.5)
             end
         end
@@ -6514,7 +6517,7 @@ local okBuild, errBuild = pcall(function()
         local function inStall(seconds)
             local ts = os.clock()
             while os.clock() - ts < seconds do
-                if milkStopping() then return false end
+                if milkStopping() or farmTookBody() then return false end
                 if entered() then
                     log(string.format("OK milk: %s is in stall %s", name, spot.Name))
                     return true
@@ -6544,7 +6547,7 @@ local okBuild, errBuild = pcall(function()
         -- fallback: if the door click did nothing, walk it in (the cow follows)
         local t0, beat = os.clock(), 0
         while os.clock() - t0 < 45 do
-            if milkStopping() then return false end
+            if milkStopping() or farmTookBody() then return false end
             if entered() then
                 log(string.format("OK milk: %s is in stall %s", name, spot.Name))
                 return true
@@ -6689,7 +6692,7 @@ local okBuild, errBuild = pcall(function()
             used and ("sent " .. used) or "no milk action visible, nothing sent"))
 
         for _ = 1, 20 do -- 10 s for the game to answer
-            if milkStopping() then return false end
+            if milkStopping() or farmTookBody() then return false end
             local now = milkPercentOf(model)
             local drops = milkDrops()
             if (before and now and now < before) or drops > dropsBefore then
@@ -6725,6 +6728,10 @@ local okBuild, errBuild = pcall(function()
         local dirty, cleaned, unknown = 0, 0, 0
         for i, s in ipairs(stalls) do
             if milkStopping() then break end
+            if farmTookBody() then
+                log("milk: the farm loop took the body back - cleaning stops mid-way")
+                break
+            end
             local stains = milkStain(s.spot)
             local stand = (s.trigger and s.trigger.Position) or s.pos
             if not stand then
@@ -6771,7 +6778,25 @@ local okBuild, errBuild = pcall(function()
         return dirty, cleaned, unknown
     end
 
+    -- ▸ YIELD TO THE FARM LOOP MID-CYCLE. A cycle started while the farm was
+    --   resting can outlive that rest, and two drivers on one body fight.
+    --   Every long milk step bails the moment the farm loop starts moving.
+    local function farmTookBody()
+        return loopThread ~= nil and farmResting ~= true
+    end
+
     local function milkCycle()
+        -- ▸ SHARE THE BODY (user: "when the milk loop is on the farm loop can
+        --   still run"). They move the SAME character, so they can never work
+        --   at the same second - the milk step only takes the body while the
+        --   farm loop is RESTING (waiting for the crops to grow, where it
+        --   doesn't move anything) or switched off. While the farm drives,
+        --   milk stands by, and even the CLEAN step waits: nothing here may
+        --   touch the character mid-pass.
+        if loopThread and not farmResting then
+            milkSetStatus("farm loop busy — milk stands by")
+            return true, 0, 0, false, "defer"
+        end
         local owner = milkUser
         if not owner or owner:sub(1, 1) == "(" then
             milkSetStatus("no user picked")
@@ -6890,19 +6915,23 @@ local okBuild, errBuild = pcall(function()
     local function runMilkLoop()
         log("milk loop: on - user " .. tostring(milkUser))
         while not milkStopping() do
-            local okCycle, ran, dirty, unknown, herded = pcall(milkCycle)
+            local okCycle, ran, dirty, unknown, herded, deferred = pcall(milkCycle)
             if not okCycle then
                 log("milk cycle failed: " .. tostring(ran))
             end
-            -- a successful herd means "go again at once" (fill the barn), an
-            -- issue means retry soon, nothing to do means once a minute - the
-            -- 12-trigger walk just looks stuck if it repeats every 6 s
+            -- the farm loop owns the body while it drives: peek every 5 s and
+            -- do nothing. Otherwise a successful herd means "go again at
+            -- once", an issue means retry soon, nothing means once a minute.
             local busy = ((tonumber(dirty) or 0) + (tonumber(unknown) or 0)) > 0
             local idle = 60
-            if herded == true then idle = 2
+            if deferred == "defer" then idle = 5
+            elseif herded == true then idle = 2
             elseif busy then idle = 6 end
-            log(string.format("milk: %s - next barn check in %d s",
-                busy and "issues found" or (herded and "one barn job done" or "no dirty stall seen"), idle))
+            if deferred ~= "defer" then
+                log(string.format("milk: %s - next barn check in %d s",
+                    busy and "issues found"
+                        or (herded and "one barn job done" or "no dirty stall seen"), idle))
+            end
             for _ = 1, idle * 2 do -- half-second slices so OFF reacts at once
                 if milkStopping() then break end
                 task.wait(0.5)
@@ -6918,16 +6947,11 @@ local okBuild, errBuild = pcall(function()
         Callback = function(on)
             if on then
                 if milkThread then return end -- already running
-                -- ▸ ONE CHARACTER, ONE DRIVER: the farm loop moves the same
-                --   body around. Refusing is honest; both running would fight.
-                if loopThread then
-                    log("milk loop: the farming loop is running - stop it first (one character, one driver)")
-                    pcall(function()
-                        (Fluent.Options and Fluent.Options.milkLoop
-                            or milkToggle):SetValue(false)
-                    end)
-                    return
-                end
+                -- ▸ SHARED BODY (user: "when the milk loop is on the farm loop
+                --   can still run"). Both are allowed on at once: milkCycle
+                --   defers while the farm loop is driving and works in its
+                --   rest windows (waiting for the crops to grow). A loop
+                --   already ON is refused at its OWN toggle below.
                 if not milkUser or milkUser:sub(1, 1) == "(" then
                     log("milk loop: pick a user first — the dropdown names whose plot to work on")
                     pcall(function()
@@ -6936,7 +6960,8 @@ local okBuild, errBuild = pcall(function()
                     end)
                     return
                 end
-                log("milk loop: starting")
+                log("milk loop: starting"
+                    .. (loopThread and " — the farm loop is driving, milk works in its rest windows" or ""))
                 task.spawn(function()
                     milkThread = coroutine.running()
                     local okRun, errRun = pcall(runMilkLoop)
