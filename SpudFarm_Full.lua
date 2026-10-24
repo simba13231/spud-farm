@@ -6004,6 +6004,9 @@ local okBuild, errBuild = pcall(function()
     -- steps (cow at 300 %, barn, milk, back to the field) land one at a time
     -- once the dump says what those things actually are.
     ------------------------------------------------------------
+    do -- ▸ MILK TAB IN ITS OWN SCOPE: these 34 locals die at the end of this
+       --   block, which keeps the executor's 200-locals-per-function budget
+       --   healthy (see REGISTER BUDGET above).
     local milkUser -- the picked player's name (nil = nothing picked)
     -- own thread id + own stop test: stopping() belongs to the FARMING loop,
     -- and a milk thread would read it as "stopped" on its very first tick.
@@ -6629,6 +6632,49 @@ local okBuild, errBuild = pcall(function()
         end
     end
 
+    -- ▸ THE GAME'S OWN CONTEXT ACTIONS (PCGP_ContextActions.Billboards): the
+    --   Clean action shows up here, so a Milk action must too - and each
+    --   billboard prints its own key as a one-letter label, so this names the
+    --   action AND the key without guessing either.
+    local function milkActions()
+        local out = {}
+        local ok = pcall(function()
+            local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+            local gv = pg and pg:FindFirstChild("GuiViews")
+            local hud = gv and gv:FindFirstChild("HUD")
+            local gw = hud and hud:FindFirstChild("MainHUD")
+            local cpa = (gw and gw:FindFirstChild("PCGP_ContextActions"))
+                or (hud and hud:FindFirstChild("PCGP_ContextActions"))
+            local bills = cpa and cpa:FindFirstChild("Billboards")
+            if not bills then return end
+            for _, b in ipairs(bills:GetChildren()) do
+                local on
+                if b:IsA("LayerCollector") then
+                    on = b.Enabled == true
+                elseif b:IsA("GuiObject") then
+                    on = b.Visible == true
+                else
+                    on = false
+                end
+                local texts, key = {}, nil
+                for _, d in ipairs(b:GetDescendants()) do
+                    if d:IsA("TextLabel") and d.Text ~= "" then
+                        texts[#texts + 1] = d.Text
+                        if not key and d.Text:match("^%u$") then key = d.Text end
+                    end
+                end
+                out[#out + 1] = {
+                    name = b.Name,
+                    on = on,
+                    key = key,
+                    text = table.concat(texts, " "),
+                }
+            end
+        end)
+        if not ok then return nil end
+        return out
+    end
+
     local function milkDrops()
         local objs = workspace:FindFirstChild("Objects")
         local box = objs and objs:FindFirstChild("DraggableObjects")
@@ -6662,6 +6708,21 @@ local okBuild, errBuild = pcall(function()
         end
         milkLogButtons("milking " .. spot.Name)
 
+        -- the game's own action list at this stall: an enabled milk/collect
+        -- action here is the real thing, and it prints its own key
+        local acts = milkActions()
+        local shown = 0
+        for _, a in ipairs(acts or {}) do
+            local nm = (a.name .. " " .. a.text):lower()
+            if (a.on or nm:find("milk") or nm:find("collect") or nm:find("clean"))
+                and shown < 12 then
+                shown += 1
+                log(string.format("milk: action %s%s%s '%s'", a.name,
+                    a.on and "" or " [off]", a.key and (" key=" .. a.key) or "",
+                    a.text:sub(1, 40)))
+            end
+        end
+
         local used
         for _, word in ipairs({ "milk", "collect", "production" }) do
             local b = milkFindButton(word)
@@ -6676,8 +6737,22 @@ local okBuild, errBuild = pcall(function()
             end
         end
         if not used then
+            for _, a in ipairs(acts or {}) do
+                local nm = (a.name .. " " .. a.text):lower()
+                if a.on and a.key and (nm:find("milk") or nm:find("collect")
+                    or nm:find("production")) then
+                    local okK = pcall(function() pressKey(Enum.KeyCode[a.key]) end)
+                    if okK then
+                        used = string.format("action %s (%s)", a.name, a.key)
+                        break
+                    end
+                end
+            end
+        end
+        if not used then
             for _, p in ipairs(milkNearPrompts(spot)) do
-                local txt = tostring(p.ActionText):lower()
+                local txt = (tostring(p.ActionText) .. " "
+                    .. tostring(p.Parent and p.Parent.Name or "")):lower()
                 if p.Enabled and txt:find("milk", 1, true) then
                     local okKey, key = pcall(function() return p.KeyboardKeyCode end)
                     if okKey and key then
@@ -6824,16 +6899,49 @@ local okBuild, errBuild = pcall(function()
         local cows = milkCows(owner, cf, size, stalls)
         milkCowScan(cows)
 
-        -- ▸ 2b. HERD: one ready cow into one free stall per cycle. Both ends
-        --   are explicit: the stall must have an empty Occupant, and the cow
-        --   must be READY and still in the field (IdleLocked = already in).
+        -- ▸ 2b. MILK FIRST (it's the only step that pays, and it's the one the
+        --   user needs): one cow that is ALREADY parked in a stall. A parked
+        --   cow whose Production we cannot read still gets ONE honest attempt -
+        --   leaving it in the barn un-milked is worse than trying.
+        local milkLine, milked = nil, false
+        do
+            local pick
+            for _, c in ipairs(cows) do
+                if c.stall and (c.percent or 0) >= 300 then
+                    pick = c
+                    break
+                end
+            end
+            if not pick then
+                for _, c in ipairs(cows) do
+                    if c.stall and c.percent == nil then
+                        pick = c
+                        break
+                    end
+                end
+            end
+            if not pick then
+                milkLine = "milk: no ready cow parked in a stall"
+            else
+                milked = milkCowInStall(pick)
+                milkLine = string.format("milk: cow %d in %s %s", pick.index or 0,
+                    tostring(pick.stall.Name), milked and "milked" or "not milked")
+            end
+        end
+
+        -- ▸ 2c. HERD: one ready cow into one free stall per cycle, capped at 4
+        --   parked cows while the milk action is still being pinned down.
+        --   Filling all 12 stalls with cows we cannot yet milk would block the
+        --   loop (and a cow cannot eat inside, so it just loses happiness).
         local herdLine, herded = nil, false
         do
-            local free
+            local free, parked = nil, 0
             for _, s in ipairs(stalls) do
                 if s.spot then
                     local o = s.spot:FindFirstChild("Occupant")
-                    if not (o and o:IsA("ObjectValue") and o.Value) then
+                    if o and o:IsA("ObjectValue") and o.Value then
+                        parked += 1
+                    else
                         free = free or s
                     end
                 end
@@ -6846,7 +6954,9 @@ local okBuild, errBuild = pcall(function()
                     break
                 end
             end
-            if not free then
+            if parked >= 4 then
+                herdLine = string.format("herd: %d cow(s) in the barn already - milk them first", parked)
+            elseif not free then
                 herdLine = "herd: every stall is taken"
             elseif not pick then
                 herdLine = "herd: no ready cow left in the field"
@@ -6854,26 +6964,6 @@ local okBuild, errBuild = pcall(function()
                 herded = milkHerd(pick, free.spot)
                 herdLine = string.format("herd: cow %d -> stall %s %s", pick.index or 0,
                     free.spot.Name, herded and "ok" or "failed")
-            end
-        end
-
-        -- ▸ 2c. MILK: one READY cow that is ALREADY parked in a stall. Cows in
-        --   the field are the herd step's job, not this one's.
-        local milkLine, milked = nil, false
-        do
-            local pick
-            for _, c in ipairs(cows) do
-                if c.stall and (c.percent or 0) >= 300 then
-                    pick = c
-                    break
-                end
-            end
-            if not pick then
-                milkLine = "milk: no ready cow parked in a stall"
-            else
-                milked = milkCowInStall(pick)
-                milkLine = string.format("milk: cow %d in %s %s", pick.index or 0,
-                    tostring(pick.stall.Name), milked and "milked" or "not milked")
             end
         end
 
@@ -6985,6 +7075,7 @@ local okBuild, errBuild = pcall(function()
     })
 
     log("gui: milk tab ok (shell only)")
+    end -- ▸ end of the milk-tab scope
 
     -- Settings: reload + unload
     local function destroyUI()
