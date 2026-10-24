@@ -2888,6 +2888,257 @@ pcall(function()
     w("  entry per Spots.<n> (true/false, 0/1, or a dirt count) is the real flag.")
 end)
 
+------------------------------------------------------------------
+-- 24. MILK ACTION (live) — the milk loop can reach a cow in a stall but
+--     still cannot name the action that milks it. One run prints, in order:
+--       (a) every barn + every OCCUPIED stall, with that stall's children,
+--       (b) every ProximityPrompt / ClickDetector in the barn subtree,
+--       (c) every GUI in PlayerGui that is a billboard or has an Adornee,
+--       (d) the game's full context-action list (name + key + texts),
+--       (e) the animal menu's whole button tree (even hidden buttons),
+--       (f) a BEFORE/AFTER probe: it stands in the occupied stall's trigger
+--           for a few seconds and prints exactly what became ENABLED there.
+--     It moves you once (into the stall) and back — nothing else is touched.
+--     TURN BOTH LOOPS OFF first, they move the same body.
+------------------------------------------------------------------
+pcall(function()
+    header("MILK ACTION (what the game offers at an occupied barn stall)")
+    local lp = Players.LocalPlayer
+    local pg = lp:FindFirstChildOfClass("PlayerGui")
+    local ch = lp.Character
+    local r0 = ch and ch:FindFirstChild("HumanoidRootPart")
+    if not pg or not r0 then w("  no PlayerGui / HumanoidRootPart - skipped") return end
+    local startPos = r0.CFrame
+
+    local function pathOf(inst, cap)
+        local bits, p = {}, inst
+        for _ = 1, (cap or 5) do
+            if not p then break end
+            bits[#bits + 1] = p.Name
+            p = p.Parent
+        end
+        return table.concat(bits, " < ")
+    end
+
+    local function textsOf(obj, cap)
+        local t = {}
+        for _, d in ipairs(obj:GetDescendants()) do
+            if d:IsA("TextLabel") or d:IsA("TextButton") then
+                local s = tostring(d.Text or ""):gsub("%s+", " ")
+                if s ~= "" then
+                    t[#t + 1] = s
+                    if #t >= (cap or 8) then break end
+                end
+            end
+        end
+        return table.concat(t, " | ")
+    end
+
+    -- (a) barns + occupied stalls ----------------------------------------
+    local barns = {}
+    local objects = workspace:FindFirstChild("Objects")
+    local buildings = objects and objects:FindFirstChild("Buildings")
+    if buildings then
+        for _, b in ipairs(buildings:GetChildren()) do
+            if b:IsA("Model") and b.Name:lower():find("barn", 1, true) then
+                barns[#barns + 1] = b
+            end
+        end
+    end
+    local occupied = {}
+    for _, barn in ipairs(barns) do
+        local cont = barn:FindFirstChild("AnimalContainer", true)
+        local spots = cont and cont:FindFirstChild("Spots")
+        if spots then
+            for _, spot in ipairs(spots:GetChildren()) do
+                local occ = spot:FindFirstChild("Occupant")
+                if occ and occ:IsA("ObjectValue") and occ.Value then
+                    occupied[#occupied + 1] = { barn = barn, spot = spot, cow = occ.Value }
+                end
+            end
+        end
+    end
+    w(string.format("  barn models: %d   occupied stalls: %d", #barns, #occupied))
+    for i, o in ipairs(occupied) do
+        local conf = o.cow:FindFirstChild("Configurations")
+        local prod = conf and conf:FindFirstChild("Production")
+        local stt = conf and conf:FindFirstChild("AnimoidState")
+        w(string.format("   [%d] %s / %s - %s prod=%s state=%s pos=%s", i, o.barn.Name,
+            o.spot.Name, o.cow.Name, tostring(prod and prod.Value), tostring(stt and stt.Value),
+            tostring(o.cow:GetPivot().Position)))
+        for _, c in ipairs(o.spot:GetChildren()) do
+            local val = ""
+            if c:IsA("ValueBase") then val = " = " .. tostring(c.Value) end
+            if c:IsA("BasePart") then
+                val = string.format(" T=%.2f pos=%s", c.Transparency, tostring(c.Position))
+            end
+            if c:IsA("LayerCollector") then val = " enabled=" .. tostring(c.Enabled) end
+            if c:IsA("GuiObject") then val = " visible=" .. tostring(c.Visible) end
+            w(string.format("       - %s [%s]%s", c.Name, c.ClassName, val))
+        end
+        -- deeper: prompts / click detectors anywhere in this spot
+        for _, d in ipairs(o.spot:GetDescendants()) do
+            if d:IsA("ProximityPrompt") then
+                local key = "?"
+                pcall(function() key = d.KeyboardKeyCode.Name end)
+                w(string.format("       > PROMPT %s '%s'/'%s' key=%s on=%s dist=%.0f (%s)",
+                    d.Name, tostring(d.ActionText), tostring(d.ObjectText), key,
+                    tostring(d.Enabled), d.MaxActivationDistance, pathOf(d, 3)))
+            elseif d:IsA("ClickDetector") then
+                w(string.format("       > CLICKDETECTOR %s (%s)", d.Name, pathOf(d, 3)))
+            end
+        end
+    end
+
+    -- (b) prompts + click detectors in the whole barn ---------------------
+    for _, barn in ipairs(barns) do
+        local np, nc = 0, 0
+        for _, d in ipairs(barn:GetDescendants()) do
+            if d:IsA("ProximityPrompt") then
+                np += 1
+                local key = "?"
+                pcall(function() key = d.KeyboardKeyCode.Name end)
+                w(string.format("  BARN PROMPT %s '%s' key=%s on=%s (%s)", d.Name,
+                    tostring(d.ActionText), key, tostring(d.Enabled), pathOf(d, 4)))
+            elseif d:IsA("ClickDetector") then
+                nc += 1
+            end
+        end
+        w(string.format("  %s: %d prompt(s), %d click detector(s) in the whole barn",
+            barn.Name, np, nc))
+    end
+
+    -- (c) every GUI that is (or sits in) a billboard with an Adornee ------
+    local guis = {}
+    for _, d in ipairs(pg:GetDescendants()) do
+        if d:IsA("BillboardGui") or d:IsA("SurfaceGui") then
+            guis[#guis + 1] = d
+        end
+    end
+    w(string.format("  billboard/surface GUIs in PlayerGui: %d", #guis))
+    for _, g in ipairs(guis) do
+        local on = g.Enabled == true
+        local ad = g.Adornee
+        w(string.format("   %s %s [%s] adornee=%s '%s'", on and "+" or "-", pathOf(g, 3),
+            g.ClassName, ad and ad.Name or "nil", textsOf(g, 5)))
+    end
+
+    -- (d) the game's context action list (name + key + texts) -------------
+    local cpa
+    do
+        local gv = pg:FindFirstChild("GuiViews")
+        local hud = gv and gv:FindFirstChild("HUD")
+        local gw = hud and hud:FindFirstChild("MainHUD")
+        cpa = (gw and gw:FindFirstChild("PCGP_ContextActions"))
+            or (hud and hud:FindFirstChild("PCGP_ContextActions"))
+    end
+    local bills = cpa and cpa:FindFirstChild("Billboards")
+    w("  CONTEXT ACTIONS (Billboards children: name | enabled | texts)")
+    if bills then
+        for _, b in ipairs(bills:GetChildren()) do
+            local on
+            if b:IsA("LayerCollector") then on = b.Enabled
+            elseif b:IsA("GuiObject") then on = b.Visible
+            end
+            w(string.format("   %s %s [%s] '%s'", on and "+" or "-", b.Name, b.ClassName,
+                textsOf(b, 6)))
+        end
+    else
+        w("   (PCGP_ContextActions.Billboards not found)")
+    end
+
+    -- (e) the animal menu's whole button tree, hidden or not --------------
+    local menu
+    do
+        local gv = pg:FindFirstChild("GuiViews")
+        local an = gv and gv:FindFirstChild("Animal")
+        local ai = an and an:FindFirstChild("AnimalInteractions")
+        local ag = ai and ai:FindFirstChild("AnimalInteractionGuis")
+        menu = ag and ag:FindFirstChild("AnimalInteractionMenu")
+    end
+    w("  ANIMAL MENU (every GuiButton, hidden or not)")
+    if menu then
+        w(string.format("   menu enabled=%s adornee=%s", tostring(menu.Enabled),
+            tostring(menu.Adornee and menu.Adornee.Name)))
+        for _, d in ipairs(menu:GetDescendants()) do
+            if d:IsA("GuiButton") then
+                w(string.format("   - %s [%s] vis=%s '%s'", d.Name, d.ClassName,
+                    tostring(d.Visible), textsOf(d, 3)))
+            end
+        end
+    else
+        w("   (AnimalInteractionMenu not found)")
+    end
+
+    -- (f) live probe: stand in the occupied stall ------------------------
+    if #occupied == 0 then
+        w("  NO OCCUPIED STALL - herd a cow in first, then run this again")
+        return
+    end
+    local target = occupied[1]
+    local trig = target.spot:FindFirstChild("ProximityPart", true)
+    local dest = trig and trig.Position
+    if not dest then
+        local adp = target.spot:FindFirstChild("Adornee_BarnStallMenu", true)
+        dest = adp and adp:IsA("BasePart") and adp.Position or nil
+    end
+    if not dest then w("  that stall has no readable position - skipped") return end
+
+    local function snap(tag)
+        w("  --- " .. tag .. " ---")
+        local nB, nP, nC = 0, 0, 0
+        for _, d in ipairs(pg:GetDescendants()) do
+            if d:IsA("BillboardGui") and d.Enabled then
+                nB += 1
+                w(string.format("     +GUI %s adornee=%s '%s'", pathOf(d, 2),
+                    d.Adornee and d.Adornee.Name or "nil", textsOf(d, 6)))
+            end
+        end
+        for _, d in ipairs(workspace:GetDescendants()) do
+            if d:IsA("ProximityPrompt") and d.Enabled then
+                local key = "?"
+                pcall(function() key = d.KeyboardKeyCode.Name end)
+                if (d:IsDescendantOf(target.barn)) then
+                    nP += 1
+                    w(string.format("     +PROMPT %s '%s' key=%s (%s)", d.Name,
+                        tostring(d.ActionText), key, pathOf(d, 3)))
+                end
+            end
+        end
+        if bills then
+            for _, b in ipairs(bills:GetChildren()) do
+                local on = (b:IsA("LayerCollector") and b.Enabled)
+                    or (b:IsA("GuiObject") and b.Visible)
+                if on then
+                    nC += 1
+                    w(string.format("     +ACTION %s '%s'", b.Name, textsOf(b, 6)))
+                end
+            end
+        end
+        w(string.format("     (%d gui, %d prompt, %d context action on)", nB, nP, nC))
+    end
+
+    snap("BEFORE (wherever you are)")
+    w("  tp into " .. target.spot.Name .. " for ~4 s ...")
+    r0.CFrame = CFrame.new(dest + Vector3.new(0, 3, 0))
+    task.wait(1.2)
+    snap("AT THE STALL")
+    if menu then
+        w(string.format("     menu now: enabled=%s adornee=%s", tostring(menu.Enabled),
+            tostring(menu.Adornee and menu.Adornee.Name)))
+        for _, d in ipairs(menu:GetChildren()) do
+            if d:IsA("GuiObject") then
+                w(string.format("     menu child %s [%s] vis=%s '%s'", d.Name, d.ClassName,
+                    tostring(d.Visible), textsOf(d, 4)))
+            end
+        end
+    end
+    task.wait(2.5)
+    r0.CFrame = startPos
+    w("  DO NOW: paste this MILK ACTION block (or the upload link). The list of")
+    w("  + items printed AT THE STALL is what the milk step has to click/press.")
+end)
+
 local text = table.concat(out, "\n")
 
 ------------------------------------------------------------------
