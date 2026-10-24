@@ -314,7 +314,7 @@ local okBuild, errBuild = pcall(function()
     --   so the feature code now lives in its own do-block and only the names
     --   the rest of the file needs stay at this level.
     local stopping, loopThread, pressKey, Move, invokeHandlers
-    local findMyFields, runDoctor, milkThread, milkStopping, farmResting
+    local findMyFields, runDoctor, milkThread, milkStopping, farmResting, farmTookBody
     do
 
     -- ▸ AUTO-FARM STEP 1 (and nothing more): mount the tractor
@@ -6469,6 +6469,16 @@ local okBuild, errBuild = pcall(function()
         end
     end
 
+    -- ▸ YIELD TO THE FARM LOOP MID-CYCLE. A cycle started while the farm was
+    --   resting can outlive that rest, and two drivers on one body fight.
+    --   Every long milk step bails the moment the farm loop starts moving.
+    --   NOT a local function: it is used ABOVE this point too (milkHerd /
+    --   milkCowInStall / milkClean), and a forward local reference silently
+    --   becomes a nil GLOBAL - that crashed the first milk cycle.
+    farmTookBody = function()
+        return loopThread ~= nil and farmResting ~= true
+    end
+
     local function milkHerd(cow, spot)
         local model, name = cow.model, string.format("cow %d", cow.index or 0)
         local trig = spot:FindFirstChild("ProximityPart", true)
@@ -6851,13 +6861,6 @@ local okBuild, errBuild = pcall(function()
             end
         end
         return dirty, cleaned, unknown
-    end
-
-    -- ▸ YIELD TO THE FARM LOOP MID-CYCLE. A cycle started while the farm was
-    --   resting can outlive that rest, and two drivers on one body fight.
-    --   Every long milk step bails the moment the farm loop starts moving.
-    local function farmTookBody()
-        return loopThread ~= nil and farmResting ~= true
     end
 
     local function milkCycle()
