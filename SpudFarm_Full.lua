@@ -6692,7 +6692,10 @@ local okBuild, errBuild = pcall(function()
     --   stall that is open is Enabled, so the Adornee is the exact match and
     --   Enabled is the fallback. This is the Milk button - not a prompt, not a
     --   context action.
-    local function milkStallGui(spot)
+    --   GLOBAL on purpose (not "local function"): the build closure is at the
+    --   executor's 200-local ceiling, and two more declarations there killed
+    --   the whole GUI. A global costs a temp register, not a permanent slot.
+    function milkStallGui(spot)
         local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
         if not pg then return nil end
         local holder
@@ -6715,7 +6718,8 @@ local okBuild, errBuild = pcall(function()
     -- the clickable "Milk" inside that menu: a GuiButton whose own name or any
     -- label under it says milk, else the production trigger, else anything
     -- named collect. Nothing else in this menu is touched.
-    local function milkStallButton(gui)
+    -- GLOBAL for the same slot-budget reason as milkStallGui above.
+    function milkStallButton(gui)
         local best, score = nil, 0
         for _, d in ipairs(gui:GetDescendants()) do
             if d:IsA("GuiButton") then
