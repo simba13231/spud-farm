@@ -3139,6 +3139,248 @@ pcall(function()
     w("  + items printed AT THE STALL is what the milk step has to click/press.")
 end)
 
+------------------------------------------------------------------
+-- 25. HERDING + THE LASSO (live) — the herd step clicks the animal
+--     menu's "Herd" button and the cow does not follow, and the user
+--     says the blue/green LASSO is what has to be pressed. This run is
+--     READ ONLY (no clicks, no keys, one teleport next to a cow then
+--     back) and prints:
+--       (a) every PlayerGui object whose name / text / image mentions
+--           lasso, herd, rope, lead, catch, barn, stall or animal,
+--           with its full path, visibility and GUI size,
+--       (b) the animal menu's WHOLE tree - class, visibility, text,
+--           image id, and how many Activated/MouseButton connections
+--           each button really has (0 = a button nobody listens to),
+--       (c) every context-action billboard around the cow,
+--       (d) the backpack + equipped tools (the lasso may be a tool),
+--       (e) any workspace object named lasso / herd / rope.
+--     TURN BOTH LOOPS OFF first, they move the same body.
+------------------------------------------------------------------
+pcall(function()
+    header("HERDING + LASSO (what the herd step should be pressing)")
+    local lp = Players.LocalPlayer
+    local pg = lp:FindFirstChildOfClass("PlayerGui")
+    local ch = lp.Character
+    local r0 = ch and ch:FindFirstChild("HumanoidRootPart")
+    if not pg or not r0 then w("  no PlayerGui / HumanoidRootPart - skipped") return end
+    local startPos = r0.CFrame
+
+    local function pathOf(inst, cap)
+        local bits, p = {}, inst
+        for _ = 1, (cap or 6) do
+            if not p then break end
+            bits[#bits + 1] = p.Name
+            p = p.Parent
+        end
+        return table.concat(bits, " < ")
+    end
+
+    -- visible only if every layer above it is shown too
+    local function shownChain(o)
+        local vis, p = true, o
+        while p and not p:IsA("ScreenGui") do
+            if p:IsA("LayerCollector") then
+                if p.Enabled == false then vis = false end
+            elseif p:IsA("GuiObject") and p.Visible == false then
+                vis = false
+            end
+            p = p.Parent
+        end
+        if p and p:IsA("LayerCollector") and p.Enabled == false then vis = false end
+        return vis
+    end
+
+    -- a button with 0 connections is drawn, clickable-looking and does nothing
+    local function connCount(b)
+        local n = nil
+        pcall(function()
+            local gc = getconnections
+            if type(gc) ~= "function" then return end
+            for _, sig in ipairs({ "Activated", "MouseButton1Click", "MouseButton1Down" }) do
+                local ev = b[sig]
+                if ev then
+                    local ok, cs = pcall(gc, ev)
+                    if ok and type(cs) == "table" then n = (n or 0) + #cs end
+                end
+            end
+        end)
+        return n
+    end
+
+    -- stand next to the closest cow so the shared animal menu fills in
+    local cow
+    do
+        local objs = workspace:FindFirstChild("Objects")
+        local animals = objs and objs:FindFirstChild("Animals")
+        local best, bd = nil, math.huge
+        for _, m in ipairs((animals and animals:GetChildren()) or {}) do
+            if m:IsA("Model") and m.Name:lower():find("cow", 1, true) then
+                local dd = (m:GetPivot().Position - r0.Position).Magnitude
+                if dd < bd then best, bd = m, dd end
+            end
+        end
+        cow = best
+        if cow then
+            r0.CFrame = CFrame.new(cow:GetPivot().Position + Vector3.new(0, 3, 0))
+            task.wait(1.5)
+            w(string.format("  standing next to %s (was %.0f studs away)", cow.Name, bd))
+        else
+            w("  no cow in Objects.Animals - the menu stays empty")
+        end
+    end
+
+    -- (a) where is the lasso, anywhere in PlayerGui ---------------------
+    w("  (a) PlayerGui objects mentioning a herd word (name / text / image):")
+    local hits = 0
+    for _, d in ipairs(pg:GetDescendants()) do
+        if d:IsA("GuiObject") or d:IsA("LayerCollector") then
+            local nm = tostring(d.Name)
+            local txt, img = "", ""
+            pcall(function() if d.Text then txt = tostring(d.Text) end end)
+            pcall(function() if d.Image then img = tostring(d.Image) end end)
+            local all = (nm .. " " .. txt .. " " .. img):lower()
+            local hit = false
+            for _, word in ipairs({ "lasso", "herd", "rope", "lead", "catch", "barn", "stall", "animal" }) do
+                if all:find(word, 1, true) then hit = true break end
+            end
+            if hit and hits < 60 then
+                hits += 1
+                local extra = ""
+                if d:IsA("GuiObject") then
+                    extra = string.format(" vis=%s shown=%s size=%s pos=%s",
+                        tostring(d.Visible), tostring(shownChain(d)),
+                        tostring(d.AbsoluteSize), tostring(d.AbsolutePosition))
+                elseif d:IsA("LayerCollector") then
+                    extra = " enabled=" .. tostring(d.Enabled)
+                end
+                if d:IsA("GuiButton") then
+                    extra ..= string.format(" [%s] conns=%s", d.ClassName, tostring(connCount(d)))
+                end
+                w(string.format("   - %s [%s]%s", pathOf(d, 8), d.ClassName, extra))
+                if txt ~= "" then w("       text : " .. txt:gsub("%s+", " "):sub(1, 80)) end
+                if img ~= "" then w("       image: " .. img:sub(1, 120)) end
+            end
+        end
+    end
+    if hits == 0 then
+        w("   (nothing in PlayerGui mentions those words - the lasso is probably a TOOL)")
+    end
+
+    -- (b) the animal menu, whole tree -----------------------------------
+    w("  (b) the animal menu tree (every child, hidden ones too):")
+    local gv = pg:FindFirstChild("GuiViews")
+    local an = gv and gv:FindFirstChild("Animal")
+    local ai = an and an:FindFirstChild("AnimalInteractions")
+    local ag = ai and ai:FindFirstChild("AnimalInteractionGuis")
+    local menu = ag and ag:FindFirstChild("AnimalInteractionMenu")
+    if not menu then
+        w("   the animal menu does not exist right now")
+    else
+        local okAd, ad = pcall(function() return menu.Adornee end)
+        w(string.format("   menu adornee=%s enabled=%s", tostring(okAd and ad and ad.Name),
+            tostring(menu.Enabled)))
+        for _, d in ipairs(menu:GetDescendants()) do
+            local extra = ""
+            if d:IsA("GuiObject") then
+                extra = string.format(" vis=%s shown=%s", tostring(d.Visible), tostring(shownChain(d)))
+            elseif d:IsA("LayerCollector") then
+                extra = " enabled=" .. tostring(d.Enabled)
+            end
+            local txt, img = "", ""
+            pcall(function()
+                if d.Text and d.Text ~= "" then
+                    txt = " text='" .. tostring(d.Text):gsub("%s+", " "):sub(1, 40) .. "'"
+                end
+            end)
+            pcall(function()
+                if d.Image and tostring(d.Image) ~= "" then img = " img=" .. tostring(d.Image):sub(1, 90) end
+            end)
+            if d:IsA("GuiButton") then
+                extra ..= string.format(" [%s] conns=%s", d.ClassName, tostring(connCount(d)))
+            end
+            w(string.format("   - %s [%s]%s%s%s", pathOf(d, 6), d.ClassName, extra, txt, img))
+        end
+    end
+
+    -- (c) context-action billboards around the cow ----------------------
+    w("  (c) context actions right now:")
+    pcall(function()
+        local hud = gv and gv:FindFirstChild("HUD")
+        local gw = hud and hud:FindFirstChild("MainHUD")
+        local cpa = (gw and gw:FindFirstChild("PCGP_ContextActions"))
+            or (hud and hud:FindFirstChild("PCGP_ContextActions"))
+        local bills = cpa and cpa:FindFirstChild("Billboards")
+        if not bills then w("   no PCGP_ContextActions.Billboards") return end
+        for _, b in ipairs(bills:GetChildren()) do
+            local on
+            if b:IsA("LayerCollector") then on = b.Enabled == true
+            elseif b:IsA("GuiObject") then on = b.Visible == true
+            else on = false end
+            local key, txt = nil, {}
+            for _, d in ipairs(b:GetDescendants()) do
+                if d:IsA("TextLabel") and d.Text ~= "" then
+                    txt[#txt + 1] = d.Text:gsub("%s+", " ")
+                    if not key and d.Text:match("^%u$") then key = d.Text end
+                end
+            end
+            local adn = nil
+            pcall(function() adn = b.Adornee and b.Adornee.Name end)
+            w(string.format("   - %s on=%s key=%s adornee=%s '%s'", b.Name, tostring(on),
+                tostring(key), tostring(adn), table.concat(txt, " "):sub(1, 40)))
+        end
+    end)
+
+    -- (d) tools ---------------------------------------------------------
+    w("  (d) backpack / equipped tools:")
+    local nt = 0
+    local bp = ch and ch:FindFirstChildOfClass("Backpack")
+    for _, t in ipairs((bp and bp:GetChildren()) or {}) do
+        if t:IsA("Tool") then
+            nt += 1
+            w(string.format("   - backpack: %s (%s)", t.Name, t.ClassName))
+        end
+    end
+    for _, t in ipairs(ch:GetChildren()) do
+        if t:IsA("Tool") then
+            nt += 1
+            w(string.format("   - EQUIPPED: %s (%s)", t.Name, t.ClassName))
+            for _, d in ipairs(t:GetDescendants()) do
+                if d:IsA("ProximityPrompt") or d:IsA("ClickDetector")
+                    or d:IsA("BillboardGui") or d:IsA("SurfaceGui") then
+                    w(string.format("       > %s [%s]", d.Name, d.ClassName))
+                end
+            end
+        end
+    end
+    if nt == 0 then w("   (no tools in the backpack)") end
+
+    -- (e) workspace side -------------------------------------------------
+    w("  (e) workspace objects named lasso / herd / rope:")
+    local seen = 0
+    for _, d in ipairs(workspace:GetDescendants()) do
+        local low = tostring(d.Name):lower()
+        if low:find("lasso", 1, true) or low:find("herd", 1, true) or low:find("rope", 1, true) then
+            if seen < 40 then
+                seen += 1
+                local extra = ""
+                if d:IsA("BasePart") then
+                    extra = string.format(" T=%.2f pos=%s", d.Transparency, tostring(d.Position))
+                elseif d:IsA("LayerCollector") then
+                    extra = " enabled=" .. tostring(d.Enabled)
+                end
+                if d:IsA("GuiButton") then extra ..= " conns=" .. tostring(connCount(d)) end
+                w(string.format("   - %s [%s]%s", pathOf(d, 7), d.ClassName, extra))
+            end
+        end
+    end
+    if seen == 0 then w("   (nothing in workspace is named after the lasso)") end
+
+    r0.CFrame = startPos
+    w("  DO NOW: paste this HERDING block. The lasso is the line whose path")
+    w("  ends in a GuiButton with conns>=1 (or a TOOL in (d)); that exact")
+    w("  name + parent is what the herd step has to press.")
+end)
+
 local text = table.concat(out, "\n")
 
 ------------------------------------------------------------------
