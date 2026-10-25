@@ -6685,6 +6685,58 @@ local okBuild, errBuild = pcall(function()
         return out
     end
 
+    -- ▸ THE STALL'S OWN MENU (dump §24): the game shows a SurfaceGui named
+    --   "BarnStallMenu" in PlayerGui.GuiViews.Animal.AnimalInteractions
+    --   .AnimalContainerGuis, adorned to that stall's Adornee_BarnStallMenu
+    --   part, and its text reads "Milk | 300% | Cow | 🤢 | 26%". Only the
+    --   stall that is open is Enabled, so the Adornee is the exact match and
+    --   Enabled is the fallback. This is the Milk button - not a prompt, not a
+    --   context action.
+    local function milkStallGui(spot)
+        local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+        if not pg then return nil end
+        local holder
+        pcall(function()
+            holder = pg.GuiViews.Animal.AnimalInteractions.AnimalContainerGuis
+        end)
+        if not holder then return nil end
+        local adn = spot:FindFirstChild("Adornee_BarnStallMenu", true)
+        local open
+        for _, g in ipairs(holder:GetChildren()) do
+            if g.Name == "BarnStallMenu" and (g:IsA("SurfaceGui") or g:IsA("BillboardGui")) then
+                local ok, ad = pcall(function() return g.Adornee end)
+                if ok and adn and ad == adn then return g end
+                if g.Enabled then open = open or g end
+            end
+        end
+        return open
+    end
+
+    -- the clickable "Milk" inside that menu: a GuiButton whose own name or any
+    -- label under it says milk, else the production trigger, else anything
+    -- named collect. Nothing else in this menu is touched.
+    local function milkStallButton(gui)
+        local best, score = nil, 0
+        for _, d in ipairs(gui:GetDescendants()) do
+            if d:IsA("GuiButton") then
+                local txt = tostring(d.Name)
+                if d:IsA("TextButton") then txt ..= " " .. tostring(d.Text) end
+                for _, c in ipairs(d:GetDescendants()) do
+                    if c:IsA("TextLabel") or c:IsA("TextButton") then
+                        txt ..= " " .. tostring(c.Text)
+                    end
+                end
+                local low = txt:lower()
+                local s2 = 0
+                if low:find("milk", 1, true) then s2 = 3
+                elseif low:find("production", 1, true) then s2 = 2
+                elseif low:find("collect", 1, true) then s2 = 1 end
+                if s2 > score then best, score = d, s2 end
+            end
+        end
+        return best
+    end
+
     local function milkDrops()
         local objs = workspace:FindFirstChild("Objects")
         local box = objs and objs:FindFirstChild("DraggableObjects")
@@ -6734,7 +6786,35 @@ local okBuild, errBuild = pcall(function()
         end
 
         local used
+        -- 1. the stall's own menu (the real Milk button)
+        local sGui = milkStallGui(spot)
+        if sGui then
+            local txt = {}
+            for _, d in ipairs(sGui:GetDescendants()) do
+                if (d:IsA("TextLabel") or d:IsA("TextButton")) and d.Text ~= "" then
+                    txt[#txt + 1] = d.Text
+                end
+            end
+            log(string.format("milk: %s - stall menu enabled=%s '%s'", label,
+                tostring(sGui.Enabled), table.concat(txt, " | "):sub(1, 70)))
+            local b = milkStallButton(sGui)
+            if b then
+                local okC, how = invokeHandlers(b)
+                if not okC then
+                    pcall(function() b:Activate() end)
+                    how = "activate()"
+                end
+                used = string.format("stall menu %s (%s)", b.Name, tostring(how))
+            else
+                log("milk: " .. label .. " - the stall menu has no clickable button")
+            end
+        else
+            log("milk: " .. label .. " - no BarnStallMenu for " .. spot.Name)
+        end
+
+        -- 2. any other visible milk-ish button
         for _, word in ipairs({ "milk", "collect", "production" }) do
+            if used then break end
             local b = milkFindButton(word)
             if b then
                 local okC, how = invokeHandlers(b)
@@ -6805,10 +6885,32 @@ local okBuild, errBuild = pcall(function()
         end
     end
 
+    -- ▸ IS *THIS* STALL DIRTY? The game's Clean billboard carries
+    --   Adornee = the stall's own "Center" part (dump §24), so a match means
+    --   the answer is about this stall. No match = the billboard is pointing at
+    --   some other stall, so this one gets "unknown", never a guess.
+    local function milkCleanUp(spot)
+        local ok, b = pcall(function()
+            local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+            local hud = pg and pg.GuiViews and pg.GuiViews:FindFirstChild("HUD")
+            local gw = hud and hud:FindFirstChild("MainHUD")
+            local cpa = (gw and gw:FindFirstChild("PCGP_ContextActions"))
+                or (hud and hud:FindFirstChild("PCGP_ContextActions"))
+            return cpa and cpa:FindFirstChild("Billboards")
+                and cpa.Billboards:FindFirstChild("CleanAnimalContainer")
+        end)
+        if not (ok and b) then return nil end
+        local centre = spot:FindFirstChild("Center", true)
+        if not centre then return nil end
+        local okAd, ad = pcall(function() return b.Adornee end)
+        if not okAd or ad ~= centre then return nil end
+        return b.Enabled == true
+    end
+
     -- THE RULE: a dirty stall is cleaned BEFORE anything else happens.
-    -- We stand inside the stall's own trigger volume and let the GAME answer:
-    -- Clean prompt up = dirty. A Stain part with no prompt is logged, never
-    -- guessed, and never counted as cleaned.
+    -- We stand IN the stall (on its Center part - the thing the Clean action is
+    -- adorned to) and let the GAME answer: Clean enabled = dirty. A Stain part
+    -- with no Clean action is logged, never guessed, never counted as cleaned.
     local function milkClean(stalls)
         local dirty, cleaned, unknown = 0, 0, 0
         for i, s in ipairs(stalls) do
@@ -6818,21 +6920,26 @@ local okBuild, errBuild = pcall(function()
                 break
             end
             local stains = milkStain(s.spot)
-            local stand = (s.trigger and s.trigger.Position) or s.pos
+            local centre = s.spot:FindFirstChild("Center", true)
+            local stand = (centre and centre.Position)
+                or (s.trigger and s.trigger.Position) or s.pos
             if not stand then
                 unknown += 1
                 log(string.format("milk: stall %d has no readable position", i))
             else
                 milkTp(stand + Vector3.new(0, 3, 0))
                 task.wait(0.8)
-                local up = promptUp("CleanAnimalContainer")
+                local up = milkCleanUp(s.spot)
                 if up == nil then
                     unknown += 1
-                    log(string.format("milk: stall %d - the game's Clean prompt is unreadable", i))
+                    if stains > 0 then
+                        log(string.format("milk: stall %d - %d filth part(s), the game's Clean action is not pointing here",
+                            i, stains))
+                    end
                 elseif up == false then
                     if stains > 0 then
                         unknown += 1
-                        log(string.format("milk: stall %d - %d stain(s) visible but the game offers no Clean prompt",
+                        log(string.format("milk: stall %d - %d stain(s) present but the game offers no Clean here",
                             i, stains))
                     end
                 else
@@ -6844,7 +6951,7 @@ local okBuild, errBuild = pcall(function()
                         if milkStopping() then break end
                         pressKey(Enum.KeyCode.V)
                         task.wait(1.3)
-                        if promptUp("CleanAnimalContainer") == false then
+                        if milkCleanUp(s.spot) == false then
                             done = true
                             break
                         end
