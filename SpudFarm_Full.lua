@@ -6741,6 +6741,94 @@ local okBuild, errBuild = pcall(function()
         return best
     end
 
+    -- ▸ LET THE COW OUT (user: "now it aint letting the cows out the barn").
+    --   Nothing in this loop ever opened the stall gate, so a milked cow stayed
+    --   parked until the barn filled up and herding blocked itself. The game
+    --   prints "E | Open" on the BarnDoorInteract billboard only while the
+    --   player stands at THAT stall's gate (Adornee = Gate.ProximityPart), so
+    --   we stand there and press the key the billboard itself names.
+    --   GLOBAL for the same slot-budget reason as milkStallGui above.
+    function milkGateOpen(spot, cow)
+        local gatePart
+        pcall(function()
+            local g = spot and spot:FindFirstChild("Gate")
+            local p = g and g:FindFirstChild("ProximityPart")
+            if p and p:IsA("BasePart") then gatePart = p end
+        end)
+        local name = tostring(spot and spot.Name or "?")
+        if not gatePart then
+            log("milk: " .. name .. " has no Gate.ProximityPart - the cow cannot be let out")
+            return false
+        end
+
+        local function doorBill()
+            local ok, b = pcall(function()
+                local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+                local hud = pg and pg.GuiViews and pg.GuiViews:FindFirstChild("HUD")
+                local gw = hud and hud:FindFirstChild("MainHUD")
+                local cpa = (gw and gw:FindFirstChild("PCGP_ContextActions"))
+                    or (hud and hud:FindFirstChild("PCGP_ContextActions"))
+                local bills = cpa and cpa:FindFirstChild("Billboards")
+                return bills and bills:FindFirstChild("BarnDoorInteract")
+            end)
+            if not (ok and b) then return nil end
+            local okAd, ad = pcall(function() return b.Adornee end)
+            if not okAd or ad ~= gatePart then return nil end
+            return b
+        end
+
+        local stand = gatePart.Position + Vector3.new(0, 3, 0)
+        milkTp(stand)
+        task.wait(0.9)
+
+        for attempt = 1, 3 do
+            if milkStopping() then return false end
+            local b = doorBill()
+            if not b then
+                log(string.format("milk: %s gate - the game is not offering the door action (try %d)",
+                    name, attempt))
+                milkTp(stand)
+                task.wait(0.4)
+            else
+                local key, txt = nil, {}
+                for _, d in ipairs(b:GetDescendants()) do
+                    if d:IsA("TextLabel") and d.Text ~= "" then
+                        txt[#txt + 1] = d.Text
+                        if not key and d.Text:match("^%u$") then key = d.Text end
+                    end
+                end
+                local joined = table.concat(txt, " ")
+                local kc = (key and Enum.KeyCode[key]) or Enum.KeyCode.E
+                if joined:lower():find("close", 1, true) then
+                    -- pressing again would SHUT the gate on the cow
+                    log(string.format("milk: %s gate is already open (%s) - waiting for cow %d",
+                        name, joined:sub(1, 30), cow and cow.index or 0))
+                else
+                    log(string.format("milk: %s gate '%s' enabled=%s - pressing %s", name,
+                        joined:sub(1, 30), tostring(b.Enabled), kc.Name))
+                    pressKey(kc)
+                end
+            end
+            -- the cow left when the game clears the stall Occupant or flips its
+            -- own state off "IdleLocked"
+            for _ = 1, 8 do
+                task.wait(0.5)
+                local o = spot:FindFirstChild("Occupant")
+                local still = (o and o:IsA("ObjectValue") and cow and cow.model
+                    and o.Value == cow.model) and true or false
+                local st = cow and cow.model and milkStateOf(cow.model)
+                if not still or st ~= "IdleLocked" then
+                    log(string.format("OK milk: %s gate open - cow %d is out (%s)",
+                        name, cow and cow.index or 0, st or "no state"))
+                    return true
+                end
+            end
+            log(string.format("milk: %s gate pressed (try %d) but the cow is still inside", name, attempt))
+        end
+        log(string.format("milk: %s - the gate never opened for cow %d", name, cow and cow.index or 0))
+        return false
+    end
+
     local function milkDrops()
         local objs = workspace:FindFirstChild("Objects")
         local box = objs and objs:FindFirstChild("DraggableObjects")
@@ -6860,20 +6948,29 @@ local okBuild, errBuild = pcall(function()
         log(string.format("milk: %s in %s - %s", label, spot.Name,
             used and ("sent " .. used) or "no milk action visible, nothing sent"))
 
+        local milked = false
         for _ = 1, 20 do -- 10 s for the game to answer
             if milkStopping() or farmTookBody() then return false end
             local now = milkPercentOf(model)
             local drops = milkDrops()
             if (before and now and now < before) or drops > dropsBefore then
+                milked = true
                 log(string.format("OK milk: %s milked (%s%% -> %s%%, %d new drop(s) in the world)",
                     label, tostring(before or "?"), tostring(now or "?"), drops - dropsBefore))
-                return true
+                break
             end
             task.wait(0.5)
         end
-        log(string.format("milk: %s still %s%% in %s after the action - no milk seen",
-            label, tostring(milkPercentOf(model) or "?"), spot.Name))
-        return false
+        if not milked then
+            log(string.format("milk: %s still %s%% in %s after the action - no milk seen",
+                label, tostring(milkPercentOf(model) or "?"), spot.Name))
+        end
+
+        -- ▸ the cow goes back to the field whatever the milk did: a cow that
+        --   cannot be milked must never clog a stall (that is what blocked the
+        --   loop - "it aint letting the cows out the barn").
+        milkGateOpen(spot, cow)
+        return milked
     end
 
     -- ▸ OLD: visit every cow to let the shared menu fill in. The production
