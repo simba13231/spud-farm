@@ -6077,6 +6077,11 @@ local okBuild, errBuild = pcall(function()
     -- and a milk thread would read it as "stopped" on its very first tick.
     milkThread = nil
     milkStopping = function()
+        -- the automatic delivery runs in its OWN thread: it is not the milk
+        -- loop, so it must not read as "stopped" on its first tick
+        if milkStoreThread and coroutine.running() == milkStoreThread then
+            return milkStoreAuto ~= true -- flipping the toggle stops the pass
+        end
         if not milkThread then return true end
         return coroutine.running() ~= milkThread
     end
@@ -6457,6 +6462,80 @@ local okBuild, errBuild = pcall(function()
             pcall(milkStoreRefresh, true)
         end
     end)
+
+    -- ▸ DELIVER ALL MILK (user: "a toggle that will bring all the milk to the
+    --   selected truck"). The milk loop already deposits at the end of its
+    --   cycle; this is for the times it is OFF and jugs pile up: a switch that
+    --   keeps carrying every Milk jug at the plot into the picked carrier.
+    --   It stands aside whenever the farm loop or the milk loop owns the body.
+    milkStoreAuto = false
+    milkStoreThread = nil
+    milkStoreTask = function()
+        log("store: automatic delivery on — taking milk to " .. tostring(milkStorePick))
+        local saidNoPlot = false
+        while milkStoreAuto do
+            local idle = 12
+            local busy = (milkThread ~= nil)
+                or (loopThread ~= nil and farmResting ~= true)
+            if busy then
+                idle = 5
+            else
+                -- milkStorePlotOf (global, defined above) — milkPlotOf is a
+                -- local declared further down and would read as nil here
+                local plot = milkStorePlotOf(milkUser)
+                local cf, size
+                if plot then cf, size = plot:GetBoundingBox() end
+                if cf then
+                    saidNoPlot = false
+                    local okRun, line = pcall(milkStoreDeposit, cf, size)
+                    if not okRun then
+                        log("store: delivery failed — " .. tostring(line))
+                    elseif line then
+                        log("store: " .. tostring(line))
+                    end
+                elseif not saidNoPlot then
+                    saidNoPlot = true
+                    log("store: no plot found for " .. tostring(milkUser) .. " — nothing to collect from")
+                end
+            end
+            for _ = 1, idle * 2 do
+                if not milkStoreAuto or milkStopping() then break end
+                task.wait(0.5)
+            end
+        end
+        milkStoreThread = nil
+        log("store: automatic delivery off")
+    end
+    Tabs.Milk:CreateToggle("milkStoreAuto", {
+        Title = "Deliver all milk",
+        Default = false,
+        Callback = function(on)
+            milkStoreAuto = on
+            if not on then
+                log("store: automatic delivery stopping after this pass")
+                return
+            end
+            if not milkStorePick or milkStorePick:sub(1, 1) == "(" then
+                log("store: pick a trailer/silo first — the dropdown names where the milk goes")
+                milkStoreAuto = false
+                pcall(function() Fluent.Options.milkStoreAuto:SetValue(false) end)
+                return
+            end
+            if milkStoreThread then return end -- already running
+            task.spawn(function()
+                milkStoreThread = coroutine.running()
+                local okRun, errRun = pcall(milkStoreTask)
+                if not okRun then log("⚠ store delivery crashed: " .. tostring(errRun)) end
+                milkStoreThread = nil
+                milkStoreAuto = false
+                pcall(function()
+                    if Fluent.Options and Fluent.Options.milkStoreAuto then
+                        Fluent.Options.milkStoreAuto:SetValue(false)
+                    end
+                end)
+            end)
+        end,
+    })
 
     -- ▸ the tab SHOWS what the loop sees (user: "it should show cows and a
     --   dirty stall"): the plot it picked, every cow and its production %, and
