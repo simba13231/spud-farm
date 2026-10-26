@@ -8170,12 +8170,20 @@ local okBuild, errBuild = pcall(function()
     --   fill only once the tank rises (or the jug leaves), and three ignored
     --   calls put the old key path back for the rest of the session.
     ----------------------------------------------------------------
-    local milkRemoteOff, milkRemoteFails, milkRemoteCache = false, 0, nil
+    -- ▸ ONE GLOBAL TABLE, NOT SEVEN LOCALS. This block sits at the executor's
+    --   200-locals-per-function ceiling: the compiler refused
+    --   `local function milkCycle` with "Out of local registers". New state
+    --   must therefore add no locals here — park it on the table instead.
+    milkFast = {
+        remoteOff = false, remoteFails = 0, remoteCache = nil,
+        jugTypes = setmetatable({}, { __mode = "k" }),
+        typed = 0, unreadable = 0, skipLoggedAt = 0,
+    }
 
     function milkRemotes()
         -- only a SUCCESS is cached: a build that has no such remote (or one
         -- still loading) is re-checked next time instead of being written off
-        if milkRemoteCache then return milkRemoteCache end
+        if milkFast.remoteCache then return milkFast.remoteCache end
         local rs = game:GetService("ReplicatedStorage")
         local mods = rs:FindFirstChild("Modules")
         local larry = mods and mods:FindFirstChild("Larry")
@@ -8187,12 +8195,12 @@ local okBuild, errBuild = pcall(function()
             if ev and ev:IsA("RemoteEvent") then out[spec[1]] = ev end
         end
         if not (out.carry and out.fill) then return nil end
-        milkRemoteCache = out
+        milkFast.remoteCache = out
         return out
     end
 
     function milkRemoteFire(kind, arg)
-        if milkRemoteOff then return false end
+        if milkFast.remoteOff then return false end
         local ev = (milkRemotes() or {})[kind]
         if not ev then return false end
         local ok
@@ -8208,10 +8216,10 @@ local okBuild, errBuild = pcall(function()
     -- and a silent no-op is worse than a slow press. Three, not two: one lag
     -- spike must not disable the fast path for the whole session.
     function milkRemoteMiss(kind)
-        if milkRemoteOff then return end
-        milkRemoteFails += 1
-        if milkRemoteFails >= 3 then
-            milkRemoteOff = true
+        if milkFast.remoteOff then return end
+        milkFast.remoteFails += 1
+        if milkFast.remoteFails >= 3 then
+            milkFast.remoteOff = true
             log("store: the game ignored the remote " .. tostring(kind)
                 .. " three times — back to key presses for this session")
         end
@@ -8226,9 +8234,6 @@ local okBuild, errBuild = pcall(function()
     --   while NO jug at the plot can be read, so a build that moves the field
     --   can never make the step look like "no milk waiting" and stall.
     ----------------------------------------------------------------
-    local milkJugTypeCache = setmetatable({}, { __mode = "k" })
-    local milkJugTyped, milkJugUnreadable = 0, 0
-    local milkJugSkipLoggedAt = 0
 
     function milkKindFrom(text)
         local s = tostring(text or ""):lower()
@@ -8239,7 +8244,7 @@ local okBuild, errBuild = pcall(function()
     end
 
     function milkJugKind(m)
-        local hit = milkJugTypeCache[m]
+        local hit = milkFast.jugTypes[m]
         if hit and os.clock() - hit.at < 4 then return hit.kind, hit.how end
         local kind, how
         -- 1. attributes (MilkType / Type / Quality / …)
@@ -8286,15 +8291,15 @@ local okBuild, errBuild = pcall(function()
                 end
             end
         end
-        milkJugTypeCache[m] = { kind = kind, how = how, at = os.clock() }
+        milkFast.jugTypes[m] = { kind = kind, how = how, at = os.clock() }
         if kind then
-            milkJugTyped += 1
-            if milkJugTyped == 1 then
+            milkFast.typed += 1
+            if milkFast.typed == 1 then
                 log("store: milk type reads from " .. tostring(how) .. " (" .. kind .. ")")
             end
         else
-            milkJugUnreadable += 1
-            if milkJugUnreadable == 1 then
+            milkFast.unreadable += 1
+            if milkFast.unreadable == 1 then
                 local names = {}
                 for _, d in ipairs(m:GetChildren()) do
                     names[#names + 1] = tostring(d.Name) .. "[" .. tostring(d.ClassName) .. "]"
@@ -8350,8 +8355,8 @@ local okBuild, errBuild = pcall(function()
         end
         -- say it now and then: a quiet "nothing waiting" while jugs sit there
         -- looked like the step being broken
-        if skipped > 0 and os.clock() - milkJugSkipLoggedAt > 30 then
-            milkJugSkipLoggedAt = os.clock()
+        if skipped > 0 and os.clock() - milkFast.skipLoggedAt > 30 then
+            milkFast.skipLoggedAt = os.clock()
             log(string.format("store: leaving %d non-free-range jug(s) on the ground — only free-range goes in", skipped))
         end
         table.sort(out, function(a, b) return a.d < b.d end)
