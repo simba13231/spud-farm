@@ -8217,8 +8217,101 @@ local okBuild, errBuild = pcall(function()
         end
     end
 
+    ----------------------------------------------------------------
+    -- ▸ ONLY FREE-RANGE GOES IN (user: "we can sell spoiled and regular
+    --   but store free range"). The jug's type is read off the jug itself: an
+    --   attribute or a value under Configurations that names the milk type,
+    --   then any label written on it. Never from the model name — every jug is
+    --   called MilkContainer. A jug whose type cannot be read is only stored
+    --   while NO jug at the plot can be read, so a build that moves the field
+    --   can never make the step look like "no milk waiting" and stall.
+    ----------------------------------------------------------------
+    local milkJugTypeCache = setmetatable({}, { __mode = "k" })
+    local milkJugTyped, milkJugUnreadable = 0, 0
+    local milkJugSkipLoggedAt = 0
+
+    function milkKindFrom(text)
+        local s = tostring(text or ""):lower()
+        if s:find("spoiled", 1, true) or s:find("rotten", 1, true) then return "spoiled" end
+        if s:find("free", 1, true) and s:find("range", 1, true) then return "free-range" end
+        if s:find("regular", 1, true) or s:find("normal", 1, true) then return "regular" end
+        return nil
+    end
+
+    function milkJugKind(m)
+        local hit = milkJugTypeCache[m]
+        if hit and os.clock() - hit.at < 4 then return hit.kind, hit.how end
+        local kind, how
+        -- 1. attributes (MilkType / Type / Quality / …)
+        local ok, attrs = pcall(function() return m:GetAttributes() end)
+        if ok and attrs then
+            for k, v in pairs(attrs) do
+                local kn = tostring(k):lower()
+                if type(v) == "string" and (kn:find("milk", 1, true)
+                    or kn:find("type", 1, true) or kn:find("quality", 1, true)) then
+                    kind = milkKindFrom(v)
+                    if kind then
+                        how = "attribute " .. tostring(k) .. "=" .. tostring(v)
+                        break
+                    end
+                end
+            end
+        end
+        -- 2. a value under Configurations
+        if not kind then
+            local conf = m:FindFirstChild("Configurations", true)
+            if conf then
+                for _, d in ipairs(conf:GetDescendants()) do
+                    if d:IsA("StringValue") then
+                        kind = milkKindFrom(d.Value)
+                        if kind then
+                            how = "config " .. tostring(d.Name) .. "=" .. tostring(d.Value)
+                            break
+                        end
+                    end
+                end
+            end
+        end
+        -- 3. any label written on the jug
+        if not kind then
+            for _, d in ipairs(m:GetDescendants()) do
+                local txt
+                if d:IsA("TextLabel") or d:IsA("TextButton") then txt = d.Text end
+                if txt then
+                    kind = milkKindFrom(txt)
+                    if kind then
+                        how = "label " .. tostring(txt)
+                        break
+                    end
+                end
+            end
+        end
+        milkJugTypeCache[m] = { kind = kind, how = how, at = os.clock() }
+        if kind then
+            milkJugTyped += 1
+            if milkJugTyped == 1 then
+                log("store: milk type reads from " .. tostring(how) .. " (" .. kind .. ")")
+            end
+        else
+            milkJugUnreadable += 1
+            if milkJugUnreadable == 1 then
+                local names = {}
+                for _, d in ipairs(m:GetChildren()) do
+                    names[#names + 1] = tostring(d.Name) .. "[" .. tostring(d.ClassName) .. "]"
+                end
+                log("store: cannot read the milk type on " .. tostring(m.Name)
+                    .. " — children: " .. table.concat(names, ", "))
+            end
+        end
+        return kind, how
+    end
+
+    -- free-range only. A jug whose type cannot be read is taken ONLY when this
+    -- scan could not read a single jug's type: a build that moves the field
+    -- must never make the step look like "no milk waiting" and stall.
     function milkStoreJugs(cf, size)
-        local out = {}
+        local out, pending = {}, {}
+        local skipped, readable = 0, 0
         local objs = workspace:FindFirstChild("Objects")
         local box = objs and objs:FindFirstChild("DraggableObjects")
         local root = LocalPlayer.Character
@@ -8231,12 +8324,35 @@ local okBuild, errBuild = pcall(function()
                 local pos = part and part.Position
                 -- only the jugs at THIS plot: another farm's milk is not ours
                 if part and (not (cf and size) or milkInBox(pos, cf, size, 150)) then
-                    out[#out + 1] = {
-                        model = ch, part = part,
+                    local kind = milkJugKind(ch)
+                    local entry = {
+                        model = ch, part = part, kind = kind,
                         d = root and (pos - root.Position).Magnitude or 0,
                     }
+                    if kind then
+                        readable += 1
+                        if kind == "free-range" then
+                            out[#out + 1] = entry
+                        else
+                            skipped += 1
+                        end
+                    else
+                        pending[#pending + 1] = entry
+                    end
                 end
             end
+        end
+        if readable == 0 then
+            -- the game told us nothing at all: take everything, never stall
+            for _, e in ipairs(pending) do out[#out + 1] = e end
+        else
+            skipped += #pending
+        end
+        -- say it now and then: a quiet "nothing waiting" while jugs sit there
+        -- looked like the step being broken
+        if skipped > 0 and os.clock() - milkJugSkipLoggedAt > 30 then
+            milkJugSkipLoggedAt = os.clock()
+            log(string.format("store: leaving %d non-free-range jug(s) on the ground — only free-range goes in", skipped))
         end
         table.sort(out, function(a, b) return a.d < b.d end)
         return out

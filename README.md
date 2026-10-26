@@ -68,6 +68,8 @@ Recipes: **Chocolate Milk** = 25 cocoa + 10 regular milk (or 5 free-range, 2:1;
 spoiled milk rejected) per jug, ~20–23k coins, max 60/run; **Cake** = 100 wheat + 1 egg
 box (12 eggs) + 1 milk → batter → oven; **Wool** = 5 raw wool per spindel bundle.
 Cow happiness decides milk quality (<60% spoiled, 60–89% regular, 90%+ free-range).
+The milk store step only loads **free-range** jugs — regular and spoiled are left
+on the ground for selling (`store: leaving N non-free-range jug(s)`).
 
 Economy (per seed box = 50 crops, average prices): Wheat ≈3,000/hr … **Tomatoes
 ≈7,686/hr** (best field crop), Potatoes ≈7,500/hr, Cabbage ≈6,500/hr; Cocoa raw ≈5,625/hr
