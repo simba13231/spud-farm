@@ -6039,6 +6039,11 @@ local okBuild, errBuild = pcall(function()
         Callback = function(v)
             milkUser = v
             log("milk: user = " .. tostring(v))
+            -- the store list is that ACCOUNT's carriers: re-scan on the switch
+            -- (the picker is built further down, so guard the early call)
+            if type(milkStoreRefresh) == "function" then
+                pcall(milkStoreRefresh, true)
+            end
         end,
     })
     log("milk: users — " .. table.concat(milkChoices0, ", "))
@@ -6061,6 +6066,64 @@ local okBuild, errBuild = pcall(function()
     --   and its visible milk/liquid labels count as well.
     -- ▸ the word table stays INLINE: a local here would take one more register
     --   in the GUI builder for the whole session (the R191 budget is real).
+    --
+    -- ▸ WHOSE TRAILERS (user: "i need it to scan the account it's working for
+    --   for things to store it in"). Configurations.Owner is the account tag
+    --   the game puts on plots, fields and equipment, and it is walked up a few
+    --   parents (plot / farm building / equipment). A carrier with NO owner is
+    --   world-owned and stays available; one with another account's tag is left
+    --   out and counted so the log can say why.
+    function milkStoreOwnerOf(inst)
+        local function tag(v)
+            if not v then return nil end
+            if typeof(v) == "string" then return v ~= "" and v or nil end
+            return v.Name
+        end
+        local p = inst
+        for _ = 1, 8 do
+            if not p then break end
+            local conf = p:FindFirstChild("Configurations")
+            local o = conf and conf:FindFirstChild("Owner")
+            if o and (o:IsA("ObjectValue") or o:IsA("StringValue")) then
+                local who = tag(o.Value)
+                if who then return who end
+            end
+            -- the game is not consistent: some models carry the tag directly
+            local own = p:FindFirstChild("Owner")
+            if own and (own:IsA("ObjectValue") or own:IsA("StringValue")) then
+                local who = tag(own.Value)
+                if who then return who end
+            end
+            local attr = p:GetAttribute("Owner")
+            if type(attr) == "string" and attr ~= "" then return attr end
+            p = p.Parent
+        end
+        return nil
+    end
+
+    -- the picked account's plot, the same rule the milk loop uses (the Owner
+    -- value is the account, the billboard carries the display name)
+    function milkStorePlotOf(who)
+        if not who or who == "" then return nil end
+        local plots = workspace:FindFirstChild("Plots")
+        if not plots then return nil end
+        for _, m in ipairs(plots:GetChildren()) do
+            if m:IsA("Model") then
+                local owner = milkStoreOwnerOf(m)
+                local hit = owner and owner:lower() == who:lower()
+                if not hit then
+                    local bill = m:FindFirstChild("PlotBillboard")
+                    local lab = bill and bill:FindFirstChild("Owner")
+                    local txt = (lab and lab:IsA("TextLabel")) and lab.Text or nil
+                    hit = txt ~= nil and txt ~= ""
+                        and txt:lower():find(who:lower(), 1, true) ~= nil
+                end
+                if hit then return m end
+            end
+        end
+        return nil
+    end
+
     function milkStoreCandidate(m)
         local nm = tostring(m.Name):lower()
         for _, w in ipairs({ "silo", "trailer", "tanker", "tank", "liquid",
@@ -6130,23 +6193,32 @@ local okBuild, errBuild = pcall(function()
         local objects = workspace:FindFirstChild("Objects")
         local root = LocalPlayer.Character
             and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-        local stored = 0
+        local stored, others = 0, 0
+        -- the account the loop works for: its own carriers plus world-owned ones
+        -- that belong to nobody (shared farm silos) — never another player's
+        local who = milkUser
+        if who and who:sub(1, 1) == "(" then who = nil end
         local function consider(folder)
             for _, m in ipairs(folder and folder:GetChildren() or {}) do
                 if m:IsA("Model") and not seen[m] and milkStoreCandidate(m) then
                     seen[m] = true
-                    -- a parked carrier still tells the user what they OWN (that
-                    -- is the "more carriers" complaint): it is listed, marked
-                    -- and ranked last, and the store step refuses it honestly
-                    local isStored = m:GetAttribute("InStorage") == true
-                    if isStored then stored += 1 end
-                    local pos
-                    pcall(function() pos = m:GetPivot().Position end)
-                    out[#out + 1] = {
-                        model = m, pos = pos, score = milkStoreScore(m),
-                        stored = isStored,
-                        d = (pos and root) and (pos - root.Position).Magnitude or 0,
-                    }
+                    local owner = milkStoreOwnerOf(m)
+                    if who and owner and owner:lower() ~= who:lower() then
+                        others += 1
+                    else
+                        -- a parked carrier still tells the user what they OWN
+                        -- (that is the "more carriers" complaint): it is listed,
+                        -- marked and ranked last, and the store step refuses it
+                        local isStored = m:GetAttribute("InStorage") == true
+                        if isStored then stored += 1 end
+                        local pos
+                        pcall(function() pos = m:GetPivot().Position end)
+                        out[#out + 1] = {
+                            model = m, pos = pos, score = milkStoreScore(m),
+                            stored = isStored,
+                            d = (pos and root) and (pos - root.Position).Magnitude or 0,
+                        }
+                    end
                 end
             end
         end
@@ -6174,6 +6246,13 @@ local okBuild, errBuild = pcall(function()
                 end
             end
         end
+        -- ▸ and the picked account's OWN plot (user: "scan the account it's
+        --   working for"): a silo or tanker built on that farm lives under
+        --   Workspace.Plots.<plot>, not in the shared folders above.
+        if who then
+            local plot = milkStorePlotOf(who)
+            if plot then walk(plot, 2) end
+        end
         table.sort(out, function(a, b)
             if a.stored ~= b.stored then return not a.stored end
             if a.score ~= b.score then return a.score > b.score end
@@ -6194,6 +6273,10 @@ local okBuild, errBuild = pcall(function()
         if stored > 0 and stored ~= milkStoreStoredShown then
             milkStoreStoredShown = stored
             log(string.format("milk store: %d carrier(s) are in storage — listed, but they only fill once spawned", stored))
+        end
+        if others > 0 and others ~= milkStoreOthersShown then
+            milkStoreOthersShown = others
+            log(string.format("milk store: %d carrier(s) belong to other accounts — not listed", others))
         end
         return names, map
     end
