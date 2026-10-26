@@ -6053,19 +6053,42 @@ local okBuild, errBuild = pcall(function()
     --   n/m readout ranks it first, so the milk truck and the milk silo sit at
     --   the top instead of a hay trailer that merely says "Trailer".
     ------------------------------------------------------------
+    -- ▸ the test is deliberately WIDE (user: "we need more carriers in the
+    --   known carriers because the ones we know now are only the starter
+    --   gear"). Bought equipment often carries a model code for a name
+    --   (MC4500, MP680, Claas790) and never says "liquid", so the name alone
+    --   can't be the only test: the game's own EquipmentType, its attributes
+    --   and its visible milk/liquid labels count as well.
+    -- ▸ the word table stays INLINE: a local here would take one more register
+    --   in the GUI builder for the whole session (the R191 budget is real).
     function milkStoreCandidate(m)
         local nm = tostring(m.Name):lower()
         for _, w in ipairs({ "silo", "trailer", "tanker", "tank", "liquid",
-                             "milk", "cistern", "reservoir" }) do
+                             "milk", "cistern", "reservoir", "bulk", "churn",
+                             "barrel", "cart", "wagon" }) do
             if nm:find(w, 1, true) then return true end
         end
         local et = tostring(m:GetAttribute("EquipmentType") or ""):lower()
-        if et == "trailer" or et == "truck" or et == "transport"
-            or et == "liquidcarrier" then
-            return true
+        for _, w in ipairs({ "trailer", "truck", "tanker", "transport",
+                             "liquid", "tank", "silo", "cart", "wagon" }) do
+            if et:find(w, 1, true) then return true end
+        end
+        for _, a in ipairs({ "Milk", "MilkType", "StoredMilk", "Liquid",
+                             "LiquidType", "LiquidAmount" }) do
+            if m:GetAttribute(a) ~= nil then return true end
         end
         for _, d in ipairs(m:GetDescendants()) do
-            if tostring(d.Name):lower():find("milktype", 1, true) then return true end
+            local dn = tostring(d.Name):lower()
+            if dn:find("milktype", 1, true) or dn:find("liquidtype", 1, true)
+                or dn:find("liquidtank", 1, true) or dn:find("milktank", 1, true) then
+                return true
+            end
+            if d:IsA("TextLabel") then
+                local t = tostring(d.Text):lower()
+                if t:find("milk", 1, true) or t:find("liquid", 1, true) then
+                    return true
+                end
+            end
         end
         return false
     end
@@ -6083,6 +6106,12 @@ local okBuild, errBuild = pcall(function()
         local et = tostring(m:GetAttribute("EquipmentType") or ""):lower()
         if et == "trailer" then score += 3
         elseif et == "truck" or et == "transport" then score += 2 end
+        for _, a in ipairs({ "Milk", "MilkType", "StoredMilk" }) do
+            if m:GetAttribute(a) ~= nil then score += 7 break end
+        end
+        for _, a in ipairs({ "Liquid", "LiquidType", "LiquidAmount" }) do
+            if m:GetAttribute(a) ~= nil then score += 6 break end
+        end
         for _, d in ipairs(m:GetDescendants()) do
             local dn = tostring(d.Name):lower()
             if dn:find("milktype", 1, true) then score += 7 end
@@ -6106,29 +6135,55 @@ local okBuild, errBuild = pcall(function()
             for _, m in ipairs(folder and folder:GetChildren() or {}) do
                 if m:IsA("Model") and not seen[m] and milkStoreCandidate(m) then
                     seen[m] = true
-                    if m:GetAttribute("InStorage") == true then
-                        stored += 1
-                    else
-                        local pos
-                        pcall(function() pos = m:GetPivot().Position end)
-                        out[#out + 1] = {
-                            model = m, pos = pos, score = milkStoreScore(m),
-                            d = (pos and root) and (pos - root.Position).Magnitude or 0,
-                        }
-                    end
+                    -- a parked carrier still tells the user what they OWN (that
+                    -- is the "more carriers" complaint): it is listed, marked
+                    -- and ranked last, and the store step refuses it honestly
+                    local isStored = m:GetAttribute("InStorage") == true
+                    if isStored then stored += 1 end
+                    local pos
+                    pcall(function() pos = m:GetPivot().Position end)
+                    out[#out + 1] = {
+                        model = m, pos = pos, score = milkStoreScore(m),
+                        stored = isStored,
+                        d = (pos and root) and (pos - root.Position).Magnitude or 0,
+                    }
                 end
             end
         end
-        consider(objects and objects:FindFirstChild("Equipment"))
-        consider(objects and objects:FindFirstChild("Buildings"))
+        -- every folder a carrier can live in: the two the dump proved
+        -- (Objects.Equipment, Objects.Buildings) plus anything named like
+        -- storage/garage/equipment, two folders deep — that is where bought
+        -- machines wait while they are parked.
+        local scanned = {}
+        local function walk(folder, depth)
+            if not folder or scanned[folder] then return end
+            scanned[folder] = true
+            consider(folder)
+            if depth <= 0 then return end
+            for _, f in ipairs(folder:GetChildren()) do
+                if f:IsA("Folder") then walk(f, depth - 1) end
+            end
+        end
+        if objects then
+            for _, f in ipairs(objects:GetChildren()) do
+                local fn = tostring(f.Name):lower()
+                if fn == "equipment" or fn == "buildings" or fn == "vehicles"
+                    or fn:find("storage", 1, true) or fn:find("garage", 1, true)
+                    or fn:find("equipment", 1, true) then
+                    walk(f, 2)
+                end
+            end
+        end
         table.sort(out, function(a, b)
+            if a.stored ~= b.stored then return not a.stored end
             if a.score ~= b.score then return a.score > b.score end
             return a.d < b.d
         end)
         local names, map, used = {}, {}, {}
         for _, c in ipairs(out) do
-            local name, n = c.model.Name, 2
-            while used[name] do name = c.model.Name .. " #" .. n; n += 1 end
+            local base = c.model.Name .. (c.stored and " (in storage)" or "")
+            local name, n = base, 2
+            while used[name] do name = base .. " #" .. n; n += 1 end
             used[name] = true
             names[#names + 1] = name
             map[name] = c.model
@@ -6138,7 +6193,7 @@ local okBuild, errBuild = pcall(function()
         end
         if stored > 0 and stored ~= milkStoreStoredShown then
             milkStoreStoredShown = stored
-            log(string.format("milk store: %d stored trailer/silo(s) not listed — spawn one to store milk", stored))
+            log(string.format("milk store: %d carrier(s) are in storage — listed, but they only fill once spawned", stored))
         end
         return names, map
     end
@@ -6205,6 +6260,33 @@ local okBuild, errBuild = pcall(function()
         })
         log("milk: store choices — " .. table.concat(names0, ", "))
     end
+
+    -- ▸ SCAN ON STARTUP (user: "make it scan on startup for things to store
+    --   milk in"). The world streams in AFTER this GUI builds, so the scan above
+    --   usually runs against an empty workspace — that is why the picker only
+    --   ever offered "no trailer or silo found" until the milk loop happened to
+    --   run. This keeps scanning until carriers exist, then keeps the list
+    --   fresh (a carrier spawned or parked later shows up on its own).
+    task.spawn(function()
+        local function gone() -- Unload destroyed the menu: stop scanning
+            return not (Fluent.Options and Fluent.Options.milkStore)
+        end
+        for _ = 1, 20 do -- ~40 s of streaming, one look every 2 s
+            task.wait(2)
+            if gone() then return end
+            pcall(milkStoreRefresh, true)
+            if milkStoreTarget and milkStorePick
+                and milkStorePick:sub(1, 1) ~= "(" then
+                log("milk store: startup scan found " .. tostring(milkStorePick))
+                break
+            end
+        end
+        while true do
+            task.wait(15)
+            if gone() then return end
+            pcall(milkStoreRefresh, true)
+        end
+    end)
 
     -- ▸ the tab SHOWS what the loop sees (user: "it should show cows and a
     --   dirty stall"): the plot it picked, every cow and its production %, and
@@ -7893,6 +7975,10 @@ local okBuild, errBuild = pcall(function()
         if not dest or dest.Parent == nil then
             log("store: '" .. tostring(name) .. "' is not in the world — pick another trailer/silo")
             return "store: " .. tostring(name) .. " is gone — pick again"
+        end
+        if dest:GetAttribute("InStorage") == true then
+            log("store: '" .. tostring(name) .. "' is parked in storage — spawn it first, then pick it again")
+            return "store: " .. tostring(name) .. " is in storage"
         end
 
         local held = milkStoreHolding()
