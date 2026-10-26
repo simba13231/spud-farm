@@ -36,6 +36,24 @@ local MAXREC = 1500
 local hooked, hookHow, hookErr = false, "none", nil
 local original      -- the namecall we replaced (for the restore)
 
+-- ▸ INSIDE THE HOOK: PROPERTY READS ONLY. GetFullName, FindFirstChild and
+--   GetChildren are themselves NAMECALLS, and calling one while a namecall is
+--   being intercepted can leave the executor's cached method name on the
+--   wrong call — that is what made every button in the game stop responding.
+--   Name/Parent are plain property reads, so they are safe here.
+local function pathOfInst(v)
+    local parts = {}
+    local cur = v
+    for _ = 1, 14 do
+        if not cur or cur == game then break end
+        parts[#parts + 1] = tostring(cur.Name)
+        cur = cur.Parent
+    end
+    local out = {}
+    for i = #parts, 1, -1 do out[#out + 1] = parts[i] end
+    return table.concat(out, ".")
+end
+
 local function short(v, depth)
     depth = depth or 0
     local t = typeof(v)
@@ -44,8 +62,7 @@ local function short(v, depth)
         if #s > 90 then s = s:sub(1, 87) .. "…" end
         return string.format("%q", s)
     elseif t == "Instance" then
-        local ok, n = pcall(function() return v:GetFullName() end)
-        return ok and n or tostring(v)
+        return pathOfInst(v)
     elseif t == "table" then
         if depth >= 2 then return "{…}" end
         local parts, n = {}, 0
@@ -84,16 +101,11 @@ local function pushCall(self, method, ...)
     local args = table.pack(...)
     local parts = {}
     for i = 1, args.n do parts[i] = short(args[i]) end
-    local nm
-    local ok, full = pcall(function()
-        if typeof(self) == "Instance" then return self:GetFullName() end
-        return tostring(self)
-    end)
-    nm = ok and full or tostring(self)
+    local nm = (typeof(self) == "Instance") and pathOfInst(self) or tostring(self)
     records[#records + 1] = {
         kind = "call", name = nm, method = method,
         args = table.concat(parts, ", "),
-        n = args.n, where = here(), at = os.clock(),
+        n = args.n, at = os.clock(),
     }
 end
 
@@ -105,6 +117,9 @@ local function installRaw()
     if type(old) ~= "function" then error("__namecall is not a function") end
     local wrap = newcclosure or function(f) return f end
     local function hook(self, ...)
+        -- read the method FIRST, then record with property reads only, then
+        -- hand the call straight to the original: a hook that does anything
+        -- else can swallow the call and freeze every button in the game
         local method = getnamecallmethod and getnamecallmethod() or nil
         if method == "FireServer" or method == "InvokeServer" then
             pcall(pushCall, self, method, ...)
@@ -273,6 +288,12 @@ function spudRemoteShow()
     print(buildReport())
 end
 
+-- a way out that does NOT upload: restores the game's own call path at once
+function spudRemoteRestore()
+    restore()
+    print("[spud-remote] hook removed — the game's own calls are untouched again")
+end
+
 function spudRemoteStop()
     restore()
     local text = buildReport()
@@ -294,8 +315,19 @@ function spudRemoteStop()
     return link
 end
 
+-- safety net: a forgotten probe must never leave the hook installed
+if hooked then
+    task.delay(600, function()
+        if hooked then
+            restore()
+            print("[spud-remote] 10 minutes passed — recording stopped and the game's own call path was restored")
+        end
+    end)
+end
+
 print("════════════════════════════════════════")
 print("[spud-remote] recording: " .. (hooked and ("yes (" .. hookHow .. ")") or "NO — " .. tostring(hookErr)))
+print("if ANY button stops responding: run  spudRemoteRestore()  (or rejoin)")
 print("1) pick up a milk jug (Carry/E)")
 print("2) walk to the truck and press Fill (V) once")
 print("3) milk one cow")
