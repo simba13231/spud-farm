@@ -187,18 +187,32 @@ end
 
 --------------------------------------------------------------- report
 local function remoteList()
-    local out = {}
+    -- ▸ ONLY THE MILK-RELATED ONES (user: "it wont let me copy or upload"). The
+    --   full inventory ran to ~400 lines / ~40 KB, and some executors silently
+    --   refuse a clipboard write that size — which looked like copy not
+    --   working. The names are already known; the report only needs the ones
+    --   that can touch milk.
+    local out, total = {}, 0
+    local keys = { "fill", "carry", "milk", "liquid", "animal", "collect",
+        "silo", "juicery", "harvester" }
     pcall(function()
         local rs = game:GetService("ReplicatedStorage")
         for _, d in ipairs(rs:GetDescendants()) do
             if d:IsA("RemoteEvent") or d:IsA("RemoteFunction")
                 or d:IsA("UnreliableRemoteEvent") then
-                out[#out + 1] = string.format("  %s [%s]", d:GetFullName(), d.ClassName)
+                total += 1
+                local nm = tostring(d.Name):lower()
+                for _, k in ipairs(keys) do
+                    if nm:find(k, 1, true) then
+                        out[#out + 1] = string.format("  %s [%s]", d:GetFullName(), d.ClassName)
+                        break
+                    end
+                end
             end
         end
     end)
     table.sort(out)
-    return out
+    return out, total
 end
 
 local function buildReport()
@@ -243,8 +257,9 @@ local function buildReport()
     end
 
     w("")
-    w("══════ REMOTE INVENTORY (ReplicatedStorage) ══════")
-    local list = remoteList()
+    local list, total = remoteList()
+    w(string.format("══════ MILK-RELATED REMOTES (%d of %d in ReplicatedStorage) ══════",
+        #list, total))
     if #list == 0 then
         w("  (none — the game may keep them elsewhere)")
     else
@@ -339,13 +354,27 @@ function spudRemoteStop()
         link = urlFrom(httpPost("https://paste.rs/", text), 201)
             or urlFrom(httpPost("https://0x0.st", text))
     end
-    pcall(function() setclipboard(link or text) end)
     print("════════════════════════════════════════")
     if link then
+        pcall(function() setclipboard(link) end)
         print("✔ UPLOADED — send this link back:")
         print("   " .. link)
     else
-        print("✔ upload blocked — the whole report is on your clipboard, paste it in a notes app and send it")
+        -- ▸ NO UPLOAD: keep the panel alive (user: "it wont let me copy or
+        --   upload"). Closing it here left no way to retry, so the report is
+        --   copied, written to a file when the clipboard is blocked, and the
+        --   panel stays with a button that still works.
+        local copied = pcall(function() setclipboard(text) end)
+        local saved = (not copied) and pcall(function() writefile("spud_remote_report.txt", text) end)
+        print("✔ upload blocked — " .. (copied and "the report is on your clipboard"
+            or (saved and "the report was saved to spud_remote_report.txt"
+                or "the report is printed above")))
+        if guiStatus then
+            guiStatus.Text = copied and "upload failed — copied instead"
+                or (saved and "upload failed — saved to spud_remote_report.txt"
+                    or "upload failed — see console")
+        end
+        return nil
     end
     print("════════════════════════════════════════")
     spudRemoteClosePanel()
@@ -358,10 +387,13 @@ end
 --   own — so the copy/stop buttons keep working even when the game's own UI
 --   is the thing acting up.
 local function buildGui()
+    -- ▸ PlayerGui FIRST (user: "it wont let me copy or upload"): a panel in the
+    --   executor's hidden container (gethui) does not always receive clicks.
+    --   PlayerGui always does, and ResetOnSpawn=false keeps it across respawns.
     local parent
-    pcall(function() if gethui then parent = gethui() end end)
+    pcall(function() parent = LP:FindFirstChildOfClass("PlayerGui") end)
     if not parent then
-        pcall(function() parent = LP:FindFirstChildOfClass("PlayerGui") end)
+        pcall(function() if gethui then parent = gethui() end end)
     end
     if not parent then
         pcall(function() parent = game:GetService("CoreGui") end)
@@ -441,11 +473,22 @@ local function buildGui()
     mkButton("Copy report", 50, Color3.fromRGB(52, 52, 64), function()
         local text = buildReport()
         local okCopy = pcall(function() setclipboard(text) end)
-        print(okCopy and "[spud-remote] report copied to the clipboard"
-            or "[spud-remote] no setclipboard in this executor")
-        if guiStatus then
-            guiStatus.Text = okCopy and "copied — paste it to me" or "clipboard unavailable"
+        if okCopy then
+            print("[spud-remote] report copied to the clipboard")
+            if guiStatus then guiStatus.Text = string.format("copied %d chars — paste it to me", #text) end
+            return
         end
+        -- no clipboard? leave the report somewhere reachable instead of
+        -- dropping it on the floor
+        local okFile = pcall(function() writefile("spud_remote_report.txt", text) end)
+        if okFile then
+            print("[spud-remote] clipboard unavailable — saved to spud_remote_report.txt")
+            if guiStatus then guiStatus.Text = "saved spud_remote_report.txt" end
+            return
+        end
+        print("[spud-remote] no clipboard and no writefile — printing the report above")
+        print(text)
+        if guiStatus then guiStatus.Text = "no clipboard — report printed" end
     end)
 
     mkButton("Upload & stop", 82, Color3.fromRGB(38, 108, 64), function()
