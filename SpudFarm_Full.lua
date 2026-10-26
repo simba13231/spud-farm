@@ -7276,6 +7276,232 @@ local okBuild, errBuild = pcall(function()
         return done, tried
     end
 
+    -- ▸ FEED TOP-UP (user: "if the FeedDispenser is at 100/500 it gets the
+    --   AnimalFoodBox and puts it in the feed dispenser until it's at 500").
+    --   Dump-confirmed anchors: Buildings.FeedDispenser.Adornee.BillboardGui.
+    --   Amount reads "277/500" (§14), the boxes are models named
+    --   AnimalFoodBox (§18), and the context keys are Carry=E / Drop=X /
+    --   FillDispenser=V (context-key dump). Everything is verified by the
+    --   number moving - a key press alone never counts as done.
+    --   GLOBAL on purpose: the build closure is at its local ceiling.
+    function milkFeedAmount(disp)
+        -- the live billboard the dumps caught ("277/500") is the known signal
+        for _, d in ipairs(disp:GetDescendants()) do
+            if d:IsA("TextLabel") then
+                local a, c = tostring(d.Text):match("^%s*(%d+)%s*/%s*(%d+)%s*$")
+                if a then return tonumber(a), tonumber(c), d:GetFullName() end
+            end
+        end
+        -- then an explicit value, if this build stores one
+        local function asNum(v)
+            local ok, x = pcall(function() return tonumber(v.Value) end)
+            if ok then return x end
+            return nil
+        end
+        for _, nm in ipairs({ "Amount", "Feed", "Contents", "Count", "Food" }) do
+            local v = disp:FindFirstChild(nm, true)
+            if v and v:IsA("ValueBase") then
+                local n = asNum(v)
+                if n then
+                    local cv = disp:FindFirstChild("Capacity", true)
+                    return n, (cv and cv:IsA("ValueBase") and asNum(cv)) or nil, v:GetFullName()
+                end
+            end
+        end
+        local a = tonumber(tostring(disp:GetAttribute("Amount") or ""))
+        if a then
+            return a, tonumber(tostring(disp:GetAttribute("Capacity") or "")), "attribute"
+        end
+        return nil
+    end
+
+    -- where to stand at a feed object (the billboard's own Adornee is the
+    -- dispenser's front; the pivot is inside the model)
+    function milkFeedStand(inst)
+        local p
+        pcall(function()
+            local ad = inst:FindFirstChild("Adornee")
+            if ad and ad:IsA("BasePart") then p = ad.Position end
+        end)
+        if not p then pcall(function() p = inst:GetPivot().Position end) end
+        return p
+    end
+
+    -- is this feed object ours? owner value first, then our plot's own box
+    function milkFeedMatch(inst, cf, size, pad)
+        local pos
+        pcall(function() pos = inst:GetPivot().Position end)
+        if not pos then return nil end
+        local owner = milkOwnerOf(inst)
+        local mine = owner and milkUser and owner:lower() == milkUser:lower()
+        local near = (cf and size) and milkInBox(pos, cf, size, pad or 90) or false
+        if mine or near then return pos, owner, mine end
+        return nil
+    end
+
+    function milkFeedDispensers(cf, size)
+        local out = {}
+        for _, d in ipairs(workspace:GetDescendants()) do
+            if d.Name == "FeedDispenser" and (d:IsA("Model") or d:IsA("BasePart")) then
+                local pos, owner, mine = milkFeedMatch(d, cf, size, 90)
+                if pos then
+                    local ref = (cf and cf.Position) or pos
+                    out[#out + 1] = {
+                        model = d, pos = pos, owner = owner, mine = mine,
+                        d = (pos - ref).Magnitude,
+                    }
+                end
+            end
+        end
+        table.sort(out, function(a, b)
+            if a.mine ~= b.mine then return a.mine end
+            return a.d < b.d
+        end)
+        return out
+    end
+
+    function milkFeedBoxes(cf, size)
+        local out = {}
+        for _, d in ipairs(workspace:GetDescendants()) do
+            if d.Name == "AnimalFoodBox" and d:IsA("Model") then
+                local pos, owner, mine = milkFeedMatch(d, cf, size, 90)
+                if pos then
+                    out[#out + 1] = { model = d, pos = pos, owner = owner, mine = mine }
+                end
+            end
+        end
+        table.sort(out, function(a, b)
+            if a.mine ~= b.mine then return a.mine end
+            return false
+        end)
+        return out
+    end
+
+    -- the game's own visible context button (Carry / FillDispenser)
+    function milkFeedButton(name)
+        local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+        local btn
+        pcall(function()
+            btn = pg.GuiViews.HUD.PCGP_ContextActions.Buttons:FindFirstChild(name)
+        end)
+        if btn and btn:IsA("GuiButton") and btn.Visible then
+            local ok = invokeHandlers(btn)
+            if not ok then pcall(function() btn:Activate() end) end
+            return true
+        end
+        return false
+    end
+
+    function milkFeedActs()
+        local out = {}
+        local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+        pcall(function()
+            local btns = pg.GuiViews.HUD.PCGP_ContextActions.Buttons
+            for _, b in ipairs(btns:GetChildren()) do
+                if b:IsA("GuiObject") and b.Visible then out[#out + 1] = b.Name end
+            end
+        end)
+        return #out > 0 and table.concat(out, " · ") or "nothing visible"
+    end
+
+    -- returns the line the milk panel shows for the feed step
+    function milkFeedTopUp(cf, size)
+        local disps = milkFeedDispensers(cf, size)
+        if #disps == 0 then
+            log("feed: no FeedDispenser near your plot")
+            return "feed: no dispenser found near this plot"
+        end
+        local disp = disps[1]
+        local now, cap, where = milkFeedAmount(disp.model)
+        log(string.format("feed: %s  owner=%s  reads %s/%s  (%s)",
+            disp.model:GetFullName(), tostring(disp.owner or "?"),
+            tostring(now or "?"), tostring(cap or "?"), tostring(where or "unreadable")))
+        if not now or not cap then
+            return "feed: level unreadable on " .. disp.model.Name
+        end
+        if now >= cap then
+            return string.format("feed: full (%d/%d)", now, cap)
+        end
+        local boxes = milkFeedBoxes(cf, size)
+        log(string.format("feed: %d/%d - %d AnimalFoodBox(es) near the plot", now, cap, #boxes))
+        if #boxes == 0 then
+            return string.format("feed: %d/%d - no AnimalFoodBox nearby", now, cap)
+        end
+
+        local start, capFull, added, missed = now, cap, 0, 0
+        for step = 1, 15 do
+            if milkStopping() or farmTookBody() then break end
+            now, cap = milkFeedAmount(disp.model)
+            if not now or not cap or now >= cap then break end
+
+            -- 1. take a box unless one is already in hand
+            if not carrying() then
+                local target
+                for _, b in ipairs(boxes) do
+                    if b.model.Parent ~= nil then target = b break end
+                end
+                if not target then
+                    log("feed: no AnimalFoodBox left in the world")
+                    break
+                end
+                local stand = milkFeedStand(target.model) or target.pos
+                milkTp(stand + Vector3.new(0, 3, 0))
+                task.wait(0.8)
+                if milkStopping() or farmTookBody() then break end
+                pressKey(Enum.KeyCode.E) -- Carry = E
+                task.wait(0.9)
+                if not carrying() then
+                    milkFeedButton("Carry")
+                    task.wait(0.7)
+                end
+                if not carrying() then
+                    log("feed: E did not pick up the AnimalFoodBox - the game offers: " .. milkFeedActs())
+                    break
+                end
+                log("feed: carrying an AnimalFoodBox")
+            end
+
+            -- 2. stand at the dispenser and press the game's Fill action
+            local stand = milkFeedStand(disp.model) or disp.pos
+            milkTp(stand + Vector3.new(0, 3, 0))
+            task.wait(1.1)
+            if milkStopping() or farmTookBody() then break end
+            local before = now
+            if not milkFeedButton("FillDispenser") then
+                pressKey(Enum.KeyCode.V) -- FillDispenser = V
+            end
+            task.wait(0.8)
+            local after
+            for _ = 1, 10 do
+                after = milkFeedAmount(disp.model)
+                if after and after > before then break end
+                if milkStopping() or farmTookBody() then break end
+                task.wait(0.5)
+            end
+            if after and after > before then
+                added += 1
+                log(string.format("feed: box accepted - %d/%s", after, tostring(cap or capFull)))
+            else
+                missed += 1
+                log(string.format("feed: the fill did not register (%s -> %s) - the game offers: %s",
+                    tostring(before), tostring(after), milkFeedActs()))
+                if carrying() then
+                    pressKey(Enum.KeyCode.X) -- Drop = X: never leave a box stuck in hand
+                    task.wait(0.5)
+                end
+                break
+            end
+        end
+
+        local final = milkFeedAmount(disp.model) or now
+        if added == 0 and missed == 0 then
+            return string.format("feed: %d/%d (stopped before the first box)", start, capFull)
+        end
+        return string.format("feed: %d/%d -> %s/%d (%d box(es)%s)",
+            start, capFull, tostring(final), capFull, added,
+            missed > 0 and ", a fill failed" or "")
+    end
+
     local function milkCycle()
         -- ▸ SHARE THE BODY (user: "when the milk loop is on the farm loop can
         --   still run"). They move the SAME character, so they can never work
@@ -7343,6 +7569,11 @@ local okBuild, errBuild = pcall(function()
                 or string.format("milk: %d of %d parked cow(s) milked", done, tried)
         end
 
+        -- ▸ 2c2. FEED TOP-UP (user: after the milk loop, fill the cows' feed
+        --   dispenser with AnimalFoodBoxes until it reads full). Runs after
+        --   the milk so a milking batch never waits on a feed trip.
+        local feedLine = milkFeedTopUp(cf, size)
+
         -- ▸ 2d. LEFTOVER CHECK (user: "check to see if there are any left over
         --   cows"): a cow that never walked in still stands in the field, so
         --   count it here instead of letting the batch silently come up short.
@@ -7389,6 +7620,7 @@ local okBuild, errBuild = pcall(function()
         end
         if herdLine then lines[#lines + 1] = herdLine end
         if milkLine then lines[#lines + 1] = milkLine end
+        if feedLine then lines[#lines + 1] = feedLine end
         if leftLine then lines[#lines + 1] = leftLine end
         milkSetStatus(table.concat(lines, "\n"))
         log("milk: " .. table.concat(lines, " | "))
