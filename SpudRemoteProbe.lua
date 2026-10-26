@@ -42,6 +42,16 @@ function spudRemoteClosePanel()
     gui, guiStatus = nil, nil
 end
 
+-- ▸ the live counter rewrote the status line twice a second (user: "it just
+--   wont export"): that erased "copied 1200 chars" before it could be read, so
+--   a copy that WORKED looked like nothing happened. Messages set through here
+--   are held for a few seconds before the counter takes the line back.
+local statusUntil = 0
+local function setStatus(msg, hold)
+    if guiStatus then guiStatus.Text = tostring(msg) end
+    statusUntil = os.clock() + (hold or 6)
+end
+
 -- ▸ INSIDE THE HOOK: PROPERTY READS ONLY. GetFullName, FindFirstChild and
 --   GetChildren are themselves NAMECALLS, and calling one while a namecall is
 --   being intercepted can leave the executor's cached method name on the
@@ -102,6 +112,16 @@ local function here()
     return string.format("pos=(%.0f, %.0f, %.0f) held=%d", p.X, p.Y, p.Z, held)
 end
 
+-- ▸ POSITION IS SAMPLED OUTSIDE THE HOOK. here() uses FindFirstChild and
+--   GetChildren, which are namecalls themselves — calling that from inside the
+--   hook is what froze every button in the game earlier. So the last known
+--   position is cached here and the hook only copies the finished string.
+local whereNow = "?"
+local function sampleWhere()
+    local ok, res = pcall(here)
+    if ok and type(res) == "string" then whereNow = res end
+end
+
 local function pushCall(self, method, ...)
     if #records >= MAXREC then return end
     local args = table.pack(...)
@@ -111,7 +131,7 @@ local function pushCall(self, method, ...)
     records[#records + 1] = {
         kind = "call", name = nm, method = method,
         args = table.concat(parts, ", "),
-        n = args.n, at = os.clock(),
+        n = args.n, at = os.clock(), where = whereNow,
     }
 end
 
@@ -149,6 +169,8 @@ local function installHookMeta()
     end)
     original = { kind = "hookmeta", old = old }
 end
+
+sampleWhere()
 
 if type(getnamecallmethod) ~= "function" then
     hookErr = "this executor has no getnamecallmethod — the call list will be empty, the remote INVENTORY below still works"
@@ -277,7 +299,7 @@ local function buildReport()
             w(string.format("  -- MARK: %s  (%s)", r.text, r.where))
         else
             w(string.format("  [%6.1fs] %s:%s(%s)   <%s>",
-                r.at - t0, r.name, r.method, r.args, r.where))
+                r.at - t0, r.name, r.method, r.args, tostring(r.where or "?")))
         end
     end
 
@@ -298,6 +320,33 @@ local function buildReport()
 
     w("")
     w("══════ END ══════")
+    return table.concat(L, "\n")
+end
+
+-- ▸ NEVER EXPORT NOTHING. pushCall used to leave `where` nil, and Luau's
+--   string.format errors on a nil %s — so the FIRST recorded call made
+--   buildReport throw, and copy AND upload both died with only a console
+--   line. If the full builder ever errors again, dump what was recorded.
+local function safeReport()
+    local ok, text = pcall(buildReport)
+    if ok and type(text) == "string" then return text end
+    local L = {
+        "══════ SPUD REMOTE REPORT (minimal — the full builder errored) ══════",
+        "builder error: " .. tostring(text),
+        string.format("place %d · player %s", game.PlaceId, LP.Name),
+        "",
+        "══════ CALLS, IN ORDER ══════",
+    }
+    for _, r in ipairs(records) do
+        if r.kind == "mark" then
+            L[#L + 1] = "-- MARK " .. tostring(r.text)
+        else
+            L[#L + 1] = string.format("%s:%s(%s)   <%s>", tostring(r.name),
+                tostring(r.method), tostring(r.args), tostring(r.where or "?"))
+        end
+    end
+    if #records == 0 then L[#L + 1] = "(nothing recorded)" end
+    L[#L + 1] = "══════ END ══════"
     return table.concat(L, "\n")
 end
 
@@ -335,7 +384,7 @@ function spudRemoteMark(label)
 end
 
 function spudRemoteShow()
-    print(buildReport())
+    print(safeReport())
 end
 
 -- a way out that does NOT upload: restores the game's own call path at once
@@ -347,7 +396,7 @@ end
 
 function spudRemoteStop()
     restore()
-    local text = buildReport()
+    local text = safeReport()
     print(text)
     local link = nil
     if #text < 900000 then
@@ -369,11 +418,9 @@ function spudRemoteStop()
         print("✔ upload blocked — " .. (copied and "the report is on your clipboard"
             or (saved and "the report was saved to spud_remote_report.txt"
                 or "the report is printed above")))
-        if guiStatus then
-            guiStatus.Text = copied and "upload failed — copied instead"
-                or (saved and "upload failed — saved to spud_remote_report.txt"
-                    or "upload failed — see console")
-        end
+        setStatus(copied and "upload failed — copied instead"
+            or (saved and "upload failed — saved to spud_remote_report.txt"
+                or "upload failed — see console"), 12)
         return nil
     end
     print("════════════════════════════════════════")
@@ -465,17 +512,20 @@ local function buildGui()
         c.Parent = b
         b.MouseButton1Click:Connect(function()
             local okRun, errRun = pcall(onClick)
-            if not okRun then print("[spud-remote] panel button error: " .. tostring(errRun)) end
+            if not okRun then
+                print("[spud-remote] panel button error: " .. tostring(errRun))
+                setStatus("button error — see console", 8)
+            end
         end)
         return b
     end
 
     mkButton("Copy report", 50, Color3.fromRGB(52, 52, 64), function()
-        local text = buildReport()
+        local text = safeReport()
         local okCopy = pcall(function() setclipboard(text) end)
         if okCopy then
             print("[spud-remote] report copied to the clipboard")
-            if guiStatus then guiStatus.Text = string.format("copied %d chars — paste it to me", #text) end
+            setStatus(string.format("copied %d chars — paste it to me", #text), 10)
             return
         end
         -- no clipboard? leave the report somewhere reachable instead of
@@ -483,12 +533,12 @@ local function buildGui()
         local okFile = pcall(function() writefile("spud_remote_report.txt", text) end)
         if okFile then
             print("[spud-remote] clipboard unavailable — saved to spud_remote_report.txt")
-            if guiStatus then guiStatus.Text = "saved spud_remote_report.txt" end
+            setStatus("saved spud_remote_report.txt", 10)
             return
         end
-        print("[spud-remote] no clipboard and no writefile — printing the report above")
+        print("[spud-remote] no clipboard and no writefile — printing the report below")
         print(text)
-        if guiStatus then guiStatus.Text = "no clipboard — report printed" end
+        setStatus("no clipboard — report printed", 10)
     end)
 
     mkButton("Upload & stop", 82, Color3.fromRGB(38, 108, 64), function()
@@ -513,7 +563,8 @@ end
 task.spawn(function()
     while gui do
         task.wait(0.5)
-        if guiStatus and gui then
+        sampleWhere()
+        if guiStatus and gui and os.clock() >= statusUntil then
             local n = 0
             for _, r in ipairs(records) do if r.kind == "call" then n += 1 end end
             guiStatus.Text = string.format("%d call(s) · %s", n,
