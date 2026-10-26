@@ -469,7 +469,7 @@ local okBuild, errBuild = pcall(function()
         local objects = workspace:FindFirstChild("Objects")
         local folder = objects and objects:FindFirstChild("Equipment")
         local list = folder and folder:GetChildren() or workspace:GetDescendants()
-        local best, bestDist, bestSeat, stashed = nil, nil, nil, 0
+        local best, bestDist, bestSeat, stashed, stashedModel = nil, nil, nil, 0, nil
         for _, d in ipairs(list) do
             if d:IsA("Model") then
                 local etype = equipTypeOf(d)
@@ -482,6 +482,7 @@ local okBuild, errBuild = pcall(function()
                 if isTractor then
                     if equipInStorage(d) then
                         stashed += 1
+                        stashedModel = stashedModel or d -- for auto-spawn
                     else
                         local seat = d:FindFirstChildWhichIsA("VehicleSeat", true)
                             or d:FindFirstChildWhichIsA("Seat", true)
@@ -495,10 +496,7 @@ local okBuild, errBuild = pcall(function()
                 end
             end
         end
-        if not best and stashed > 0 then
-            log(string.format("%d tractor(s) are in storage — spawn one from the Equipment Manager, the loop cannot drive a parked one", stashed))
-        end
-        return best, bestDist, bestSeat
+        return best, bestDist, bestSeat, stashedModel, stashed
     end
 
     -- ▸ AUTO-FARM STEP 3: hitch the plow (rules from the old script:
@@ -555,14 +553,17 @@ local okBuild, errBuild = pcall(function()
     -- type attribute is only a fallback, and the wrong-tool guards in
     -- runPass still catch a neighbor grab. Returns impl, dist, basis.
     local TYPE_MODEL = { Cultivator = "KQF3000", Planter = "KADL" }
-    local function findImplement(typeName, nearPos, tractorModel)
+    local function findImplement(typeName, nearPos, tractorModel, includeStored)
         local folder = equipmentFolder()
         local wantName = TYPE_MODEL[typeName]
         local byName, nameDist, byType, typeDist
         for _, d in ipairs(folder and folder:GetChildren() or {}) do
             -- a stored implement sits in the garage with no live hitch: towing
-            -- it is impossible, so it is never a candidate (probe: 7 of 10)
-            if d:IsA("Model") and d ~= tractorModel and not equipInStorage(d) then
+            -- it is impossible, so it is never a drive/hitch candidate (probe:
+            -- 7 of 10 were parked). includeStored exists ONLY so the respawn
+            -- check can SEE the parked one and bring it out.
+            if d:IsA("Model") and d ~= tractorModel
+                and (includeStored or not equipInStorage(d)) then
                 local dist = (d:GetPivot().Position - nearPos).Magnitude
                 if wantName and d.Name == wantName then
                     if not nameDist or dist < nameDist then
@@ -1066,7 +1067,7 @@ local okBuild, errBuild = pcall(function()
     local function ensureToolNearby(tr, typeName, verb)
         if stopping() then return nil end
         local impl, dist, basis =
-            findImplement(typeName, tr:GetPivot().Position, tr)
+            findImplement(typeName, tr:GetPivot().Position, tr, true)
         if not impl then
             log("no equipment with EquipmentType=" .. typeName .. " found — see list above")
             return nil
@@ -5106,7 +5107,26 @@ local okBuild, errBuild = pcall(function()
         local char = LocalPlayer.Character
         local hum = char and char:FindFirstChildOfClass("Humanoid")
         if not hum then log("no character") return end
-        local tr, dist, seat = findTractor()
+        local tr, dist, seat, stashedTractor = findTractor()
+        if not tr and stashedTractor then
+            -- ▸ AUTO-SPAWN (user: "Auto-spawn it from the Equipment Manager"):
+            --   a parked tractor has no seat, so this used to stop the whole run
+            --   even though the game brings it out in three clicks. The menu
+            --   driver is the proven one (managerAction), never a guess.
+            log("tractor " .. stashedTractor.Name .. " is in storage — spawning it from the Equipment Manager")
+            setStage("Equipment Manager: spawning " .. stashedTractor.Name)
+            respawnTool(stashedTractor.Name, function()
+                local t2 = findTractor()
+                return t2 and t2:GetPivot().Position or nil
+            end, 3)
+            tr, dist, seat = findTractor()
+            if tr then
+                log("✅ tractor " .. tr.Name .. " is out — the run can drive")
+            else
+                log("the Equipment Manager did not bring " .. stashedTractor.Name
+                    .. " out — spawn it once by hand and start the loop again")
+            end
+        end
         if not tr then
             log("tractor not found — no spawned model with EquipmentType=Tractor (check the Equipment Manager, parked ones cannot drive)")
             return
@@ -8127,8 +8147,27 @@ local okBuild, errBuild = pcall(function()
             return "store: " .. tostring(name) .. " is gone — pick again"
         end
         if dest:GetAttribute("InStorage") == true then
-            log("store: '" .. tostring(name) .. "' is parked in storage — spawn it first, then pick it again")
-            return "store: " .. tostring(name) .. " is in storage"
+            -- ▸ AUTO-SPAWN the parked carrier (user: "Auto-spawn it from the
+            --   Equipment Manager") instead of refusing: the store step is the
+            --   only thing that needs it, so bring it out and carry on.
+            log("store: '" .. tostring(name) .. "' is parked — spawning it from the Equipment Manager")
+            pcall(managerAction, dest.Name, "Spawn")
+            local folder = workspace:FindFirstChild("Objects")
+            folder = folder and folder:FindFirstChild("Equipment")
+            for _ = 1, 16 do -- ~8 s for the game to move it out
+                if milkStopping() or farmTookBody() then break end
+                local live = folder and folder:FindFirstChild(dest.Name)
+                if live and live:GetAttribute("InStorage") ~= true then
+                    dest = live
+                    break
+                end
+                task.wait(0.5)
+            end
+            if dest:GetAttribute("InStorage") == true then
+                log("store: '" .. tostring(name) .. "' is still parked — the Equipment Manager didn't spawn it")
+                return "store: " .. tostring(name) .. " is still in storage"
+            end
+            log("store: " .. tostring(dest.Name) .. " is out — filling it")
         end
 
         local held = milkStoreHolding()
