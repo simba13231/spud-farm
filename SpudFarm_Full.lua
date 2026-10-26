@@ -6523,27 +6523,40 @@ local okBuild, errBuild = pcall(function()
     -- ▸ YIELD TO THE FARM LOOP MID-CYCLE. A cycle started while the farm was
     --   resting can outlive that rest, and two drivers on one body fight.
     --   Every long milk step bails the moment the farm loop starts moving.
-    --   NOT a local function: it is used ABOVE this point too (milkHerd /
-    --   milkCowInStall / milkClean), and a forward local reference silently
+    --   NOT a local function: it is used ABOVE this point too (milkHerdArm /
+    --   milkHerdSend / milkCowInStall / milkClean), and a forward local reference silently
     --   becomes a nil GLOBAL - that crashed the first milk cycle.
     farmTookBody = function()
         return loopThread ~= nil and farmResting ~= true
     end
 
-    local function milkHerd(cow, spot)
+    -- herd mode is module state, so ask it who is already in the herd instead
+    -- of guessing from the UI. Read only. GLOBAL: no local slots left here.
+    function milkInHerd(model)
+        local ok, yes = pcall(function()
+            local rs = game:GetService("ReplicatedStorage")
+            return require(rs.Modules.GuiModels.HerdingMode).IsAnimalInHerd(model)
+        end)
+        if not ok then return nil end -- signature unknown: caller treats it as "unread"
+        return yes == true
+    end
+
+    -- ▸ ARM ONE COW (user: "click 5 cows in ONE herding, that's what i meant by
+    --   herd 5 cows at a time"). The first press opens herd mode, the later ones
+    --   ADD to the herd that is already open, so all five ride one lasso.
+    --   Already-herded cows are skipped: pressing Herd again would toggle them
+    --   back out. GLOBAL because the build closure is out of local slots.
+    function milkHerdArm(cow, first)
         local model, name = cow.model, string.format("cow %d", cow.index or 0)
-        local trig = spot:FindFirstChild("ProximityPart", true)
-        local centre = spot:FindFirstChild("Center", true)
-        local dest = (trig and trig.Position) or (centre and centre.Position)
-        if not dest then
-            log(string.format("milk: stall %s has no readable spot to herd into", spot.Name))
-            return false
+        if milkInHerd(model) == true then
+            log(string.format("milk: %s is already in the herd - no press needed", name))
+            return true
         end
         milkTp(model:GetPivot().Position + Vector3.new(0, 3, 0))
         task.wait(0.6)
         local menu, howMany, howOn = milkMenuFor(model)
         for _ = 1, 12 do -- up to 3 s for the game to light up THAT cow's menu
-            if milkStopping() or menu then break end
+            if milkStopping() or farmTookBody() or menu then break end
             task.wait(0.25)
             menu, howMany, howOn = milkMenuFor(model)
         end
@@ -6564,43 +6577,48 @@ local okBuild, errBuild = pcall(function()
             pcall(function() btn:Activate() end)
             how = "activate()"
         end
-        task.wait(0.8)
+        task.wait(1.0)
         local on = milkHerdOn()
         log(string.format("milk: %s - Herd pressed on its own menu (%s) - herd mode %s",
             name, tostring(how), on == nil and "unknown" or (on and "ON" or "did NOT turn on")))
-        milkLogButtons("after Herd")
+        if first then milkLogButtons("after Herd") end
         if on == false then
             log(string.format("milk: %s - the game refused herd mode, leaving it in the field", name))
             return false
         end
-
-        local ch = LocalPlayer.Character
-        local root = ch and ch:FindFirstChild("HumanoidRootPart")
-        if not root then return false end
-        local function entered()
-            local o = spot:FindFirstChild("Occupant")
-            return o and o:IsA("ObjectValue") and o.Value == model
+        local inside = milkInHerd(model)
+        for _ = 1, 4 do -- the selection animates, so give it a beat before a miss
+            if inside ~= nil or milkStopping() then break end
+            task.wait(0.5)
+            inside = milkInHerd(model)
         end
-        local function inStall(seconds)
-            local ts = os.clock()
-            while os.clock() - ts < seconds do
-                if milkStopping() or farmTookBody() then return false end
-                if entered() then
-                    log(string.format("OK milk: %s is in stall %s", name, spot.Name))
-                    return true
-                end
-                task.wait(0.5)
-            end
+        if inside == false then
+            log(string.format("milk: %s - not in the herd after the press", name))
             return false
         end
+        log(string.format("milk: %s - %s", name,
+            inside == nil and "herd press sent (membership unreadable)" or "added to the herd"))
+        return true
+    end
 
-        -- the trip: the lasso is a HerdTarget on the barn, so press the target
-        -- nearest the barn while the cow is armed, then walk the last stretch.
-        -- It is a UI animation: give the game time to draw the targets before
-        -- pressing (user: "it's pressing the lasso too fast").
+    -- ▸ ONE LASSO FOR THE WHOLE HERD. Every cow is armed and herd mode is still
+    --   open, so a single press of the barn's HerdTarget sends the lot. We then
+    --   just count the stalls that fill up instead of guessing per cow.
+    function milkHerdSend(picks)
+        if #picks == 0 then return 0 end
+        local stall = picks[1].spot
+        local trig = stall:FindFirstChild("ProximityPart", true)
+        local centre = stall:FindFirstChild("Center", true)
+        local dest = (trig and trig.Position) or (centre and centre.Position)
+        if not dest then
+            log("milk: the stall has no readable spot to stand on")
+            return 0
+        end
+        milkTp(dest + Vector3.new(0, 3, 0))
+        task.wait(1.8) -- herd mode re-draws the targets where we land, not before
         local targets = milkHerdTargets()
         for _ = 1, 6 do -- up to 3 s for the targets to appear
-            if #targets > 0 or milkStopping() then break end
+            if #targets > 0 or milkStopping() or farmTookBody() then break end
             task.wait(0.5)
             targets = milkHerdTargets()
         end
@@ -6609,61 +6627,48 @@ local okBuild, errBuild = pcall(function()
                 t.pos and string.format("%d,%d,%d", t.pos.X, t.pos.Y, t.pos.Z) or "?",
                 t.dist and (tostring(t.dist) .. " studs") or "?"))
         end
-        local pickT = targets[1]
-        if pickT and pickT.trig then
-            local c2, how2 = invokeHandlers(pickT.trig)
-            if not c2 then pcall(function() pickT.trig:Activate() end) end
-            log(string.format("milk: %s - lasso pressed on '%s' (%s)", name, pickT.label,
-                tostring(how2 or "activate()")))
-        else
-            log(string.format("milk: %s - herd mode offered no HerdTarget to press", name))
-        end
-        task.wait(2.0) -- let the cow actually take the order before we leave
-        milkTp(dest + Vector3.new(0, 3, 0))
-        task.wait(1.8)
-        -- the wiki presses the lasso twice: once at the cow, once at the barn
-        -- door. Herd mode may drop the first press when we leave, so re-press.
-        local again = milkHerdTargets()[1]
-        if again and again.trig then
-            local c3, how3 = invokeHandlers(again.trig)
-            if not c3 then pcall(function() again.trig:Activate() end) end
-            log(string.format("milk: %s - lasso at the stall on '%s' (%s)", name,
-                again.label, tostring(how3 or "activate()")))
-            task.wait(1.2)
-        end
-        if inStall(15) then return true end
-
-        -- fallback: if the door click did nothing, walk it in (the cow follows)
-        local t0, beat = os.clock(), 0
-        while os.clock() - t0 < 45 do
-            if milkStopping() or farmTookBody() then return false end
-            if entered() then
-                log(string.format("OK milk: %s is in stall %s", name, spot.Name))
-                return true
+        local function landed()
+            local n = 0
+            for _, p in ipairs(picks) do
+                local o = p.spot:FindFirstChild("Occupant")
+                if o and o:IsA("ObjectValue") and o.Value then n += 1 end
             end
-            local p = root.Position
-            local d = Vector3.new(dest.X, p.Y, dest.Z) - p
-            if d.Magnitude > 3 then
-                local step = d.Unit * math.min(3, d.Magnitude)
-                root.CFrame = CFrame.new(p + step) * (root.CFrame - p)
-            end
-            if os.clock() - beat > 5 then
-                beat = os.clock()
-                log(string.format("milk: %s - %d to stall %s, cow %d behind", name,
-                    math.floor(d.Magnitude), spot.Name,
-                    math.floor((model:GetPivot().Position - root.Position).Magnitude)))
-            end
-            task.wait(0.35)
+            return n
         end
-        log(string.format("milk: %s did not enter stall %s (%d studs away, state %s)", name,
-            spot.Name, math.floor((model:GetPivot().Position - root.Position).Magnitude),
-            tostring(milkStateOf(model))))
-        return false
+        local got = 0
+        for attempt = 1, 2 do
+            local t = milkHerdTargets()[1]
+            if not (t and t.trig) then
+                log("milk: herd mode offered no HerdTarget to press")
+                break
+            end
+            local c, how = invokeHandlers(t.trig)
+            if not c then pcall(function() t.trig:Activate() end) end
+            log(string.format("milk: lasso pressed on '%s' (%s) - %d cow(s) armed", t.label,
+                tostring(how or "activate()"), #picks))
+            task.wait(2.0) -- let the herd actually take the order
+            local t0 = os.clock()
+            while os.clock() - t0 < 25 do
+                if milkStopping() or farmTookBody() then break end
+                got = landed()
+                if got >= #picks then break end
+                task.wait(0.5)
+            end
+            if got > 0 or attempt == 2 then break end
+            log("milk: no cow moved - one more lasso press")
+        end
+        for _, p in ipairs(picks) do
+            local o = p.spot:FindFirstChild("Occupant")
+            local v = o and o:IsA("ObjectValue") and o.Value
+            log(string.format("milk: cow %d -> stall %s %s", p.cow.index or 0, p.spot.Name,
+                v and "OCCUPIED" or "still empty"))
+        end
+        return got
     end
 
     -- ▸ ONE HERDING RUN = UP TO 5 COWS (user: "herd 5 cows per herding and milk
-    --   them all then do the checks then restart"). Fills the barn to 5 parked
-    --   cows, then hands the body back so the caller can milk the whole batch.
+    --   them all then do the checks then restart"): arm them all into one herd,
+    --   one lasso, then hand the body back so the caller can milk the batch.
     function milkHerdBatch(stalls, cows)
         local free, parked = {}, 0
         for _, s in ipairs(stalls or {}) do
@@ -6676,22 +6681,31 @@ local okBuild, errBuild = pcall(function()
                 end
             end
         end
-        local done, tried = 0, 0
+        if parked >= 5 or #free == 0 then return 0, 0, parked end
+        local picks, tried = {}, 0
         for _, c in ipairs(cows or {}) do
-            if parked >= 5 or #free == 0 then break end
+            if #picks >= 5 - parked or #free == 0 then break end
             if not c.inBarn and not c.stall and c.state ~= "IdleLocked"
                 and (c.percent or 0) >= 300 then
-                local slot = table.remove(free, 1)
                 tried += 1
-                parked += 1
-                if milkHerd(c, slot.spot) then done += 1 end
-                task.wait(1.0) -- let the stall settle before closing herd mode
-                milkHerdOff()
-                task.wait(1.5) -- and before the next cow's herd press
+                local slot = table.remove(free, 1)
+                if milkHerdArm(c, tried == 1) then
+                    picks[#picks + 1] = { spot = slot.spot, cow = c }
+                else
+                    free[1] = slot -- it stayed in the field, so keep its stall
+                end
+                task.wait(1.0) -- gap between Herd presses, the menu animates
                 if milkStopping() or farmTookBody() then break end
             end
         end
-        return done, tried, parked
+        local done = 0
+        if #picks > 0 then
+            done = milkHerdSend(picks)
+            task.wait(1.0) -- let the stalls settle before herd mode closes
+            milkHerdOff()
+            task.wait(1.5) -- and before the next cycle opens its own herd
+        end
+        return done, tried, parked + done
     end
 
     -- ▸ THE MILK STEP (wiki: "go inside the barn to the stall the cow is in and
