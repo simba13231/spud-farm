@@ -8393,13 +8393,36 @@ local okBuild, errBuild = pcall(function()
                 local jug = jugs[1]
                 if not jug then break end
                 milkTp(jug.part.Position + Vector3.new(0, 3, 0))
-                task.wait(0.8)
+                -- ▸ POLL, don't sleep (user: "make it load up the milk faster"):
+                --   the game offering Carry IS the proof the jug is in reach,
+                --   so E goes out the moment it appears (was a flat 0.8 s).
+                task.wait(0.15) -- floor: let the teleport land
+                for _ = 1, 6 do -- ≤0.6 s more, usually the first read
+                    if milkStopping() or farmTookBody() then break end
+                    local up = false
+                    for _, a in ipairs(milkStoreActs()) do
+                        if a.name == "Carry" or a.name == "LockedCarry" then
+                            up = true
+                            break
+                        end
+                    end
+                    if up then break end
+                    task.wait(0.1)
+                end
                 if milkStopping() or farmTookBody() then break end
                 pressKey(Enum.KeyCode.E) -- Carry = E
-                task.wait(0.9)
+                -- the jug appearing in CarryLinks is the proof it is in our
+                -- hands — no need to sit out the old 0.9 s when it is instant
+                for _ = 1, 9 do -- ≤0.9 s, normally the first read
+                    if milkStoreHolding() then break end
+                    task.wait(0.1)
+                end
                 if not milkStoreHolding() then
                     milkFeedButton("Carry") -- the game's own visible Carry button
-                    task.wait(0.7)
+                    for _ = 1, 7 do -- ≤0.7 s (was a flat wait)
+                        if milkStoreHolding() then break end
+                        task.wait(0.1)
+                    end
                 end
                 if not milkStoreHolding() then
                     log("store: E did not pick up " .. jug.model:GetFullName()
@@ -8413,11 +8436,12 @@ local okBuild, errBuild = pcall(function()
             milkTp(stand + Vector3.new(0, 3, 0))
             -- ▸ POLL for the fill action to be offered here instead of a flat
             --   1.1 s (its absence is what the adornee fallback below is for).
-            task.wait(0.4)
-            for _ = 1, 6 do -- ≤0.9 s more
+            --   Tighter than before so a second barrel does not pay 1.3 s.
+            task.wait(0.25)
+            for _ = 1, 10 do -- ≤0.8 s more
                 if milkStopping() or farmTookBody() then break end
                 if milkStoreFillAction() then break end
-                task.wait(0.15)
+                task.wait(0.08)
             end
             if milkStopping() or farmTookBody() then break end
             -- nothing on offer at the pivot? stand where the game's own action
@@ -8426,7 +8450,12 @@ local okBuild, errBuild = pcall(function()
                 local ad = milkStoreAdornee(dest)
                 if ad and (ad.Position - stand).Magnitude > 1 then
                     milkTp(ad.Position + Vector3.new(0, 3, 0))
-                    task.wait(0.9)
+                    task.wait(0.25)
+                    for _ = 1, 8 do -- ≤0.8 s, stops the moment the action is there
+                        if milkStopping() or farmTookBody() then break end
+                        if milkStoreFillAction() then break end
+                        task.wait(0.1)
+                    end
                 end
             end
             local before, count = milkStoreAmount(dest), #milkStoreJugs(cf, size)
@@ -8436,9 +8465,11 @@ local okBuild, errBuild = pcall(function()
                 how, dest.Name, count, tostring(before or "?"), tostring(cap or "?")))
 
             local done = false
-            for _ = 1, 12 do
+            -- read every 0.2 s (was 0.5): the barrel lands in well under a
+            -- second, and the old cadence waited up to 6 s to notice
+            for _ = 1, 30 do -- ≤6 s, unchanged ceiling
                 if milkStopping() or farmTookBody() then break end
-                task.wait(0.5)
+                task.wait(0.2)
                 local now, nowCount = milkStoreAmount(dest), #milkStoreJugs(cf, size)
                 local heldNow = milkStoreHolding()
                 if (heldBefore and not heldNow) or nowCount < count
@@ -8833,6 +8864,34 @@ local okBuild, errBuild = pcall(function()
             scanFieldsReport()
         end
     end)
+
+    -- ▸ FPS METER (user: "im still on 8-9 fps so something is eating my fps
+    --   big time"). NOTHING in this script runs every frame except this one
+    --   counter — there is no heartbeat loop and nothing is drawn per frame —
+    --   so this line is how the claim gets settled with a number instead of a
+    --   guess: read one sample with every toggle OFF, then one with the loop
+    --   on. It also names which of our threads are alive at the time.
+    do
+        local runService = game:GetService("RunService")
+        local frames, mark = 0, os.clock()
+        pcall(function()
+            runService.RenderStepped:Connect(function() frames += 1 end)
+        end)
+        task.spawn(function()
+            while true do
+                task.wait(30)
+                local now = os.clock()
+                local span = now - mark
+                local fps = span > 0 and (frames / span) or 0
+                frames, mark = 0, now
+                print(string.format("[spud] fps %.0f · farm %s · milk %s · delivery %s",
+                    fps,
+                    loopThread and "on" or "off",
+                    milkThread and "on" or "off",
+                    milkStoreAuto and "on" or "off"))
+            end
+        end)
+    end
 end)
 
 if not okBuild then
