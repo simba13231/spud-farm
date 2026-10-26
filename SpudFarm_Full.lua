@@ -6043,6 +6043,169 @@ local okBuild, errBuild = pcall(function()
     })
     log("milk: users — " .. table.concat(milkChoices0, ", "))
 
+    ------------------------------------------------------------
+    -- ▸ WHERE THE MILK GOES (user: "when it has nothing to do i need a
+    --   drop down in the milk section that asks wich trailer/silo to put the
+    --   milk in"). The list is read from the LIVE world, never from a guessed
+    --   model name: Objects.Equipment holds the trailers/trucks and
+    --   Objects.Buildings the silos, and a model only counts when its name or
+    --   EquipmentType looks like a liquid store. A milk/liquid label or an
+    --   n/m readout ranks it first, so the milk truck and the milk silo sit at
+    --   the top instead of a hay trailer that merely says "Trailer".
+    ------------------------------------------------------------
+    function milkStoreCandidate(m)
+        local nm = tostring(m.Name):lower()
+        for _, w in ipairs({ "silo", "trailer", "tanker", "tank", "liquid",
+                             "milk", "cistern", "reservoir" }) do
+            if nm:find(w, 1, true) then return true end
+        end
+        local et = tostring(m:GetAttribute("EquipmentType") or ""):lower()
+        if et == "trailer" or et == "truck" or et == "transport"
+            or et == "liquidcarrier" then
+            return true
+        end
+        for _, d in ipairs(m:GetDescendants()) do
+            if tostring(d.Name):lower():find("milktype", 1, true) then return true end
+        end
+        return false
+    end
+
+    -- the game's own liquid signals, best first
+    function milkStoreScore(m)
+        local score = 0
+        local nm = tostring(m.Name):lower()
+        if nm:find("milk", 1, true) then score += 7 end
+        if nm:find("liquid", 1, true) then score += 6 end
+        if nm:find("silo", 1, true) then score += 5 end
+        if nm:find("tank", 1, true) or nm:find("cistern", 1, true)
+            or nm:find("reservoir", 1, true) then score += 4 end
+        if nm:find("trailer", 1, true) then score += 3 end
+        local et = tostring(m:GetAttribute("EquipmentType") or ""):lower()
+        if et == "trailer" then score += 3
+        elseif et == "truck" or et == "transport" then score += 2 end
+        for _, d in ipairs(m:GetDescendants()) do
+            local dn = tostring(d.Name):lower()
+            if dn:find("milktype", 1, true) then score += 7 end
+            if d:IsA("TextLabel") then
+                local t = tostring(d.Text):lower()
+                if t:find("milk", 1, true) then score += 3
+                elseif t:find("liquid", 1, true) then score += 2 end
+            end
+        end
+        return score
+    end
+
+    -- returns display names + name→model, sorted the way the tab shows them
+    function milkStoreChoices()
+        local out, seen = {}, {}
+        local objects = workspace:FindFirstChild("Objects")
+        local root = LocalPlayer.Character
+            and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        local stored = 0
+        local function consider(folder)
+            for _, m in ipairs(folder and folder:GetChildren() or {}) do
+                if m:IsA("Model") and not seen[m] and milkStoreCandidate(m) then
+                    seen[m] = true
+                    if m:GetAttribute("InStorage") == true then
+                        stored += 1
+                    else
+                        local pos
+                        pcall(function() pos = m:GetPivot().Position end)
+                        out[#out + 1] = {
+                            model = m, pos = pos, score = milkStoreScore(m),
+                            d = (pos and root) and (pos - root.Position).Magnitude or 0,
+                        }
+                    end
+                end
+            end
+        end
+        consider(objects and objects:FindFirstChild("Equipment"))
+        consider(objects and objects:FindFirstChild("Buildings"))
+        table.sort(out, function(a, b)
+            if a.score ~= b.score then return a.score > b.score end
+            return a.d < b.d
+        end)
+        local names, map, used = {}, {}, {}
+        for _, c in ipairs(out) do
+            local name, n = c.model.Name, 2
+            while used[name] do name = c.model.Name .. " #" .. n; n += 1 end
+            used[name] = true
+            names[#names + 1] = name
+            map[name] = c.model
+        end
+        if #names == 0 then
+            names[1] = "(no trailer or silo found)"
+        end
+        if stored > 0 and stored ~= milkStoreStoredShown then
+            milkStoreStoredShown = stored
+            log(string.format("milk store: %d stored trailer/silo(s) not listed — spawn one to store milk", stored))
+        end
+        return names, map
+    end
+
+    -- keep the picker true without fighting the user's pick (only the LIST is
+    -- rewritten, and only when it actually changed)
+    function milkStoreRefresh(quiet)
+        local names, map = milkStoreChoices()
+        milkStoreMap = map
+        local opt = Fluent.Options and Fluent.Options.milkStore
+        if not opt then return names, map end
+        local shown = table.concat(names, "\n")
+        local rewrote = false
+        if shown ~= (milkStoreShown or "") then
+            milkStoreShown = shown
+            rewrote = true
+            local ok = pcall(function() opt:SetValues(names) end)
+            if not ok then ok = pcall(function() opt:Refresh(names) end) end
+            if not ok and not milkStoreRefreshWarned then
+                milkStoreRefreshWarned = true
+                log("milk store: this build's dropdown can't be refilled — reload the script to see a new trailer/silo")
+            end
+        end
+        if not milkStorePick or not map[milkStorePick] then
+            local was = milkStorePick
+            milkStorePick = names[1]
+            milkStoreTarget = map[milkStorePick]
+            pcall(function() opt:SetValue(milkStorePick) end)
+            if not quiet or (was and was ~= milkStorePick) then
+                log("milk store: " .. tostring(milkStorePick))
+            end
+        else
+            milkStoreTarget = map[milkStorePick]
+            -- SetValues can clear the shown value: put the user's pick back
+            if rewrote then pcall(function() opt:SetValue(milkStorePick) end) end
+        end
+        return names, map
+    end
+
+    do
+        -- a scan failure must never take the whole GUI down with it (this build
+        -- has died at load before); the dropdown then says it found nothing
+        local ok0, names0, map0 = pcall(milkStoreChoices)
+        if not ok0 then
+            log("milk store: scan failed — " .. tostring(names0))
+            names0, map0 = nil, nil
+        end
+        names0 = names0 or { "(no trailer or silo found)" }
+        map0 = map0 or {}
+        milkStoreMap = map0
+        milkStorePick = names0[1]
+        milkStoreTarget = map0[milkStorePick]
+        milkStoreShown = table.concat(names0, "\n")
+        Tabs.Milk:CreateDropdown("milkStore", {
+            Title = "Store milk in",
+            Values = names0,
+            Multi = false,
+            Default = milkStorePick,
+            Callback = function(v)
+                milkStorePick = v
+                milkStoreTarget = milkStoreMap and milkStoreMap[v] or nil
+                log("milk store: " .. tostring(v))
+            end,
+        })
+        log("milk: store choices — " .. table.concat(names0, ", "))
+    end
+
     -- ▸ the tab SHOWS what the loop sees (user: "it should show cows and a
     --   dirty stall"): the plot it picked, every cow and its production %, and
     --   the stall verdict. The console keeps the same text.
@@ -7502,6 +7665,340 @@ local okBuild, errBuild = pcall(function()
             missed > 0 and ", a fill failed" or "")
     end
 
+    ----------------------------------------------------------------
+    -- ▸ STORE THE MILK (user: "when it has nothing to do ... wich
+    --   trailer/silo to put the milk in"). A cow's milk drops into
+    --   Objects.DraggableObjects as a "Milk" model — the same count the milk
+    --   step already watches. This step carries each jug to the picked
+    --   carrier and presses the GAME'S OWN fill/load action. A jug only
+    --   counts as stored when it leaves the world (or the carrier's own
+    --   n/m readout rises); a key press alone never counts.
+    ----------------------------------------------------------------
+    function milkStoreJugs(cf, size)
+        local out = {}
+        local objs = workspace:FindFirstChild("Objects")
+        local box = objs and objs:FindFirstChild("DraggableObjects")
+        local root = LocalPlayer.Character
+            and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        for _, ch in ipairs(box and box:GetChildren() or {}) do
+            if tostring(ch.Name):lower():find("milk", 1, true) then
+                local part = ch:IsA("BasePart") and ch
+                    or (ch:IsA("Model")
+                        and (ch.PrimaryPart or ch:FindFirstChildWhichIsA("BasePart", true)))
+                local pos = part and part.Position
+                -- only the jugs at THIS plot: another farm's milk is not ours
+                if part and (not (cf and size) or milkInBox(pos, cf, size, 150)) then
+                    out[#out + 1] = {
+                        model = ch, part = part,
+                        d = root and (pos - root.Position).Magnitude or 0,
+                    }
+                end
+            end
+        end
+        table.sort(out, function(a, b) return a.d < b.d end)
+        return out
+    end
+
+    -- what the character is holding (nil = bare hands). CarryLinks is the same
+    -- folder the feed step uses, so one successful Carry shows up there.
+    function milkStoreHolding()
+        local ch = LocalPlayer.Character
+        local links = ch and ch:FindFirstChild("CarryLinks")
+        local first = links and links:GetChildren()[1]
+        return first and tostring(first.Name) or nil
+    end
+
+    -- where to stand at the carrier: its own billboard Adornee first (that is
+    -- the spot the game points its fill action at), then a trigger/centre
+    -- part, then the model's pivot.
+    function milkStoreStand(m)
+        local p
+        pcall(function()
+            for _, d in ipairs(m:GetDescendants()) do
+                if d:IsA("BillboardGui") then
+                    local nm = tostring(d.Name):lower()
+                    local ad = d.Adornee
+                    if ad and ad:IsA("BasePart")
+                        and (nm:find("milk", 1, true) or nm:find("liquid", 1, true)
+                            or nm:find("fill", 1, true) or nm:find("load", 1, true)
+                            or nm:find("deposit", 1, true) or nm:find("silo", 1, true)) then
+                        p = ad.Position
+                        return
+                    end
+                end
+            end
+            local ad = m:FindFirstChild("Adornee", true)
+            if ad and ad:IsA("BasePart") then
+                p = ad.Position
+                return
+            end
+            for _, nm in ipairs({ "Trigger", "Center", "Prompt", "Primary" }) do
+                local t = m:FindFirstChild(nm, true)
+                if t and t:IsA("BasePart") then p = t.Position return end
+            end
+            p = m:GetPivot().Position
+        end)
+        return p
+    end
+
+    -- the carrier's own fill readout ("Empty 0/50" on the liquid truck, or a
+    -- plain n/m label); nil when this build stores it some other way
+    function milkStoreAmount(m)
+        -- a truck can show more than one n/m (fuel, load, milk): the readout
+        -- that NAMES milk/liquid wins, so "Amount 20/100" never masks
+        -- "MilkTypeLabel Empty 0/50"
+        local best, bestScore = nil, -1
+        for _, d in ipairs(m:GetDescendants()) do
+            if d:IsA("TextLabel") then
+                local a, c = tostring(d.Text):match("(%d+)%s*/%s*(%d+)")
+                if a then
+                    local nm = tostring(d.Name):lower()
+                    local t = tostring(d.Text):lower()
+                    local score = 0
+                    if nm:find("milk", 1, true) then score += 4 end
+                    if t:find("milk", 1, true) then score += 3 end
+                    if nm:find("liquid", 1, true) then score += 2 end
+                    if t:find("liquid", 1, true) then score += 1 end
+                    if score > bestScore then
+                        bestScore = score
+                        best = { now = tonumber(a), cap = tonumber(c) }
+                    end
+                end
+            end
+        end
+        if not best then
+            for _, nm in ipairs({ "Milk", "Amount", "Contents", "Liquid" }) do
+                local v = m:FindFirstChild(nm, true)
+                if v and v:IsA("ValueBase") then
+                    local ok, x = pcall(function() return tonumber(v.Value) end)
+                    if ok and x then
+                        local cv = m:FindFirstChild("MaxCapacity", true)
+                            or m:FindFirstChild("Capacity", true)
+                        local cap
+                        if cv then pcall(function() cap = tonumber(cv.Value) end) end
+                        best = { now = x, cap = cap }
+                        break
+                    end
+                end
+            end
+        end
+        return best and best.now, best and best.cap
+    end
+
+    -- the visible context actions (name + the game's printed bind)
+    function milkStoreActs()
+        local out = {}
+        local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+        pcall(function()
+            local btns = pg.GuiViews.HUD.PCGP_ContextActions.Buttons
+            for _, b in ipairs(btns:GetChildren()) do
+                if b:IsA("GuiObject") and b.Visible then
+                    local bind = ""
+                    local bd = b:FindFirstChild("Bind")
+                    if bd then
+                        local ok, v = pcall(function() return bd.Text end)
+                        if not ok or v == nil or v == "" then
+                            pcall(function() v = bd.Value end)
+                        end
+                        bind = tostring(v or "")
+                    end
+                    out[#out + 1] = { btn = b, name = tostring(b.Name), bind = bind }
+                end
+            end
+        end)
+        return out
+    end
+
+    -- the game's own fill/load action, most specific first. Never Unload: that
+    -- empties the trailer instead of filling it.
+    function milkStoreFillAction()
+        local acts = milkStoreActs()
+        for _, want in ipairs({ "FillLiquidCarrier", "FillLiquidContainer",
+                                "LoadTrailer", "FillTrailer", "FillSilo",
+                                "DepositMilk", "LoadDraggables", "Deposit" }) do
+            for _, a in ipairs(acts) do
+                if a.name == want then return a end
+            end
+        end
+        for _, a in ipairs(acts) do
+            local nm = a.name:lower()
+            if not nm:find("unload", 1, true)
+                and (nm:find("fill", 1, true) or nm:find("load", 1, true)
+                    or nm:find("deposit", 1, true)) then
+                return a
+            end
+        end
+        return nil
+    end
+
+    -- the part the game's own context action is adorned to, when it belongs to
+    -- this carrier: that is where the action really lights up, so it is a
+    -- better stand point than a model pivot (the pivot can sit inside a tank)
+    function milkStoreAdornee(dest)
+        local found
+        local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+        pcall(function()
+            local bills = pg.GuiViews.HUD.PCGP_ContextActions.Billboards
+            for _, b in ipairs(bills:GetChildren()) do
+                if b:IsA("BillboardGui") then
+                    local ad = b.Adornee
+                    if ad and ad:IsA("BasePart") and ad:IsDescendantOf(dest) then
+                        local nm = tostring(b.Name):lower()
+                        local liquid = nm:find("fill", 1, true) or nm:find("load", 1, true)
+                            or nm:find("milk", 1, true) or nm:find("liquid", 1, true)
+                            or nm:find("deposit", 1, true)
+                        if not found or liquid then found = ad end
+                        if liquid then return end
+                    end
+                end
+            end
+        end)
+        return found
+    end
+
+    -- press it the way every other action in this script is pressed: the
+    -- game's own handlers first (no mouse), then its printed bind, then V
+    -- (FillLiquidCarrier = V in the context dump)
+    function milkStorePress(a)
+        if a then
+            if type(invokeHandlers) == "function" then
+                local ok, how = invokeHandlers(a.btn)
+                if ok then return "button " .. a.name .. " (" .. tostring(how) .. ")" end
+            end
+            pcall(function() a.btn:Activate() end)
+            task.wait(0.35)
+            if a.bind ~= "" then
+                local okK, key = pcall(function() return Enum.KeyCode[a.bind] end)
+                if okK and key then
+                    pressKey(key)
+                    return "key " .. a.bind
+                end
+            end
+            return "activate " .. a.name
+        end
+        pressKey(Enum.KeyCode.V)
+        return "V"
+    end
+
+    -- returns the line the milk panel shows for the store step, or nil when
+    -- nothing was waiting (a quiet cycle stays quiet)
+    function milkStoreDeposit(cf, size)
+        local name = milkStorePick
+        if not name or name:sub(1, 1) == "(" then return nil end
+        local dest = milkStoreTarget
+        if not dest or dest.Parent == nil then
+            milkStoreRefresh(true)
+            dest = milkStoreTarget
+        end
+        if not dest or dest.Parent == nil then
+            log("store: '" .. tostring(name) .. "' is not in the world — pick another trailer/silo")
+            return "store: " .. tostring(name) .. " is gone — pick again"
+        end
+
+        local held = milkStoreHolding()
+        local jugs = milkStoreJugs(cf, size)
+        if #jugs == 0 and not held then
+            -- say it now and then: silence looked like a broken step
+            if not milkStoreQuietAt or os.clock() - milkStoreQuietAt > 120 then
+                milkStoreQuietAt = os.clock()
+                log("store: no milk jugs waiting at this plot — destination " .. tostring(name))
+            end
+            return nil
+        end
+
+        local stand = milkStoreStand(dest)
+        if not stand then
+            log("store: no stand point found at " .. dest:GetFullName())
+            return "store: no stand point at " .. dest.Name
+        end
+        local start, cap = milkStoreAmount(dest)
+        log(string.format("store: %d milk jug(s) waiting — destination %s at %s/%s",
+            #jugs, dest.Name, tostring(start or "?"), tostring(cap or "?")))
+
+        local moved, missed, picked = 0, 0, false
+        for _ = 1, 20 do
+            if milkStopping() or farmTookBody() then break end
+            jugs = milkStoreJugs(cf, size)
+            held = milkStoreHolding()
+            if #jugs == 0 and not held then break end
+
+            if not held then
+                local jug = jugs[1]
+                if not jug then break end
+                milkTp(jug.part.Position + Vector3.new(0, 3, 0))
+                task.wait(0.8)
+                if milkStopping() or farmTookBody() then break end
+                pressKey(Enum.KeyCode.E) -- Carry = E
+                task.wait(0.9)
+                if not milkStoreHolding() then
+                    milkFeedButton("Carry") -- the game's own visible Carry button
+                    task.wait(0.7)
+                end
+                if not milkStoreHolding() then
+                    log("store: E did not pick up " .. jug.model:GetFullName()
+                        .. " — the game offers: " .. milkFeedActs())
+                    break
+                end
+                picked = true
+                log("store: carrying " .. jug.model.Name)
+            end
+
+            milkTp(stand + Vector3.new(0, 3, 0))
+            task.wait(1.1)
+            if milkStopping() or farmTookBody() then break end
+            -- nothing on offer at the pivot? stand where the game's own action
+            -- is adorned and ask again
+            if not milkStoreFillAction() then
+                local ad = milkStoreAdornee(dest)
+                if ad and (ad.Position - stand).Magnitude > 1 then
+                    milkTp(ad.Position + Vector3.new(0, 3, 0))
+                    task.wait(0.9)
+                end
+            end
+            local before, count = milkStoreAmount(dest), #milkStoreJugs(cf, size)
+            local heldBefore = milkStoreHolding()
+            local how = milkStorePress(milkStoreFillAction())
+            log(string.format("store: sent %s at %s (%d jug(s) outside, %s/%s)",
+                how, dest.Name, count, tostring(before or "?"), tostring(cap or "?")))
+
+            local done = false
+            for _ = 1, 12 do
+                if milkStopping() or farmTookBody() then break end
+                task.wait(0.5)
+                local now, nowCount = milkStoreAmount(dest), #milkStoreJugs(cf, size)
+                local heldNow = milkStoreHolding()
+                if (heldBefore and not heldNow) or nowCount < count
+                    or (now and before and now > before) then
+                    done = true
+                    break
+                end
+            end
+            if done then
+                moved += 1
+                local now, c2 = milkStoreAmount(dest)
+                log(string.format("store: jug accepted — %s/%s, %d left outside",
+                    tostring(now or "?"), tostring(c2 or cap or "?"), #milkStoreJugs(cf, size)))
+            else
+                missed += 1
+                log("store: the fill did not register — the game offers: " .. milkFeedActs())
+                if picked then
+                    pressKey(Enum.KeyCode.X) -- Drop = X: never leave OUR jug in hand
+                    task.wait(0.5)
+                end
+                break
+            end
+        end
+
+        if moved == 0 and missed == 0 then
+            return held and ("store: hands are full (" .. tostring(held) .. ")")
+                or "store: the milk jugs could not be reached"
+        end
+        local final, fcap = milkStoreAmount(dest)
+        return string.format("store: %d jug(s) into %s%s (%s/%s)",
+            moved, dest.Name, missed > 0 and ", a drop failed" or "",
+            tostring(final or "?"), tostring(fcap or cap or "?"))
+    end
+
     local function milkCycle()
         -- ▸ SHARE THE BODY (user: "when the milk loop is on the farm loop can
         --   still run"). They move the SAME character, so they can never work
@@ -7519,6 +8016,12 @@ local okBuild, errBuild = pcall(function()
             milkSetStatus("no user picked")
             log("milk: no user picked - the dropdown above names whose plot to work on")
             return false
+        end
+        -- trailers/silos stream in and out: keep the store picker true without
+        -- fighting a pick (the list is only rewritten when it changed)
+        if not milkStoreScanAt or os.clock() - milkStoreScanAt > 20 then
+            milkStoreScanAt = os.clock()
+            pcall(milkStoreRefresh, true)
         end
         local plot, plotsSeen = milkPlotOf(owner)
         local cf, size
@@ -7574,6 +8077,16 @@ local okBuild, errBuild = pcall(function()
         --   the milk so a milking batch never waits on a feed trip.
         local feedLine = milkFeedTopUp(cf, size)
 
+        -- ▸ 2c3. THE IDLE JOB (user: "when it has nothing to do ... wich
+        --   trailer/silo to put the milk in"): every other step is done, so
+        --   the milk jugs the barn has been collecting go into the picked
+        --   carrier. Silent when nothing is waiting.
+        local okStore, storeLine = pcall(milkStoreDeposit, cf, size)
+        if not okStore then
+            log("store: step failed — " .. tostring(storeLine))
+            storeLine = nil
+        end
+
         -- ▸ 2d. LEFTOVER CHECK (user: "check to see if there are any left over
         --   cows"): a cow that never walked in still stands in the field, so
         --   count it here instead of letting the batch silently come up short.
@@ -7621,6 +8134,7 @@ local okBuild, errBuild = pcall(function()
         if herdLine then lines[#lines + 1] = herdLine end
         if milkLine then lines[#lines + 1] = milkLine end
         if feedLine then lines[#lines + 1] = feedLine end
+        if storeLine then lines[#lines + 1] = storeLine end
         if leftLine then lines[#lines + 1] = leftLine end
         milkSetStatus(table.concat(lines, "\n"))
         log("milk: " .. table.concat(lines, " | "))
