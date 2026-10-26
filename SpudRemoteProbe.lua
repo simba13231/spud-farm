@@ -213,6 +213,35 @@ local function buildReport()
     for _, r in ipairs(records) do if r.kind == "call" then calls += 1 end end
     w(string.format("recorded calls: %d", calls))
 
+    -- ▸ THE ONES THIS PROBE EXISTS FOR. The inventory already named them
+    --   (EVTFillLiquidCarrier, EVTRequestToCarry/Drop, EVTAnimalInteraction,
+    --   EVTCollectAnimalProduction), so the report now puts their calls FIRST
+    --   instead of making them a needle in a busy session.
+    w("")
+    w("══════ MILK CALLS (the ones that matter) ══════")
+    local suspects = { "FillLiquidCarrier", "RequestToCarry", "RequestToDrop",
+        "AnimalInteraction", "CollectAnimalProduction", "LiquidSiloVisual",
+        "HarvesterPourAnimation", "EquipmentCarryInfo", "Juicery" }
+    local seen, missing = 0, {}
+    for _, s in ipairs(suspects) do
+        local fired = false
+        for _, r in ipairs(records) do
+            if r.kind == "call" and r.name:lower():find(s:lower(), 1, true) then
+                fired = true
+                seen += 1
+                w(string.format("  %s:%s(%s)", r.name, r.method, r.args))
+            end
+        end
+        if not fired then missing[#missing + 1] = s end
+    end
+    if seen == 0 then
+        w("  NONE — nothing was recorded. The jug/Fill/cow steps have to be done")
+        w("  WHILE the panel is counting: the number must go up after each one.")
+    end
+    if #missing > 0 then
+        w("  not seen: " .. table.concat(missing, ", "))
+    end
+
     w("")
     w("══════ REMOTE INVENTORY (ReplicatedStorage) ══════")
     local list = remoteList()
@@ -469,4 +498,5 @@ print("2) walk to the truck and press Fill (V) once")
 print("3) milk one cow")
 print("4) press  Copy report  on the little panel (or run spudRemoteStop()) and send it")
 print("   (spudRemoteMark(\"carry\") / (\"fill\") / (\"milk\") between steps if you like)")
+print("   the panel number MUST rise after each action — 0 means nothing was captured")
 print("════════════════════════════════════════")
