@@ -7441,9 +7441,35 @@ local okBuild, errBuild = pcall(function()
         return n
     end
 
+    -- ▸ IS THIS COW IN A STALL RIGHT NOW? Two independent proofs, both from the
+    --   game: the stall's own Occupant value points at the model, or the cow's
+    --   state is IdleLocked ("parked in a barn stall" per the dump). A cow that
+    --   is still walking in has neither, and milking it just burns 10 s and
+    --   then opens the gate on a cow that only just arrived.
+    function milkInStallNow(cow)
+        if not cow or not cow.model then return false end
+        local occupied = false
+        if cow.stall then
+            local o = cow.stall:FindFirstChild("Occupant")
+            occupied = (o and o:IsA("ObjectValue") and o.Value == cow.model) or false
+        end
+        local st = milkStateOf(cow.model)
+        -- "IdleLocked" is the game's own word for parked (dump): trust it.
+        -- The stall's Occupant is the fallback, but NOT while the cow still
+        -- reports Wander — that is a cow halfway through the gate, and milking
+        -- it is exactly the "too fast" miss.
+        if st == "IdleLocked" then return true end
+        return occupied and st ~= "Wander"
+    end
+
     local function milkCowInStall(cow)
         local spot, model = cow.stall, cow.model
         if not (spot and model) then return false end
+        if not milkInStallNow(cow) then
+            log(string.format("milk: cow %d is not in its stall yet - not milking it",
+                cow.index or 0))
+            return false
+        end
         local trig = milkTrigger(spot)
         local stand = (trig and trig.Position) or cow.pos
         if not stand then
@@ -7674,19 +7700,42 @@ local okBuild, errBuild = pcall(function()
     -- milk EVERY ready cow standing in a stall (one batch, user's order: herd 5,
     -- then milk them all). Unreadable parked cows still get one honest attempt.
     function milkAllParked(cows)
-        local done, tried = 0, 0
-        for pass = 1, 2 do
-            for _, c in ipairs(cows or {}) do
-                local want = pass == 1 and c.stall and (c.percent or 0) >= 300
-                    or pass == 2 and c.stall and c.percent == nil
-                if want then
-                    tried += 1
-                    if milkCowInStall(c) then done += 1 end
-                    if milkStopping() or farmTookBody() then return done, tried end
-                    if pass == 2 and tried >= 3 then return done, tried end
+        local done, tried, walking = 0, 0, 0
+        -- ▸ ONLY COWS THAT ARE IN A STALL NOW (user: "start milking the cow that
+        --   is in the stall first and only when they are in stalls"). The old
+        --   filter trusted the stall picked while herding, so the stall of a cow
+        --   still walking in got milked: the game ignored it, and after the 10 s
+        --   timeout the gate opened again on a cow that had just arrived.
+        local ready = {}
+        for _, c in ipairs(cows or {}) do
+            if c.stall or c.inBarn then
+                if milkInStallNow(c) then
+                    if (c.percent or 0) >= 300 or c.percent == nil then
+                        ready[#ready + 1] = c
+                    end
+                else
+                    walking += 1
                 end
             end
-            if tried > 0 then return done, tried end
+        end
+        if walking > 0 then
+            log(string.format("milk: %d cow(s) are still walking into a stall - milked once they are inside", walking))
+        end
+        for _, c in ipairs(ready) do
+            if milkStopping() or farmTookBody() then break end
+            -- settle: a cow that just arrived is still playing its walk-in, so
+            -- two steady reads 0.7 s apart are the cheapest proof it is home
+            local settled = milkInStallNow(c)
+            if settled then
+                task.wait(0.7)
+                settled = milkInStallNow(c)
+            end
+            if not settled then
+                walking += 1
+            else
+                tried += 1
+                if milkCowInStall(c) then done += 1 end
+            end
         end
         return done, tried
     end
@@ -8319,8 +8368,12 @@ local okBuild, errBuild = pcall(function()
         local cows = milkCows(owner, cf, size, stalls)
         milkCowScan(cows)
 
-        -- ▸ 2b. MILK FIRST (it's the only step that pays, and it's the one the
-        --   user needs): one cow that is ALREADY parked in a stall. A parked
+        -- ▸ 2b0. MILK WHO IS ALREADY IN A STALL, BEFORE HERDING (user: "make it
+        --   start milking the cow that is in the stall first and only when they
+        --   are in stalls"). A barn holding one ready cow used to wait for four
+        --   more to be shoved in before anything was milked.
+        local milkDone, milkTried = milkAllParked(cows)
+
         -- ▸ 2b. HERD A BATCH OF 5 (user: "herd 5 cows per herding and milk them
         --   all then do the checks then restart"). One run fills the barn to 5
         --   parked cows instead of one cow per cycle.
@@ -8342,9 +8395,11 @@ local okBuild, errBuild = pcall(function()
         do
             cows = milkCows(owner, cf, size, stalls)
             local done, tried = milkAllParked(cows)
-            milked = done > 0
-            milkLine = tried == 0 and "milk: no ready cow parked in a stall"
-                or string.format("milk: %d of %d parked cow(s) milked", done, tried)
+            milkDone += done
+            milkTried += tried
+            milked = milkDone > 0
+            milkLine = milkTried == 0 and "milk: no ready cow standing in a stall yet"
+                or string.format("milk: %d of %d parked cow(s) milked", milkDone, milkTried)
         end
 
         -- ▸ 2c2. FEED TOP-UP (user: after the milk loop, fill the cows' feed
