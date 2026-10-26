@@ -6447,6 +6447,17 @@ local okBuild, errBuild = pcall(function()
         return on
     end
 
+    -- leave herd mode between cows, otherwise the next Herd press just toggles
+    -- the mode the previous cow left open. Read/write on the module's own API.
+    function milkHerdOff()
+        local ok = pcall(function()
+            local rs = game:GetService("ReplicatedStorage")
+            local h = rs.Modules.GuiModels.HerdingMode
+            require(h).Close()
+        end)
+        return ok
+    end
+
     -- what the game offers as a CLICKABLE thing right now (the herd/lasso icon
     -- only exists while a cow is herded, so this is how we learn its name)
     local function milkLogButtons(tag)
@@ -6639,6 +6650,37 @@ local okBuild, errBuild = pcall(function()
             spot.Name, math.floor((model:GetPivot().Position - root.Position).Magnitude),
             tostring(milkStateOf(model))))
         return false
+    end
+
+    -- ▸ ONE HERDING RUN = UP TO 5 COWS (user: "herd 5 cows per herding and milk
+    --   them all then do the checks then restart"). Fills the barn to 5 parked
+    --   cows, then hands the body back so the caller can milk the whole batch.
+    function milkHerdBatch(stalls, cows)
+        local free, parked = {}, 0
+        for _, s in ipairs(stalls or {}) do
+            if s.spot then
+                local o = s.spot:FindFirstChild("Occupant")
+                if o and o:IsA("ObjectValue") and o.Value then
+                    parked += 1
+                else
+                    free[#free + 1] = s
+                end
+            end
+        end
+        local done, tried = 0, 0
+        for _, c in ipairs(cows or {}) do
+            if parked >= 5 or #free == 0 then break end
+            if not c.inBarn and not c.stall and c.state ~= "IdleLocked"
+                and (c.percent or 0) >= 300 then
+                local slot = table.remove(free, 1)
+                tried += 1
+                parked += 1
+                if milkHerd(c, slot.spot) then done += 1 end
+                milkHerdOff()
+                if milkStopping() or farmTookBody() then break end
+            end
+        end
+        return done, tried, parked
     end
 
     -- ▸ THE MILK STEP (wiki: "go inside the barn to the stall the cow is in and
@@ -7127,6 +7169,26 @@ local okBuild, errBuild = pcall(function()
         return dirty, cleaned, unknown
     end
 
+    -- milk EVERY ready cow standing in a stall (one batch, user's order: herd 5,
+    -- then milk them all). Unreadable parked cows still get one honest attempt.
+    function milkAllParked(cows)
+        local done, tried = 0, 0
+        for pass = 1, 2 do
+            for _, c in ipairs(cows or {}) do
+                local want = pass == 1 and c.stall and (c.percent or 0) >= 300
+                    or pass == 2 and c.stall and c.percent == nil
+                if want then
+                    tried += 1
+                    if milkCowInStall(c) then done += 1 end
+                    if milkStopping() or farmTookBody() then return done, tried end
+                    if pass == 2 and tried >= 3 then return done, tried end
+                end
+            end
+            if tried > 0 then return done, tried end
+        end
+        return done, tried
+    end
+
     local function milkCycle()
         -- ▸ SHARE THE BODY (user: "when the milk loop is on the farm loop can
         --   still run"). They move the SAME character, so they can never work
@@ -7168,70 +7230,30 @@ local okBuild, errBuild = pcall(function()
 
         -- ▸ 2b. MILK FIRST (it's the only step that pays, and it's the one the
         --   user needs): one cow that is ALREADY parked in a stall. A parked
-        --   cow whose Production we cannot read still gets ONE honest attempt -
-        --   leaving it in the barn un-milked is worse than trying.
-        local milkLine, milked = nil, false
+        -- ▸ 2b. HERD A BATCH OF 5 (user: "herd 5 cows per herding and milk them
+        --   all then do the checks then restart"). One run fills the barn to 5
+        --   parked cows instead of one cow per cycle.
+        local herdLine, herded = nil, false
         do
-            local pick
-            for _, c in ipairs(cows) do
-                if c.stall and (c.percent or 0) >= 300 then
-                    pick = c
-                    break
-                end
-            end
-            if not pick then
-                for _, c in ipairs(cows) do
-                    if c.stall and c.percent == nil then
-                        pick = c
-                        break
-                    end
-                end
-            end
-            if not pick then
-                milkLine = "milk: no ready cow parked in a stall"
+            local done, tried, parkedNow = milkHerdBatch(stalls, cows)
+            herded = done > 0
+            if tried == 0 then
+                herdLine = string.format("herd: %d cow(s) already in the barn - no ready cow left to herd", parkedNow)
             else
-                milked = milkCowInStall(pick)
-                milkLine = string.format("milk: cow %d in %s %s", pick.index or 0,
-                    tostring(pick.stall.Name), milked and "milked" or "not milked")
+                herdLine = string.format("herd: %d of %d cow(s) into the barn (%d parked now)",
+                    done, tried, parkedNow)
             end
         end
 
-        -- ▸ 2c. HERD: one ready cow into one free stall per cycle, capped at 4
-        --   parked cows while the milk action is still being pinned down.
-        --   Filling all 12 stalls with cows we cannot yet milk would block the
-        --   loop (and a cow cannot eat inside, so it just loses happiness).
-        local herdLine, herded = nil, false
+        -- ▸ 2c. MILK THE WHOLE BATCH, then the checks run on the fresh numbers.
+        --   The herd moved cows, so re-read them instead of trusting the snapshot.
+        local milkLine, milked = nil, false
         do
-            local free, parked = nil, 0
-            for _, s in ipairs(stalls) do
-                if s.spot then
-                    local o = s.spot:FindFirstChild("Occupant")
-                    if o and o:IsA("ObjectValue") and o.Value then
-                        parked += 1
-                    else
-                        free = free or s
-                    end
-                end
-            end
-            local pick
-            for _, c in ipairs(cows) do
-                if not c.inBarn and not c.stall and c.state ~= "IdleLocked"
-                    and (c.percent or 0) >= 300 then
-                    pick = c
-                    break
-                end
-            end
-            if parked >= 4 then
-                herdLine = string.format("herd: %d cow(s) in the barn already - milk them first", parked)
-            elseif not free then
-                herdLine = "herd: every stall is taken"
-            elseif not pick then
-                herdLine = "herd: no ready cow left in the field"
-            else
-                herded = milkHerd(pick, free.spot)
-                herdLine = string.format("herd: cow %d -> stall %s %s", pick.index or 0,
-                    free.spot.Name, herded and "ok" or "failed")
-            end
+            cows = milkCows(owner, cf, size, stalls)
+            local done, tried = milkAllParked(cows)
+            milked = done > 0
+            milkLine = tried == 0 and "milk: no ready cow parked in a stall"
+                or string.format("milk: %d of %d parked cow(s) milked", done, tried)
         end
 
         -- ▸ 3. show it
