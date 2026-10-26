@@ -6564,7 +6564,7 @@ local okBuild, errBuild = pcall(function()
             pcall(function() btn:Activate() end)
             how = "activate()"
         end
-        task.wait(0.5)
+        task.wait(0.8)
         local on = milkHerdOn()
         log(string.format("milk: %s - Herd pressed on its own menu (%s) - herd mode %s",
             name, tostring(how), on == nil and "unknown" or (on and "ON" or "did NOT turn on")))
@@ -6595,8 +6595,15 @@ local okBuild, errBuild = pcall(function()
         end
 
         -- the trip: the lasso is a HerdTarget on the barn, so press the target
-        -- nearest the barn while the cow is armed, then walk the last stretch
+        -- nearest the barn while the cow is armed, then walk the last stretch.
+        -- It is a UI animation: give the game time to draw the targets before
+        -- pressing (user: "it's pressing the lasso too fast").
         local targets = milkHerdTargets()
+        for _ = 1, 6 do -- up to 3 s for the targets to appear
+            if #targets > 0 or milkStopping() then break end
+            task.wait(0.5)
+            targets = milkHerdTargets()
+        end
         for i, t in ipairs(targets) do
             log(string.format("milk: herd target %d '%s' @ %s (%s from barn)", i, t.label,
                 t.pos and string.format("%d,%d,%d", t.pos.X, t.pos.Y, t.pos.Z) or "?",
@@ -6611,8 +6618,9 @@ local okBuild, errBuild = pcall(function()
         else
             log(string.format("milk: %s - herd mode offered no HerdTarget to press", name))
         end
+        task.wait(2.0) -- let the cow actually take the order before we leave
         milkTp(dest + Vector3.new(0, 3, 0))
-        task.wait(1.0)
+        task.wait(1.8)
         -- the wiki presses the lasso twice: once at the cow, once at the barn
         -- door. Herd mode may drop the first press when we leave, so re-press.
         local again = milkHerdTargets()[1]
@@ -6621,6 +6629,7 @@ local okBuild, errBuild = pcall(function()
             if not c3 then pcall(function() again.trig:Activate() end) end
             log(string.format("milk: %s - lasso at the stall on '%s' (%s)", name,
                 again.label, tostring(how3 or "activate()")))
+            task.wait(1.2)
         end
         if inStall(15) then return true end
 
@@ -6676,7 +6685,9 @@ local okBuild, errBuild = pcall(function()
                 tried += 1
                 parked += 1
                 if milkHerd(c, slot.spot) then done += 1 end
+                task.wait(1.0) -- let the stall settle before closing herd mode
                 milkHerdOff()
+                task.wait(1.5) -- and before the next cow's herd press
                 if milkStopping() or farmTookBody() then break end
             end
         end
