@@ -3381,7 +3381,397 @@ pcall(function()
     w("  name + parent is what the herd step has to press.")
 end)
 
+------------------------------------------------------------------
+-- 26. HERD MODE ON — WHAT APPEARED
+--     The herd press works now (log: "herd mode ON") but the lasso is
+--     still invisible to us. The lasso only EXISTS while herd mode is
+--     on, so this section: (1) snaps PlayerGui, (2) stands at a ready
+--     cow and presses the game's OWN Herd button, (3) snaps again and
+--     prints everything that APPEARED - path, class, size, image id,
+--     text and the REAL number of Activated connections per button,
+--     then (4) dumps every HerdingVisuals tree (the barn targets) and
+--     finally closes herd mode and puts you back where you stood.
+------------------------------------------------------------------
+pcall(function()
+    header("HERD MODE ON - WHAT APPEARED (before/after diff)")
+    local lp = Players.LocalPlayer
+    local pg = lp:FindFirstChildOfClass("PlayerGui")
+    local ch = lp.Character
+    local r0 = ch and ch:FindFirstChild("HumanoidRootPart")
+    if not pg or not r0 then w("  no PlayerGui / HumanoidRootPart - skipped") return end
+    local startPos = r0.CFrame
+
+    local function pathOf(inst, cap)
+        local bits, p = {}, inst
+        for _ = 1, (cap or 6) do
+            if not p then break end
+            bits[#bits + 1] = p.Name
+            p = p.Parent
+        end
+        return table.concat(bits, " < ")
+    end
+
+    local function shownChain(o)
+        local vis, p = true, o
+        while p and not p:IsA("ScreenGui") do
+            if p:IsA("LayerCollector") then
+                if p.Enabled == false then vis = false end
+            elseif p:IsA("GuiObject") and p.Visible == false then
+                vis = false
+            end
+            p = p.Parent
+        end
+        if p and p:IsA("LayerCollector") and p.Enabled == false then vis = false end
+        return vis
+    end
+
+    local function connCount(b)
+        local n = 0
+        pcall(function()
+            local gc = getconnections
+            if type(gc) ~= "function" then return end
+            for _, sig in ipairs({ "Activated", "MouseButton1Click", "MouseButton1Down" }) do
+                local ev = b[sig]
+                if ev then
+                    local ok, cs = pcall(gc, ev)
+                    if ok and type(cs) == "table" then n += #cs end
+                end
+            end
+        end)
+        return n
+    end
+
+    local function snap(root)
+        local set = {}
+        for _, d in ipairs(root:GetDescendants()) do set[d] = true end
+        return set
+    end
+
+    local function oneLine(d)
+        local bits = ""
+        if d:IsA("BillboardGui") or d:IsA("SurfaceGui") then
+            local ad = nil
+            pcall(function() ad = d.Adornee end)
+            bits ..= " enabled=" .. tostring(d.Enabled) .. " adornee=" .. tostring(ad and ad.Name)
+        elseif d:IsA("LayerCollector") then
+            bits ..= " enabled=" .. tostring(d.Enabled)
+        end
+        if d:IsA("GuiObject") then
+            bits ..= " shown=" .. tostring(shownChain(d))
+                .. " size=" .. tostring(d.AbsoluteSize)
+                .. " pos=" .. tostring(d.AbsolutePosition)
+            if d:IsA("ImageLabel") or d:IsA("ImageButton") then
+                bits ..= " img=" .. tostring(d.Image)
+            end
+            if d:IsA("TextLabel") or d:IsA("TextButton") then
+                bits ..= " text='" .. tostring(d.Text):gsub("%s+", " ") .. "'"
+            end
+            if d:IsA("GuiButton") then
+                bits ..= " conns=" .. tostring(connCount(d))
+            end
+        end
+        return bits
+    end
+
+    -- the cow the loop would pick first: ready (Production >= 99, wandering)
+    local objs = workspace:FindFirstChild("Objects")
+    local animals = objs and objs:FindFirstChild("Animals")
+    local cow, bestScore, bestProd, bestState = nil, math.huge, 0, ""
+    for _, m in ipairs((animals and animals:GetChildren()) or {}) do
+        if m:IsA("Model") and m.Name:lower():find("cow", 1, true) then
+            local prod, state = 0, ""
+            pcall(function()
+                local c = m:FindFirstChild("Configurations")
+                local p = c and c:FindFirstChild("Production")
+                if p then prod = p.Value end
+                local s = c and c:FindFirstChild("AnimoidState")
+                if s then state = s.Value end
+            end)
+            local dd = (m:GetPivot().Position - r0.Position).Magnitude
+            local score = (prod >= 99 and state == "Wander") and dd or (dd + 1000000)
+            if score < bestScore then
+                bestScore, cow, bestProd, bestState = score, m, prod, state
+            end
+        end
+    end
+    if not cow then w("  no cow in Objects.Animals - nothing to herd, skipped") return end
+    w(string.format("  target: %s  Production=%d  AnimoidState=%s  %.0f studs away",
+        cow.Name, math.floor(bestProd), bestState, bestScore % 1000000))
+
+    -- ONE menu per animal; only the one you stand at is Enabled (dump 25)
+    local function menuFor(model)
+        local gs
+        pcall(function() gs = pg.GuiViews.Animal.AnimalInteractions.AnimalInteractionGuis end)
+        if not gs then return nil, 0, 0 end
+        local n, on, hit = 0, 0, nil
+        for _, m in ipairs(gs:GetChildren()) do
+            if m.Name == "AnimalInteractionMenu" then
+                n += 1
+                if m:IsA("BillboardGui") and m.Enabled then
+                    on += 1
+                    local ad = nil
+                    pcall(function() ad = m.Adornee end)
+                    if not hit and ad and (ad == model or ad.Parent == model) then hit = m end
+                end
+            end
+        end
+        return hit, n, on
+    end
+
+    local hm
+    pcall(function()
+        local md = ReplicatedStorage:FindFirstChild("Modules")
+        local gm = md and md:FindFirstChild("GuiModels")
+        local mod = gm and gm:FindFirstChild("HerdingMode")
+        if mod then hm = require(mod) end
+    end)
+    w("  HerdingMode module: " .. (hm and "loaded" or "NOT loaded yet")
+        .. "   IsOpen before: " .. tostring(hm and hm.IsOpen))
+
+    local before = snap(pg)
+    r0.CFrame = CFrame.new(cow:GetPivot().Position + Vector3.new(0, 3, 0))
+    local menu
+    for _ = 1, 24 do
+        menu = menuFor(cow)
+        if menu then break end
+        task.wait(0.25)
+    end
+    local _, nMenus, nOn = menuFor(cow)
+    w(string.format("  stood at the cow: %d menu(s) total, %d enabled, mine=%s",
+        nMenus or 0, nOn or 0, tostring(menu ~= nil)))
+
+    if menu then
+        local btn
+        pcall(function() btn = menu.Interactions.InteractionsList.Herd end)
+        if btn then
+            w("  Herd button: " .. pathOf(btn, 6) .. "  conns=" .. tostring(connCount(btn)))
+            local fired, errP = "nothing", nil
+            local okP, eP = pcall(function()
+                if getconnections then
+                    local cs = getconnections(btn.Activated)
+                    if #cs > 0 then cs[1]:Fire() fired = "getconnections Fire" return end
+                end
+                btn:Activate()
+                fired = "Activate()"
+            end)
+            if not okP then fired = "FAILED " .. tostring(eP) end
+            w("  press sent: " .. fired)
+        else
+            w("  that menu has NO Herd button - press skipped")
+        end
+    else
+        w("  no enabled menu on this cow - press skipped (cow may be inside the barn)")
+    end
+
+    for _ = 1, 20 do
+        if hm and hm.IsOpen then break end
+        task.wait(0.25)
+    end
+    w("  HerdingMode.IsOpen now: " .. tostring(hm and hm.IsOpen)
+        .. "   (true = herd mode is really on)")
+
+    -- what appeared ---------------------------------------------------
+    local after = pg:GetDescendants()
+    w("  ── (1) NEW PlayerGui objects while herd mode is on ──")
+    local nNew, nBtn = 0, 0
+    for _, d in ipairs(after) do
+        if not before[d] then
+            nNew += 1
+            if d:IsA("GuiButton") then nBtn += 1 end
+            if nNew <= 80 then
+                w(string.format("   + %s [%s]%s", pathOf(d, 7), d.ClassName, oneLine(d)))
+            end
+        end
+    end
+    w(string.format("  new objects: %d   new buttons: %d", nNew, nBtn))
+    if nNew <= 80 then w("  (all printed)") else w("  (only the first 80 printed)") end
+
+    -- every clickable thing that is REALLY shown right now ------------
+    w("  ── (2) visible GuiButtons with a real handler (not our own GUI) ──")
+    local nb = 0
+    for _, d in ipairs(after) do
+        if d:IsA("GuiButton") and shownChain(d) then
+            local low = tostring(pathOf(d, 7)):lower()
+            if low:find("fluent", 1, true) or low:find("spud", 1, true) then
+                -- our own window: skip
+            else
+                local c = connCount(d)
+                if c > 0 and nb < 40 then
+                    nb += 1
+                    w(string.format("   · %s [%s]%s", pathOf(d, 7), d.ClassName, oneLine(d)))
+                end
+            end
+        end
+    end
+    if nb == 0 then w("   (none - the lasso is not a PlayerGui button)") end
+
+    -- the barn targets: where the lasso has to be aimed ----------------
+    w("  ── (3) HerdingVisuals trees (the barn / animal targets) ──")
+    local nv = 0
+    for _, d in ipairs(after) do
+        if d.Name == "HerdingVisuals" then
+            nv += 1
+            w("   " .. pathOf(d, 7))
+            local shown2 = 0
+            for _, c in ipairs(d:GetDescendants()) do
+                shown2 += 1
+                if shown2 > 60 then w("       … more") break end
+                w("       - " .. c.Name .. " [" .. c.ClassName .. "]" .. oneLine(c)
+                    .. (c:IsA("GuiButton") and connCount(c) > 0 and "  ◀ CLICK THIS" or ""))
+            end
+        end
+    end
+    if nv == 0 then
+        w("   (no HerdingVisuals - herd mode did not open, so there is nothing to aim at)")
+    end
+
+    -- billboards that are on right now (the barn gate marker) ----------
+    w("  ── (4) billboards enabled right now ──")
+    local nBill = 0
+    for _, d in ipairs(after) do
+        if (d:IsA("BillboardGui") or d:IsA("SurfaceGui")) and d.Enabled then
+            local txt = {}
+            for _, c in ipairs(d:GetDescendants()) do
+                if c:IsA("TextLabel") and c.Text ~= "" then
+                    txt[#txt + 1] = c.Text:gsub("%s+", " ")
+                end
+            end
+            local joined = table.concat(txt, " | ")
+            local interesting = d.Name:lower():find("herd", 1, true)
+                or d.Name:lower():find("lasso", 1, true)
+                or d.Name:lower():find("animal", 1, true)
+                or joined:lower():find("herd", 1, true)
+                or joined:lower():find("lasso", 1, true)
+            if interesting and nBill < 30 then
+                nBill += 1
+                local ad = nil
+                pcall(function() ad = d.Adornee end)
+                w(string.format("   · %s adornee=%s '%s'", pathOf(d, 6),
+                    tostring(ad and ad.Name), joined:sub(1, 70)))
+            end
+        end
+    end
+    if nBill == 0 then w("   (nothing herd-ish is on screen)") end
+
+    -- put the game back how it was --------------------------------
+    pcall(function()
+        if hm and hm.IsOpen then hm.Close() end
+    end)
+    w("  herd mode closed again: IsOpen=" .. tostring(hm and hm.IsOpen))
+    r0.CFrame = startPos
+    w("  DO NOW: paste this block. The lasso is the line marked")
+    w("  'conns=1' (or nonzero) in (1)/(3) - that exact path is what")
+    w("  the milk loop has to press instead of guessing names.")
+end)
+
 local text = table.concat(out, "\n")
+
+------------------------------------------------------------------
+-- REPORT WINDOW — some executors (Delta on mobile) have no console,
+-- so the tail of the report is drawn in-game as well. COPY puts the
+-- WHOLE report on the clipboard; the window shows the last 14,000
+-- characters (always the newest section, which is the one asked for).
+------------------------------------------------------------------
+pcall(function()
+    local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    if not pg then return end
+    local parent = pg
+    pcall(function() if gethui then parent = gethui() end end)
+    local old = parent:FindFirstChild("SpudReportGui")
+    if old then old:Destroy() end
+
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "SpudReportGui"
+    gui.ResetOnSpawn = false
+    gui.DisplayOrder = 9999
+    gui.Parent = parent
+
+    local frame = Instance.new("Frame")
+    frame.Name = "Report"
+    frame.Size = UDim2.fromScale(0.94, 0.78)
+    frame.Position = UDim2.fromScale(0.03, 0.10)
+    frame.BackgroundColor3 = Color3.fromRGB(16, 17, 21)
+    frame.BorderSizePixel = 0
+    frame.Parent = gui
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 10)
+    corner.Parent = frame
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Color3.fromRGB(70, 72, 84)
+    stroke.Parent = frame
+
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, -140, 0, 34)
+    title.Position = UDim2.fromOffset(10, 6)
+    title.BackgroundTransparency = 1
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 15
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.TextColor3 = Color3.fromRGB(235, 235, 240)
+    title.Text = string.format("SPUD DUMP — %d lines · showing the last 14,000 chars", #out)
+    title.Parent = frame
+
+    local function mkBtn(txt, x, w2, colour)
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.fromOffset(w2, 30)
+        b.Position = UDim2.new(1, -(x + w2), 0, 8)
+        b.BackgroundColor3 = colour
+        b.BorderSizePixel = 0
+        b.Font = Enum.Font.GothamBold
+        b.TextSize = 14
+        b.TextColor3 = Color3.fromRGB(255, 255, 255)
+        b.Text = txt
+        b.Parent = frame
+        local c = Instance.new("UICorner")
+        c.CornerRadius = UDim.new(0, 6)
+        c.Parent = b
+        return b
+    end
+
+    local copyBtn = mkBtn("COPY ALL", 8, 92, Color3.fromRGB(38, 130, 72))
+    local closeBtn = mkBtn("X", 108, 34, Color3.fromRGB(120, 40, 42))
+
+    local scroll = Instance.new("ScrollingFrame")
+    scroll.Size = UDim2.new(1, -20, 1, -52)
+    scroll.Position = UDim2.fromOffset(10, 44)
+    scroll.BackgroundColor3 = Color3.fromRGB(10, 10, 13)
+    scroll.BorderSizePixel = 0
+    scroll.ScrollBarThickness = 8
+    scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    scroll.Parent = frame
+    local sc = Instance.new("UICorner")
+    sc.CornerRadius = UDim.new(0, 8)
+    sc.Parent = scroll
+
+    local shownTxt = text:sub(math.max(1, #text - 14000))
+    local shownLines = select(2, shownTxt:gsub("\n", ""))
+    local bodyH = math.max(200, (shownLines + 2) * 16)
+
+    local body = Instance.new("TextLabel")
+    body.BackgroundTransparency = 1
+    body.Font = Enum.Font.Code
+    body.TextSize = 13
+    body.TextXAlignment = Enum.TextXAlignment.Left
+    body.TextYAlignment = Enum.TextYAlignment.Top
+    body.TextColor3 = Color3.fromRGB(210, 226, 210)
+    body.TextWrapped = false
+    body.Size = UDim2.new(1, -14, 0, bodyH)
+    body.Position = UDim2.fromOffset(6, 4)
+    body.Text = shownTxt
+    body.Parent = scroll
+    scroll.CanvasSize = UDim2.new(0, 0, 0, bodyH + 12)
+
+    copyBtn.MouseButton1Click:Connect(function()
+        local okC = pcall(function() setclipboard(text) end)
+        copyBtn.Text = okC and "COPIED ✓" or "NO CLIPBOARD"
+        task.delay(2, function()
+            pcall(function() copyBtn.Text = "COPY ALL" end)
+        end)
+    end)
+    closeBtn.MouseButton1Click:Connect(function()
+        pcall(function() gui:Destroy() end)
+    end)
+end)
 
 ------------------------------------------------------------------
 -- OUTPUT: upload link first (easiest on mobile), then clipboard/file
