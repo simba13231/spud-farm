@@ -6622,7 +6622,7 @@ local okBuild, errBuild = pcall(function()
     --   and herd mode is still open, so a single press of the BARN's HerdTarget
     --   sends the lot (user: it must be the barn, never the gate). We wait at
     --   the stall inside the barn, press that target, then count arrivals.
-    function milkHerdSend(picks)
+    function milkHerdSend(picks, stalls)
         if #picks == 0 then return 0 end
         local targets = milkHerdTargets()
         for _ = 1, 6 do -- up to 3 s for the targets to appear
@@ -6659,11 +6659,28 @@ local okBuild, errBuild = pcall(function()
             milkTp(st.Position + Vector3.new(0, 3, 0)) -- wait at the stall, inside the barn
             task.wait(1.8) -- herd mode re-draws the targets where we land
         end
+        -- ▸ WHERE A COW ACTUALLY IS. The game does not have to use the stall we
+        --   picked while arming - it drops each cow into whichever stall is
+        --   free - so asking only about our pre-picked slot under-counts and
+        --   the wait stopped while cows were still walking in. Ask EVERY
+        --   stall, and treat "taken out of Objects.Animals" as parked too.
+        local animals = workspace:FindFirstChild("Objects")
+        animals = animals and animals:FindFirstChild("Animals")
+        local function stallOf(model)
+            for _, s in ipairs(stalls or {}) do
+                local o = s.spot and s.spot:FindFirstChild("Occupant")
+                if o and o:IsA("ObjectValue") and o.Value == model then return s.spot end
+            end
+            return nil
+        end
+        local function parked(model)
+            if stallOf(model) ~= nil then return true end
+            return model.Parent ~= nil and animals ~= nil and not model:IsDescendantOf(animals)
+        end
         local function landed()
             local n = 0
             for _, p in ipairs(picks) do
-                local o = p.spot:FindFirstChild("Occupant")
-                if o and o:IsA("ObjectValue") and o.Value then n += 1 end
+                if parked(p.cow.model) then n += 1 end
             end
             return n
         end
@@ -6674,24 +6691,39 @@ local okBuild, errBuild = pcall(function()
             log(string.format("milk: lasso pressed on the BARN '%s' (%s) - %d cow(s) armed",
                 barnT.label, tostring(how or "activate()"), #picks))
             task.wait(2.0) -- let the herd actually take the order
-            local t0 = os.clock()
-            while os.clock() - t0 < 25 do
+            -- ▸ WAIT FOR EVERY COW (user: "make it wait till they are all in").
+            --   They walk in from the field one behind the other, so keep
+            --   counting until all are parked. The old 12 s idle break fired
+            --   BEFORE the first arrival, which is exactly how cows that were
+            --   still walking got reported missing: no cow arrival can be
+            --   assumed early. Now it waits the full window for the first one,
+            --   and only gives up 20 s after the herd has stopped moving.
+            local t0, last, beat = os.clock(), 0, os.clock()
+            while os.clock() - t0 < 45 do
                 if milkStopping() or farmTookBody() then break end
                 got = landed()
                 if got >= #picks then break end
+                if got ~= last then
+                    last, beat = got, os.clock()
+                    log(string.format("milk: %d of %d cow(s) in the barn", got, #picks))
+                elseif got > 0 and os.clock() - beat > 20 then
+                    log(string.format("milk: the herd stopped moving at %d of %d", got, #picks))
+                    break
+                end
                 task.wait(0.5)
             end
-            if got > 0 or attempt == 2 then break end
+            if got >= #picks or attempt == 2 then break end
+            if got > 0 then break end
             log("milk: no cow moved - one more lasso press on the barn")
             for _, t in ipairs(milkHerdTargets()) do
                 if t.inBarn then barnT = t break end
             end
         end
         for _, p in ipairs(picks) do
-            local o = p.spot:FindFirstChild("Occupant")
-            local v = o and o:IsA("ObjectValue") and o.Value
-            log(string.format("milk: cow %d -> stall %s %s", p.cow.index or 0, p.spot.Name,
-                v and "OCCUPIED" or "still empty"))
+            local at = stallOf(p.cow.model)
+            log(string.format("milk: cow %d -> %s", p.cow.index or 0,
+                at and ("barn stall " .. tostring(at.Name))
+                    or (parked(p.cow.model) and "in the barn" or "STILL OUT in the field")))
         end
         return got
     end
@@ -6730,7 +6762,7 @@ local okBuild, errBuild = pcall(function()
         end
         local done = 0
         if #picks > 0 then
-            done = milkHerdSend(picks)
+            done = milkHerdSend(picks, stalls)
             task.wait(1.0) -- let the stalls settle before herd mode closes
             milkHerdOff()
             task.wait(1.5) -- and before the next cycle opens its own herd
@@ -7311,6 +7343,24 @@ local okBuild, errBuild = pcall(function()
                 or string.format("milk: %d of %d parked cow(s) milked", done, tried)
         end
 
+        -- ▸ 2d. LEFTOVER CHECK (user: "check to see if there are any left over
+        --   cows"): a cow that never walked in still stands in the field, so
+        --   count it here instead of letting the batch silently come up short.
+        --   The milk step opens every gate and lets the cows back out, so read
+        --   them again first - otherwise this looks at parked cows that are
+        --   already back in the field.
+        cows = milkCows(owner, cf, size, stalls)
+        local leftLine, left = nil, 0
+        for _, c in ipairs(cows) do
+            if (c.percent or 0) >= 300 and not c.inBarn and not c.stall
+                and c.state ~= "IdleLocked" then
+                left += 1
+            end
+        end
+        if left > 0 then
+            leftLine = string.format("herd: %d ready cow(s) LEFT in the field - the next cycle takes them", left)
+        end
+
         -- ▸ 3. show it
         local lines = {}
         local parked = 0
@@ -7339,6 +7389,7 @@ local okBuild, errBuild = pcall(function()
         end
         if herdLine then lines[#lines + 1] = herdLine end
         if milkLine then lines[#lines + 1] = milkLine end
+        if leftLine then lines[#lines + 1] = leftLine end
         milkSetStatus(table.concat(lines, "\n"))
         log("milk: " .. table.concat(lines, " | "))
         return true, dirty, unknown, (herded or milked)
