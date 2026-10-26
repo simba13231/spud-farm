@@ -6201,10 +6201,26 @@ local okBuild, errBuild = pcall(function()
                              "barrel", "cart", "wagon" }) do
             if nm:find(w, 1, true) then return true end
         end
+        -- ▸ A PLAIN TRUCK IS NOT A MILK CARRIER (user: "Don't offer UH at
+        --   all", "dont run in UH"). UH/MTS are EquipmentType=Truck with no
+        --   tank, no Capacity/MaxCapacity and no milk label, so the bare type
+        --   put them in the dropdown and every fill there was ignored. The
+        --   word "truck" is gone from this list on purpose: a truck now has
+        --   to PROVE it holds liquid through the tests below (CarryType=
+        --   Liquid, a milk/liquid attribute or label, or a liquid name such
+        --   as MediumLiquidTruck). Trailers/silos are untouched.
         local et = tostring(m:GetAttribute("EquipmentType") or ""):lower()
-        for _, w in ipairs({ "trailer", "truck", "tanker", "transport",
+        for _, w in ipairs({ "trailer", "tanker", "transport",
                              "liquid", "tank", "silo", "cart", "wagon" }) do
             if et:find(w, 1, true) then return true end
+        end
+        -- the game's own load tag: CarryType=Liquid is how LH150 says it is a
+        -- tanker, and it counts even when the model name says nothing
+        local conf0 = m:FindFirstChild("Configurations")
+        local ct0 = conf0 and conf0:FindFirstChild("CarryType")
+        if ct0 then
+            local ok0, v0 = pcall(function() return tostring(ct0.Value) end)
+            if ok0 and v0 and v0:lower():find("liquid", 1, true) then return true end
         end
         for _, a in ipairs({ "Milk", "MilkType", "StoredMilk", "Liquid",
                              "LiquidType", "LiquidAmount" }) do
@@ -8338,6 +8354,12 @@ local okBuild, errBuild = pcall(function()
                 return "store: " .. tostring(name) .. " is still in storage"
             end
             log("store: " .. tostring(dest.Name) .. " is out — filling it")
+        end
+        -- belt and braces: a pick made BEFORE the list dropped plain trucks
+        -- must not keep pressing fill keys at a bed that takes no liquid
+        if not milkStoreCandidate(dest) then
+            log("store: '" .. tostring(dest.Name) .. "' is a plain truck with no tank — pick a trailer or silo")
+            return "store: " .. tostring(dest.Name) .. " has no milk tank — pick again"
         end
 
         local held = milkStoreHolding()
