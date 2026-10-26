@@ -148,8 +148,8 @@ else
         w("    path: " .. pathOf(m, 8))
         w("    attrs: " .. attrsOf(m))
         w("    conf: " .. tostring(confOf(m) or "-"))
-        w("    stored=%s  dist=%s  pos=%s",
-            tostring(m:GetAttribute("InStorage")), distTo(m), posOf(m))
+        w(string.format("    stored=%s  dist=%s  pos=%s",
+            tostring(m:GetAttribute("InStorage")), distTo(m), posOf(m)))
         w("    key parts: " .. keyPartsOf(m))
         local txt = guiTextsOf(m)
         if #txt > 0 then w("    gui text: " .. table.concat(txt, " · ")) end

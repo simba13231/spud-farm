@@ -358,10 +358,31 @@ local okBuild, errBuild = pcall(function()
     --   steers itself off the row; a full tank never sells). The dump's own
     --   model name and the caller's intent are fallbacks, and the first
     --   decision is logged so one line says which one matched.
+    -- ▸ WHAT IS A MACHINE? The equip probe settled it: EVERY model in
+    --   Objects.Equipment carries an EquipmentType attribute (Tractor /
+    --   Harvester / Plow / Planter / Cultivator / Transport / Truck), so the
+    --   game's own word is the answer and a model NAME is only a fallback for
+    --   the rare server that ships no attribute.
+    --   ▸ InStorage=true means parked in the garage: no seat, no live position,
+    --   hitching to it fails — so lookups skip it and SAY how many were
+    --   skipped instead of silently deciding there is no tractor.
+    -- globals on purpose: two more `local`s here would eat two more registers
+    -- in the GUI builder for the whole session (the R191 budget is real)
+    function equipTypeOf(m)
+        local ok, t = pcall(function() return m:GetAttribute("EquipmentType") end)
+        return ok and t or nil
+    end
+
+    function equipInStorage(m)
+        local ok, v = pcall(function() return m:GetAttribute("InStorage") end)
+        return ok and v == true
+    end
+
     local HARVEST_MODEL_NAMES = { SRC6 = true }
     local harvestDetectLogged = false
     local function isHarvester(tr, impl)
         if not tr then return false end
+        if equipInStorage(tr) then return false end
         local how
         if impl and impl == tr then
             how = "this pass drives the tool itself"
@@ -445,18 +466,37 @@ local okBuild, errBuild = pcall(function()
     local function findTractor()
         local hrp = LocalPlayer.Character
             and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-        local best, bestDist, bestSeat
-        for _, d in ipairs(workspace:GetDescendants()) do
-            if d:IsA("Model") and d.Name:lower():find("zm80", 1, true) then
-                local seat = d:FindFirstChildWhichIsA("VehicleSeat", true)
-                    or d:FindFirstChildWhichIsA("Seat", true)
-                if seat and hrp then
-                    local dist = (seat.Position - hrp.Position).Magnitude
-                    if not bestDist or dist < bestDist then
-                        best, bestDist, bestSeat = d, dist, seat
+        local objects = workspace:FindFirstChild("Objects")
+        local folder = objects and objects:FindFirstChild("Equipment")
+        local list = folder and folder:GetChildren() or workspace:GetDescendants()
+        local best, bestDist, bestSeat, stashed = nil, nil, nil, 0
+        for _, d in ipairs(list) do
+            if d:IsA("Model") then
+                local etype = equipTypeOf(d)
+                -- attribute first (probe: ZM80=Tractor); name only when the
+                -- attribute is missing entirely, never as a veto
+                local isTractor = (etype == "Tractor")
+                if not isTractor and etype == nil then
+                    isTractor = d.Name:lower():find("zm80", 1, true) ~= nil
+                end
+                if isTractor then
+                    if equipInStorage(d) then
+                        stashed += 1
+                    else
+                        local seat = d:FindFirstChildWhichIsA("VehicleSeat", true)
+                            or d:FindFirstChildWhichIsA("Seat", true)
+                        if seat and hrp then
+                            local dist = (seat.Position - hrp.Position).Magnitude
+                            if not bestDist or dist < bestDist then
+                                best, bestDist, bestSeat = d, dist, seat
+                            end
+                        end
                     end
                 end
             end
+        end
+        if not best and stashed > 0 then
+            log(string.format("%d tractor(s) are in storage — spawn one from the Equipment Manager, the loop cannot drive a parked one", stashed))
         end
         return best, bestDist, bestSeat
     end
@@ -520,7 +560,9 @@ local okBuild, errBuild = pcall(function()
         local wantName = TYPE_MODEL[typeName]
         local byName, nameDist, byType, typeDist
         for _, d in ipairs(folder and folder:GetChildren() or {}) do
-            if d:IsA("Model") and d ~= tractorModel then
+            -- a stored implement sits in the garage with no live hitch: towing
+            -- it is impossible, so it is never a candidate (probe: 7 of 10)
+            if d:IsA("Model") and d ~= tractorModel and not equipInStorage(d) then
                 local dist = (d:GetPivot().Position - nearPos).Magnitude
                 if wantName and d.Name == wantName then
                     if not nameDist or dist < nameDist then
@@ -5065,7 +5107,10 @@ local okBuild, errBuild = pcall(function()
         local hum = char and char:FindFirstChildOfClass("Humanoid")
         if not hum then log("no character") return end
         local tr, dist, seat = findTractor()
-        if not tr then log("tractor (ZM80) not found") return end
+        if not tr then
+            log("tractor not found — no spawned model with EquipmentType=Tractor (check the Equipment Manager, parked ones cannot drive)")
+            return
+        end
 
         -- ▸ SAFETY (user: "when a vehicle is not within 1000 studs it
         --   will use the equipment manager to respawn it"): a tractor
