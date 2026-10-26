@@ -6386,19 +6386,9 @@ local okBuild, errBuild = pcall(function()
     end
 
     -- ▸ HERD (user: "go to the cow click the herd button then bring them to
-    --   the barn"). The game has ONE shared animal menu that points at whatever
-    --   animal the player stands next to, so herd = stand on the cow, call the
-    --   menu's OWN Herd button, then LEAD it in short hops: the cow follows the
-    --   player, so one 300-stud teleport would leave it behind in the field.
-    local function milkHerdMenu()
-        local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
-        local gv = pg and pg:FindFirstChild("GuiViews")
-        local an = gv and gv:FindFirstChild("Animal")
-        local ai = an and an:FindFirstChild("AnimalInteractions")
-        local gs = ai and ai:FindFirstChild("AnimalInteractionGuis")
-        return gs and gs:FindFirstChild("AnimalInteractionMenu")
-    end
-
+    --   the barn"). Herd = stand on the cow, press the menu's OWN Herd button,
+    --   then LEAD it in (the cow follows the player, and the barn's stall then
+    --   takes it in).
     local function milkMenuPointsAt(menu, model)
         local ok, ad = pcall(function() return menu.Adornee end)
         if not ok or not ad then return false end
@@ -6409,6 +6399,52 @@ local okBuild, errBuild = pcall(function()
             return ad:IsDescendantOf(model) or model:IsDescendantOf(ad)
         end)
         return okIn and inside == true
+    end
+
+    -- ▸ THE RIGHT MENU, BY ANIMAL (dump 25): AnimalInteractionGuis holds ONE
+    --   AnimalInteractionMenu per animal, each adorned to that animal's own
+    --   Hitbox, and only the one you stand at is Enabled. FindFirstChild got a
+    --   disabled stranger's menu every time, so the Herd click went nowhere and
+    --   the cow never entered herd mode.
+    --   GLOBAL on purpose: the build closure is at the executor's 200-local
+    --   ceiling, and more locals there kill the whole GUI.
+    function milkMenuFor(model)
+        local ok, best, total, ready = pcall(function()
+            local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+            local gv = pg and pg:FindFirstChild("GuiViews")
+            local an = gv and gv:FindFirstChild("Animal")
+            local ai = an and an:FindFirstChild("AnimalInteractions")
+            local gs = ai and ai:FindFirstChild("AnimalInteractionGuis")
+            if not gs then return nil, 0, 0 end
+            local n, on, hit = 0, 0, nil
+            for _, m in ipairs(gs:GetChildren()) do
+                if m.Name == "AnimalInteractionMenu" then
+                    n += 1
+                    if m:IsA("BillboardGui") and m.Enabled then
+                        on += 1
+                        if not hit and milkMenuPointsAt(m, model) then hit = m end
+                    end
+                end
+            end
+            return hit, n, on
+        end)
+        if not ok then return nil, 0, 0 end
+        return best, total, ready
+    end
+
+    -- herd mode is real module state (HerdingMode.IsOpen), so ask it instead of
+    -- guessing from the UI. Read only. GLOBAL for the same slot-budget reason.
+    function milkHerdOn()
+        local ok, on = pcall(function()
+            local rs = game:GetService("ReplicatedStorage")
+            local m = rs:FindFirstChild("Modules")
+            local g = m and m:FindFirstChild("GuiModels")
+            local h = g and g:FindFirstChild("HerdingMode")
+            if not h then return nil end
+            return require(h).IsOpen
+        end)
+        if not ok then return nil end
+        return on
     end
 
     -- what the game offers as a CLICKABLE thing right now (the herd/lasso icon
@@ -6490,24 +6526,22 @@ local okBuild, errBuild = pcall(function()
         end
         milkTp(model:GetPivot().Position + Vector3.new(0, 3, 0))
         task.wait(0.6)
-        local menu = milkHerdMenu()
-        if not menu then
-            log("milk: the animal menu does not exist - cannot herd")
-            return false
-        end
-        for _ = 1, 12 do -- up to 3 s for the menu to catch up with the tp
-            if milkStopping() or milkMenuPointsAt(menu, model) then break end
+        local menu, howMany, howOn = milkMenuFor(model)
+        for _ = 1, 12 do -- up to 3 s for the game to light up THAT cow's menu
+            if milkStopping() or menu then break end
             task.wait(0.25)
+            menu, howMany, howOn = milkMenuFor(model)
         end
-        if not milkMenuPointsAt(menu, model) then
-            log(string.format("milk: %s - the animal menu never pointed at it", name))
+        if not menu then
+            log(string.format("milk: %s - no enabled animal menu on it (%d menu(s), %d enabled)",
+                name, howMany or 0, howOn or 0))
             return false
         end
         local list = menu:FindFirstChild("Interactions")
         list = list and list:FindFirstChild("InteractionsList")
         local btn = list and list:FindFirstChild("Herd")
         if not btn then
-            log("milk: the animal menu has no Herd button")
+            log(string.format("milk: %s - its menu has no Herd button", name))
             return false
         end
         local clicked, how = invokeHandlers(btn)
@@ -6515,10 +6549,15 @@ local okBuild, errBuild = pcall(function()
             pcall(function() btn:Activate() end)
             how = "activate()"
         end
-        log(string.format("milk: %s - Herd clicked (%s) - leading it to stall %s",
-            name, tostring(how), spot.Name))
-        task.wait(0.6)
+        task.wait(0.5)
+        local on = milkHerdOn()
+        log(string.format("milk: %s - Herd pressed on its own menu (%s) - herd mode %s",
+            name, tostring(how), on == nil and "unknown" or (on and "ON" or "did NOT turn on")))
         milkLogButtons("after Herd")
+        if on == false then
+            log(string.format("milk: %s - the game refused herd mode, leaving it in the field", name))
+            return false
+        end
 
         local ch = LocalPlayer.Character
         local root = ch and ch:FindFirstChild("HumanoidRootPart")
