@@ -130,6 +130,17 @@ uses: `EVTFillLiquidCarrier(<carrier>)` and `EVTRequestToCarry(<jug>)` are fired
 as a fast path, with the key presses kept as the fallback whenever the world does
 not confirm the result.
 
+### `SpudBoot.lua` — loader that shows its own errors
+A tiny (~8 KB) launcher for when the executor console is not visible: it
+downloads `SpudFarm_Full.lua`, compiles it and runs it, and puts every step in a
+small on-screen panel — downloaded byte count, the build string, and the exact
+compile or runtime error if one happens (also copied to the clipboard so it can
+be pasted into chat). Paste this one line:
+
+```lua
+loadstring(game:HttpGet("https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudBoot.lua?t=" .. os.time()))()
+```
+
 ## Contributing / fixing names
 Found a wrong in-game name after a game update? Open an issue (or PR) with the
 correct name and which feature it affects — Settings-box defaults live in the
