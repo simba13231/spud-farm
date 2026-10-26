@@ -6480,29 +6480,33 @@ local okBuild, errBuild = pcall(function()
         if found == 0 then log("milk: [" .. tag .. "] no visible button in PlayerGui") end
     end
 
-    -- the send-to-barn action the game shows once a cow is herded. It is not
-    -- the cow menu's Herd button (clicking that again would just re-arm), so
-    -- anything inside the animal menu is ignored.
-    local function milkSendBtn()
+    -- the lasso: herd mode puts HerdTarget billboards on the spots a herded
+    -- animal can be sent to (dump 26 = ...GuiViews.Animal.HerdingMode.
+    -- HerdingVisuals.<HerdTarget>.Trigger). The barn one is whichever target
+    -- stands nearest the barn, so pick by geometry - the names are $0/GateLarge.
+    function milkHerdTargets()
         local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
-        if not pg then return nil end
-        for _, d in ipairs(pg:GetDescendants()) do
-            if d:IsA("GuiButton") and d.Visible then
-                local inMenu, o = false, d
-                for _ = 1, 8 do
-                    o = o.Parent
-                    if not o then break end
-                    if o.Name == "AnimalInteractionMenu" then inMenu = true break end
+        local vis = pg and pg:FindFirstChild("HerdingVisuals", true)
+        local barn = workspace:FindFirstChild("AutoWoodenBarn", true)
+        local bp = barn and barn:GetPivot().Position
+        local out = {}
+        for _, b in ipairs(vis and vis:GetChildren() or {}) do
+            if b:IsA("BillboardGui") and b.Name == "HerdTarget" then
+                local ad, pos = b.Adornee, nil
+                if ad then
+                    local okp, p = pcall(function() return ad:GetPivot().Position end)
+                    if okp then pos = p end
                 end
-                if not inMenu then
-                    local nm = (d.Name .. " " .. (d:IsA("TextButton") and d.Text or "")):lower()
-                    if nm:find("herd") or nm:find("lasso") or nm:find("barn")
-                        or nm:find("stall") or nm:find("send") then
-                        return d
-                    end
-                end
+                out[#out + 1] = {
+                    trig = b:FindFirstChild("Trigger"),
+                    pos = pos,
+                    label = ad and ad.Name or "?",
+                    dist = (pos and bp) and math.floor((pos - bp).Magnitude) or nil,
+                }
             end
         end
+        table.sort(out, function(a, b) return (a.dist or 1e9) < (b.dist or 1e9) end)
+        return out
     end
 
     -- ▸ YIELD TO THE FARM LOOP MID-CYCLE. A cycle started while the farm was
@@ -6579,21 +6583,34 @@ local okBuild, errBuild = pcall(function()
             return false
         end
 
-        -- the trip: the lasso is clicked at the barn, not by dragging the cow
-        -- there (wiki: "tap the cow, the lasso button, then the lasso button on
-        -- the barn door"), so one tp to the stall is the whole walk
+        -- the trip: the lasso is a HerdTarget on the barn, so press the target
+        -- nearest the barn while the cow is armed, then walk the last stretch
+        local targets = milkHerdTargets()
+        for i, t in ipairs(targets) do
+            log(string.format("milk: herd target %d '%s' @ %s (%s from barn)", i, t.label,
+                t.pos and string.format("%d,%d,%d", t.pos.X, t.pos.Y, t.pos.Z) or "?",
+                t.dist and (tostring(t.dist) .. " studs") or "?"))
+        end
+        local pickT = targets[1]
+        if pickT and pickT.trig then
+            local c2, how2 = invokeHandlers(pickT.trig)
+            if not c2 then pcall(function() pickT.trig:Activate() end) end
+            log(string.format("milk: %s - lasso pressed on '%s' (%s)", name, pickT.label,
+                tostring(how2 or "activate()")))
+        else
+            log(string.format("milk: %s - herd mode offered no HerdTarget to press", name))
+        end
         milkTp(dest + Vector3.new(0, 3, 0))
         task.wait(1.0)
-        local send = milkSendBtn()
-        if send then
-            local c2, how2 = invokeHandlers(send)
-            if not c2 then pcall(function() send:Activate() end) end
-            log(string.format("milk: %s - clicked '%s' at stall %s (%s)", name, send.Name,
-                spot.Name, tostring(how2 or "activate()")))
-        else
-            log(string.format("milk: %s - no send-to-barn button at stall %s", name, spot.Name))
+        -- the wiki presses the lasso twice: once at the cow, once at the barn
+        -- door. Herd mode may drop the first press when we leave, so re-press.
+        local again = milkHerdTargets()[1]
+        if again and again.trig then
+            local c3, how3 = invokeHandlers(again.trig)
+            if not c3 then pcall(function() again.trig:Activate() end) end
+            log(string.format("milk: %s - lasso at the stall on '%s' (%s)", name,
+                again.label, tostring(how3 or "activate()")))
         end
-        milkLogButtons("at the stall")
         if inStall(15) then return true end
 
         -- fallback: if the door click did nothing, walk it in (the cow follows)
