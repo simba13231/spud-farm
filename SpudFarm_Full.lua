@@ -6238,32 +6238,30 @@ local okBuild, errBuild = pcall(function()
         local objects = workspace:FindFirstChild("Objects")
         local root = LocalPlayer.Character
             and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-        local stored, others = 0, 0
-        -- the account the loop works for: its own carriers plus world-owned ones
-        -- that belong to nobody (shared farm silos) — never another player's
+        -- ▸ WHOSE CARRIER IS IT? Every machine carries Configurations.Owner
+        --   (the probe proved it: LH150/MTS/UH = Miou2251, ZM80/SRC6 = oksimba_1),
+        --   so each entry is now LABELLED with that account and the working
+        --   account's carriers rank first — nothing is hidden, so "it does not
+        --   show what the account has" cannot happen quietly: the entry is in
+        --   the list, or the console says which owners the scan did find.
         local who = milkUser
         if who and who:sub(1, 1) == "(" then who = nil end
+        local function sameOwner(a, b)
+            if not a or not b then return false end
+            return a:lower() == b:lower()
+        end
         local function consider(folder)
             for _, m in ipairs(folder and folder:GetChildren() or {}) do
                 if m:IsA("Model") and not seen[m] and milkStoreCandidate(m) then
                     seen[m] = true
-                    local owner = milkStoreOwnerOf(m)
-                    if who and owner and owner:lower() ~= who:lower() then
-                        others += 1
-                    else
-                        -- a parked carrier still tells the user what they OWN
-                        -- (that is the "more carriers" complaint): it is listed,
-                        -- marked and ranked last, and the store step refuses it
-                        local isStored = m:GetAttribute("InStorage") == true
-                        if isStored then stored += 1 end
-                        local pos
-                        pcall(function() pos = m:GetPivot().Position end)
-                        out[#out + 1] = {
-                            model = m, pos = pos, score = milkStoreScore(m),
-                            stored = isStored,
-                            d = (pos and root) and (pos - root.Position).Magnitude or 0,
-                        }
-                    end
+                    local isStored = m:GetAttribute("InStorage") == true
+                    local pos
+                    pcall(function() pos = m:GetPivot().Position end)
+                    out[#out + 1] = {
+                        model = m, pos = pos, score = milkStoreScore(m),
+                        stored = isStored, owner = milkStoreOwnerOf(m),
+                        d = (pos and root) and (pos - root.Position).Magnitude or 0,
+                    }
                 end
             end
         end
@@ -6291,21 +6289,28 @@ local okBuild, errBuild = pcall(function()
                 end
             end
         end
-        -- ▸ and the picked account's OWN plot (user: "scan the account it's
-        --   working for"): a silo or tanker built on that farm lives under
-        --   Workspace.Plots.<plot>, not in the shared folders above.
-        if who then
-            local plot = milkStorePlotOf(who)
-            if plot then walk(plot, 2) end
+        -- ▸ and the OWN PLOT of both accounts that can be "the one it works
+        --   for": the picked user, and always the local one running this script.
+        --   A silo or tanker built on a farm lives under Workspace.Plots.<plot>,
+        --   never in the shared folders above, so without this a farm-owned
+        --   carrier is simply invisible.
+        for _, plotWho in ipairs({ who, LocalPlayer.Name }) do
+            if plotWho and plotWho ~= "" then
+                local plot = milkStorePlotOf(plotWho)
+                if plot then walk(plot, 2) end
+            end
         end
         table.sort(out, function(a, b)
+            local am, bm = sameOwner(a.owner, who), sameOwner(b.owner, who)
+            if am ~= bm then return am end -- the working account first
             if a.stored ~= b.stored then return not a.stored end
             if a.score ~= b.score then return a.score > b.score end
             return a.d < b.d
         end)
         local names, map, used = {}, {}, {}
         for _, c in ipairs(out) do
-            local base = c.model.Name .. (c.stored and " (in storage)" or "")
+            local base = c.model.Name .. " — " .. tostring(c.owner or "world")
+                .. (c.stored and " (stored)" or "")
             local name, n = base, 2
             while used[name] do name = base .. " #" .. n; n += 1 end
             used[name] = true
@@ -6315,13 +6320,30 @@ local okBuild, errBuild = pcall(function()
         if #names == 0 then
             names[1] = "(no trailer or silo found)"
         end
-        if stored > 0 and stored ~= milkStoreStoredShown then
-            milkStoreStoredShown = stored
-            log(string.format("milk store: %d carrier(s) are in storage — listed, but they only fill once spawned", stored))
+        -- ▸ one line per changed scan: WHO owns what the picker can see. If the
+        --   machine you expected is missing, this line says whether its account
+        --   was found at all, instead of leaving you to guess.
+        local counts, order = {}, {}
+        for _, c in ipairs(out) do
+            local k = tostring(c.owner or "world")
+            if not counts[k] then
+                counts[k] = { n = 0, s = 0 }
+                order[#order + 1] = k
+            end
+            counts[k].n += 1
+            if c.stored then counts[k].s += 1 end
         end
-        if others > 0 and others ~= milkStoreOthersShown then
-            milkStoreOthersShown = others
-            log(string.format("milk store: %d carrier(s) belong to other accounts — not listed", others))
+        table.sort(order)
+        local bits = {}
+        for _, k in ipairs(order) do
+            local c = counts[k]
+            bits[#bits + 1] = k .. ": " .. c.n
+                .. (c.s > 0 and (" (" .. c.s .. " stored)") or "")
+        end
+        local summary = #bits > 0 and table.concat(bits, " · ") or "none found"
+        if summary ~= milkStoreSummaryShown then
+            milkStoreSummaryShown = summary
+            log("milk store scan for " .. tostring(who or "no account picked") .. ": " .. summary)
         end
         return names, map
     end
