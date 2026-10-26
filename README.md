@@ -112,6 +112,14 @@ near you, so run it twice: once **in town** (zoomed out) and once **at your
 farm standing among your fields/animals/barn**, then send both links back so
 guessed names in `CONFIG` can be replaced with real ones.
 
+### `SpudRemoteProbe.lua` — what the game SENDS (read-only)
+Run it in game, then do one milk deposit **by hand** (pick up a jug, press Fill at
+the truck, milk one cow) and run `spudRemoteStop()`. It records every
+`FireServer` / `InvokeServer` the game itself makes, with the exact remote name
+and arguments, lists every remote in `ReplicatedStorage`, uploads the report and
+copies the link to the clipboard. It fires nothing. Used to decide whether the
+milk path can be a direct remote call instead of a teleport + key press.
+
 ## Contributing / fixing names
 Found a wrong in-game name after a game update? Open an issue (or PR) with the
 correct name and which feature it affects — Settings-box defaults live in the
