@@ -7477,7 +7477,19 @@ local okBuild, errBuild = pcall(function()
             return false
         end
         milkTp(stand + Vector3.new(0, 3, 0))
-        task.wait(1.0)
+        -- ▸ POLL for the stall's own menu instead of a flat 1.0 s: it turns on
+        --   as soon as the interaction streams in at this stall. The floor
+        --   keeps the old settle time for slow servers.
+        task.wait(0.45)
+        local sGui0 = milkStallGui(spot)
+        if sGui0 then
+            for _ = 1, 6 do -- ≤0.9 s more
+                if sGui0.Enabled then break end
+                if milkStopping() or farmTookBody() then return false end
+                task.wait(0.15)
+                sGui0 = milkStallGui(spot) or sGui0
+            end
+        end
 
         local label = string.format("cow %d", cow.index or 0)
         local before, dropsBefore = milkPercentOf(model), milkDrops()
@@ -7655,8 +7667,17 @@ local okBuild, errBuild = pcall(function()
                 log(string.format("milk: stall %d has no readable position", i))
             else
                 milkTp(stand + Vector3.new(0, 3, 0))
-                task.wait(0.8)
-                local up = milkCleanUp(s.spot)
+                -- ▸ POLL, don't sleep (user: "Poll instead of sleep"). The game
+                --   answers for THIS stall as soon as its Clean action is
+                --   adorned here; nil before that only means "not yet".
+                task.wait(0.3) -- floor: let the teleport land
+                local up
+                for _ = 1, 8 do -- ≤1.2 s more, and usually the first read
+                    if milkStopping() or farmTookBody() then break end
+                    up = milkCleanUp(s.spot)
+                    if up ~= nil then break end
+                    task.wait(0.12)
+                end
                 if up == nil then
                     unknown += 1
                     if stains > 0 then
@@ -7677,8 +7698,18 @@ local okBuild, errBuild = pcall(function()
                     for attempt = 1, 3 do
                         if milkStopping() then break end
                         pressKey(Enum.KeyCode.V)
-                        task.wait(1.3)
-                        if milkCleanUp(s.spot) == false then
+                        -- ▸ POLL for the game's own answer instead of a flat
+                        --   1.3 s: the Clean action turning off IS the proof.
+                        local nowClean = false
+                        for _ = 1, 18 do -- ≤2.2 s
+                            task.wait(0.12)
+                            if milkStopping() or farmTookBody() then break end
+                            if milkCleanUp(s.spot) == false then
+                                nowClean = true
+                                break
+                            end
+                        end
+                        if nowClean then
                             done = true
                             break
                         end
@@ -7910,10 +7941,21 @@ local okBuild, errBuild = pcall(function()
                 end
                 local stand = milkFeedStand(target.model) or target.pos
                 milkTp(stand + Vector3.new(0, 3, 0))
-                task.wait(0.8)
+                -- ▸ POLL for the game offering Carry here instead of a flat
+                --   0.8 s; the floor keeps the teleport from pressing too soon.
+                task.wait(0.3)
+                for _ = 1, 6 do -- ≤0.9 s more
+                    if milkStopping() or farmTookBody() then break end
+                    if milkFeedButton("Carry") then break end
+                    task.wait(0.15)
+                end
                 if milkStopping() or farmTookBody() then break end
                 pressKey(Enum.KeyCode.E) -- Carry = E
-                task.wait(0.9)
+                for _ = 1, 8 do -- ≤1.2 s, ends the moment the box is in hand
+                    if carrying() then break end
+                    if milkStopping() or farmTookBody() then break end
+                    task.wait(0.15)
+                end
                 if not carrying() then
                     milkFeedButton("Carry")
                     task.wait(0.7)
@@ -8268,7 +8310,14 @@ local okBuild, errBuild = pcall(function()
             end
 
             milkTp(stand + Vector3.new(0, 3, 0))
-            task.wait(1.1)
+            -- ▸ POLL for the fill action to be offered here instead of a flat
+            --   1.1 s (its absence is what the adornee fallback below is for).
+            task.wait(0.4)
+            for _ = 1, 6 do -- ≤0.9 s more
+                if milkStopping() or farmTookBody() then break end
+                if milkStoreFillAction() then break end
+                task.wait(0.15)
+            end
             if milkStopping() or farmTookBody() then break end
             -- nothing on offer at the pivot? stand where the game's own action
             -- is adorned and ask again
