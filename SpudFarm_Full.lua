@@ -6511,12 +6511,15 @@ local okBuild, errBuild = pcall(function()
                 if plot then cf, size = plot:GetBoundingBox() end
                 if cf then
                     saidNoPlot = false
-                    local okRun, line = pcall(milkStoreDeposit, cf, size)
+                    local okRun, line, isFull = pcall(milkStoreDeposit, cf, size)
                     if not okRun then
                         log("store: delivery failed — " .. tostring(line))
                     elseif line then
                         log("store: " .. tostring(line))
                     end
+                    -- a full tank needs emptying, not another pass: back off
+                    -- instead of retrying every 12 s and looking stuck
+                    if isFull then idle = 90 end
                 elseif not saidNoPlot then
                     saidNoPlot = true
                     log("store: no plot found for " .. tostring(milkUser) .. " — nothing to collect from")
@@ -6900,6 +6903,43 @@ local okBuild, errBuild = pcall(function()
             root.CFrame = CFrame.new(target) * (root.CFrame - root.CFrame.Position)
             task.wait(0.2)
         end
+        return true
+    end
+
+    -- ▸ GET OFF THE SEAT FIRST (user: "it keeps bugging like it's standing
+    --   still when collecting the milk"). milkTp REFUSES to move a seated
+    --   character, so a pass that starts while we are still sitting in the
+    --   tractor (the farm loop parks you in one) teleported nowhere: every
+    --   step silently did nothing and the character just stood there. The
+    --   game's own exit key (F) is pressed and verified before any work.
+    --   Returns true when the character is on foot. A GLOBAL (like the other
+    --   milk store helpers) on purpose: a local here would take one more
+    --   register in the GUI builder for the whole session (the R191 budget).
+    function milkStandUp()
+        local ch = LocalPlayer.Character
+        local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+        if not hum or not hum.SeatPart then return true end
+        local what = tostring((hum.SeatPart.Parent and hum.SeatPart.Parent.Name) or "a vehicle")
+        log("milk: seated in " .. what .. " — getting out before collecting")
+        pressKey(Enum.KeyCode.F)
+        for _ = 1, 8 do -- ~2 s to stand up
+            if not hum.SeatPart then break end
+            task.wait(0.25)
+        end
+        if hum.SeatPart then
+            -- that seat didn't take the key: the humanoid's own stand
+            pcall(function() hum.Sit = false end)
+            for _ = 1, 4 do
+                if not hum.SeatPart then break end
+                task.wait(0.25)
+            end
+        end
+        if hum.SeatPart then
+            log("milk: still seated in " .. what
+                .. " — press F, the pass cannot move a seated character")
+            return false
+        end
+        task.wait(0.2)
         return true
     end
 
@@ -8389,6 +8429,26 @@ local okBuild, errBuild = pcall(function()
             return "store: " .. tostring(dest.Name) .. " has no milk tank — pick again"
         end
 
+        if not milkStandUp() then
+            return "store: seated in a vehicle — could not get out", false
+        end
+
+        -- ▸ A FULL CARRIER TAKES NOTHING (user: "it keeps bugging like it's
+        --   standing still when collecting the milk"). The old code carried a
+        --   jug over anyway, pressed Fill, waited the whole confirmation window
+        --   at a tank that had no room, then put the jug down — the character
+        --   just stood at the truck every pass. Read the tank first.
+        local roomNow, roomCap = milkStoreAmount(dest)
+        if roomNow and roomCap and roomCap > 0 and roomNow >= roomCap then
+            if not milkStoreFullAt or os.clock() - milkStoreFullAt > 60 then
+                milkStoreFullAt = os.clock()
+                log(string.format("store: %s is FULL (%d/%d) — empty it or pick another carrier",
+                    dest.Name, roomNow, roomCap))
+            end
+            return string.format("store: %s is full (%d/%d)", dest.Name, roomNow, roomCap), true
+        end
+        milkStoreFullAt = nil
+
         local held = milkStoreHolding()
         local jugs = milkStoreJugs(cf, size)
         if #jugs == 0 and not held then
@@ -8409,12 +8469,21 @@ local okBuild, errBuild = pcall(function()
         log(string.format("store: %d milk jug(s) waiting — destination %s at %s/%s",
             #jugs, dest.Name, tostring(start or "?"), tostring(cap or "?")))
 
-        local moved, missed, picked = 0, 0, false
+        local moved, missed, picked, full = 0, 0, false, false
         for _ = 1, 20 do
             if milkStopping() or farmTookBody() then break end
             jugs = milkStoreJugs(cf, size)
             held = milkStoreHolding()
             if #jugs == 0 and not held then break end
+            -- the tank can fill while we carry: never pick another jug up for
+            -- a carrier with no room left (that is the standing-still pass)
+            local room2, cap2 = milkStoreAmount(dest)
+            if not held and room2 and cap2 and cap2 > 0 and room2 >= cap2 then
+                full = true
+                log(string.format("store: %s is FULL (%d/%d) — stopping, the jugs stay outside",
+                    dest.Name, room2, cap2))
+                break
+            end
 
             if not held then
                 -- ▸ TWO JUGS PER TRIP (user: "make it carry 2 jugs at a time").
@@ -8539,7 +8608,7 @@ local okBuild, errBuild = pcall(function()
             log(string.format("store: sent %s at %s (%d jug(s) outside, %s/%s)",
                 how, dest.Name, count, tostring(before or "?"), tostring(cap or "?")))
 
-            local done = false
+            local done, fullNow = false, false
             -- read every 0.2 s (was 0.5): the barrel lands in well under a
             -- second, and the old cadence waited up to 6 s to notice
             for _ = 1, 30 do -- ≤6 s, unchanged ceiling
@@ -8552,15 +8621,33 @@ local okBuild, errBuild = pcall(function()
                     done = true
                     break
                 end
+                -- the tank is at its cap: nothing more will go in, so waiting
+                -- out the window would only look like standing still
+                if now and cap and cap > 0 and now >= cap then
+                    fullNow = true
+                    break
+                end
             end
             if done then
                 moved += 1
                 local now, c2 = milkStoreAmount(dest)
                 log(string.format("store: jug accepted — %s/%s, %d left outside",
                     tostring(now or "?"), tostring(c2 or cap or "?"), #milkStoreJugs(cf, size)))
+                if now and c2 and c2 > 0 and now >= c2 then
+                    full = true
+                    log(string.format("store: %s is now FULL (%d/%d) — stopping here", dest.Name, now, c2))
+                    break
+                end
             else
                 missed += 1
-                log("store: the fill did not register — the game offers: " .. milkFeedActs())
+                local now2, c2 = milkStoreAmount(dest)
+                if fullNow or (now2 and cap and cap > 0 and now2 >= cap) then
+                    full = true
+                    log(string.format("store: %s is FULL (%s/%s) — the jug stays outside",
+                        dest.Name, tostring(now2 or "?"), tostring(c2 or cap or "?")))
+                else
+                    log("store: the fill did not register — the game offers: " .. milkFeedActs())
+                end
                 if picked then
                     pressKey(Enum.KeyCode.X) -- Drop = X: never leave OUR jug in hand
                     task.wait(0.5)
@@ -8575,8 +8662,8 @@ local okBuild, errBuild = pcall(function()
         end
         local final, fcap = milkStoreAmount(dest)
         return string.format("store: %d jug(s) into %s%s (%s/%s)",
-            moved, dest.Name, missed > 0 and ", a drop failed" or "",
-            tostring(final or "?"), tostring(fcap or cap or "?"))
+            moved, dest.Name, (missed > 0 and not full) and ", a drop failed" or "",
+            tostring(final or "?"), tostring(fcap or cap or "?")), full
     end
 
     local function milkCycle()
@@ -8589,6 +8676,12 @@ local okBuild, errBuild = pcall(function()
         --   touch the character mid-pass.
         if loopThread and not farmResting then
             milkSetStatus("farm loop busy — milk stands by")
+            return true, 0, 0, false, "defer"
+        end
+        -- ▸ never work from a seat: milkTp does nothing while seated, which is
+        --   exactly the "stands still and bugs" pass. Stand up first.
+        if not milkStandUp() then
+            milkSetStatus("seated in a vehicle — cannot collect milk")
             return true, 0, 0, false, "defer"
         end
         local owner = milkUser
