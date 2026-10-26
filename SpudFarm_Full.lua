@@ -6,7 +6,7 @@
 
 local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/releases/latest/download/Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.6 · fluent gui"
+local VERSION    = "rebuild v1.7 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -6893,7 +6893,7 @@ local okBuild, errBuild = pcall(function()
     --   be used"). One CFrame write, then a short beat so the game's own
     --   prompts catch up with the new position. Still refuses from a vehicle
     --   seat: the milk loop works on foot and no tool is ever equipped.
-    local function milkTp(target)
+    local function milkTp(target, noWait)
         local ch = LocalPlayer.Character
         local root = ch and ch:FindFirstChild("HumanoidRootPart")
         if not root then return false end
@@ -6901,7 +6901,11 @@ local okBuild, errBuild = pcall(function()
         if hum and hum.SeatPart then return false end
         if (target - root.Position).Magnitude > 4 then
             root.CFrame = CFrame.new(target) * (root.CFrame - root.CFrame.Position)
-            task.wait(0.2)
+            -- ▸ the old 0.2 s settle was 12 wasted frames: the CFrame is already
+            --   applied locally, and everything that needs the move to reach the
+            --   server now polls for its own result. Callers that do NOT poll
+            --   (the cow/clean steps) keep the settle by omitting noWait.
+            if not noWait then task.wait(0.2) end
         end
         return true
     end
@@ -7127,12 +7131,16 @@ local okBuild, errBuild = pcall(function()
             log(string.format("milk: %s is already in the herd - no press needed", name))
             return true
         end
-        milkTp(model:GetPivot().Position + Vector3.new(0, 3, 0))
-        task.wait(0.6)
+        milkTp(model:GetPivot().Position + Vector3.new(0, 3, 0), true)
+        -- ▸ FRAME POLL, NOT 0.6 s + 0.25 s STEPS. The menu appears the frame the
+        --   game notices us next to the cow, and this runs once per cow (up to
+        --   5 per herd), so the old blind 0.6 s plus up to 3 s of stepped
+        --   polling was most of the "it sits there" time while arming.
         local menu, howMany, howOn = milkMenuFor(model)
-        for _ = 1, 12 do -- up to 3 s for the game to light up THAT cow's menu
-            if milkStopping() or farmTookBody() or menu then break end
-            task.wait(0.25)
+        local menuBy = os.clock() + 3
+        while not menu and os.clock() < menuBy do -- 50 ms steps: this read walks the GUI
+            if milkStopping() or farmTookBody() then break end
+            task.wait(0.05)
             menu, howMany, howOn = milkMenuFor(model)
         end
         if not menu then
@@ -7152,8 +7160,15 @@ local okBuild, errBuild = pcall(function()
             pcall(function() btn:Activate() end)
             how = "activate()"
         end
-        task.wait(1.0)
-        local on = milkHerdOn()
+        -- ▸ poll for herd mode (≤1 s, same deadline as the old flat wait) so we
+        --   move on the frame it turns on instead of sleeping through it
+        local on
+        for _ = 1, 20 do -- ≤1 s, break on ON only: an early false is just lag
+            if milkHerdOn() == true then break end
+            if milkStopping() or farmTookBody() then break end
+            task.wait(0.05)
+        end
+        on = milkHerdOn()
         log(string.format("milk: %s - Herd pressed on its own menu (%s) - herd mode %s",
             name, tostring(how), on == nil and "unknown" or (on and "ON" or "did NOT turn on")))
         if first then milkLogButtons("after Herd") end
@@ -7161,10 +7176,15 @@ local okBuild, errBuild = pcall(function()
             log(string.format("milk: %s - the game refused herd mode, leaving it in the field", name))
             return false
         end
+        -- ▸ and keep asking while it says FALSE, not just while it is unread:
+        --   the selection animates, and now that we no longer sleep a flat 1 s
+        --   the first read can land before the game registers the cow. "nil"
+        --   still ends it at once (the module cannot answer at all).
         local inside = milkInHerd(model)
-        for _ = 1, 4 do -- the selection animates, so give it a beat before a miss
-            if inside ~= nil or milkStopping() then break end
-            task.wait(0.5)
+        local insideBy = os.clock() + 2 -- same 2 s the 4 x 0.5 s loop allowed
+        while inside == false and os.clock() < insideBy do
+            if milkStopping() then break end
+            task.wait(0.05)
             inside = milkInHerd(model)
         end
         if inside == false then
@@ -7619,19 +7639,16 @@ local okBuild, errBuild = pcall(function()
             log("milk: that stall has no readable position")
             return false
         end
-        milkTp(stand + Vector3.new(0, 3, 0))
-        -- ▸ POLL for the stall's own menu instead of a flat 1.0 s: it turns on
-        --   as soon as the interaction streams in at this stall. The floor
-        --   keeps the old settle time for slow servers.
-        task.wait(0.45)
-        local sGui0 = milkStallGui(spot)
-        if sGui0 then
-            for _ = 1, 6 do -- ≤0.9 s more
-                if sGui0.Enabled then break end
-                if milkStopping() or farmTookBody() then return false end
-                task.wait(0.15)
-                sGui0 = milkStallGui(spot) or sGui0
-            end
+        milkTp(stand + Vector3.new(0, 3, 0), true)
+        -- ▸ FRAME POLL for the stall's own menu: same 1.35 s ceiling the old
+        --   0.45 s floor plus 6 x 0.15 s steps allowed, but a menu that is
+        --   already up costs one frame instead of 450 ms per cow
+        local sGui0, guiBy = milkStallGui(spot), os.clock() + 1.35
+        while os.clock() < guiBy do
+            if sGui0 and sGui0.Enabled then break end
+            if milkStopping() or farmTookBody() then return false end
+            task.wait(0.05) -- this read walks the GUI, so 50 ms not per frame
+            sGui0 = milkStallGui(spot) or sGui0
         end
 
         local label = string.format("cow %d", cow.index or 0)
@@ -7730,7 +7747,8 @@ local okBuild, errBuild = pcall(function()
             used and ("sent " .. used) or "no milk action visible, nothing sent"))
 
         local milked = false
-        for _ = 1, 20 do -- 10 s for the game to answer
+        local milkBy = os.clock() + 10 -- 10 s for the game to answer, as before
+        while os.clock() < milkBy do
             if milkStopping() or farmTookBody() then return false end
             local now = milkPercentOf(model)
             local drops = milkDrops()
@@ -7740,7 +7758,7 @@ local okBuild, errBuild = pcall(function()
                     label, tostring(before or "?"), tostring(now or "?"), drops - dropsBefore))
                 break
             end
-            task.wait(0.5)
+            task.wait(0.05) -- milkDrops walks the world; 50 ms is plenty
         end
         if not milked then
             log(string.format("milk: %s still %s%% in %s after the action - no milk seen",
@@ -8177,8 +8195,37 @@ local okBuild, errBuild = pcall(function()
     milkFast = {
         remoteOff = false, remoteFails = 0, remoteCache = nil,
         jugTypes = setmetatable({}, { __mode = "k" }),
+        amounts = setmetatable({}, { __mode = "k" }),
         typed = 0, unreadable = 0, skipLoggedAt = 0,
     }
+
+    -- ▸ FRAME-STEADY WAITING. task.wait(t) is quantised to the next Heartbeat:
+    --   task.wait(0.08) really costs 80-96 ms at 60 FPS and task.wait(0.2)
+    --   costs 200-216 ms, so a loop of those was six to twelve frames of pure
+    --   sleep per step. Polling one frame at a time keeps the same DEADLINE
+    --   (seconds, not frames, so a 240 FPS client does not give up early) and
+    --   reacts on the first frame the world changes.
+    function milkFrame()
+        local rs = milkFast.runService
+        if not rs then
+            rs = game:GetService("RunService")
+            milkFast.runService = rs
+        end
+        rs.Heartbeat:Wait()
+    end
+
+    -- returns true the moment pred() is truthy; false at the deadline, on
+    -- stop, or when the optional stop() turns true
+    function milkPollFor(pred, seconds, stop)
+        local deadline = os.clock() + (seconds or 0.5)
+        while true do
+            local ok, res = pcall(pred)
+            if ok and res then return true end
+            if (stop and stop()) or os.clock() >= deadline then return false end
+            if milkStopping() or farmTookBody() then return false end
+            milkFrame()
+        end
+    end
 
     function milkRemotes()
         -- only a SUCCESS is cached: a build that has no such remote (or one
@@ -8417,10 +8464,22 @@ local okBuild, errBuild = pcall(function()
     -- the carrier's own fill readout ("Empty 0/50" on the liquid truck, or a
     -- plain n/m label); nil when this build stores it some other way
     function milkStoreAmount(m)
+        -- ▸ ONE LABEL READ WHEN NOTHING MOVED. The scan below walks every
+        --   descendant of the carrier and it ran several times per jug (before,
+        --   during and after the fill). The readout that wins the scan is
+        --   remembered per carrier, so a repeat read is one Text property
+        --   instead of a full descendant walk; if that label goes away or its
+        --   text changes shape, the full scan runs again.
+        local cache = milkFast.amounts[m]
+        if cache and cache.label and cache.label.Parent then
+            local a, c
+            pcall(function() a, c = tostring(cache.label.Text):match("(%d+)%s*/%s*(%d+)") end)
+            if a then return tonumber(a), tonumber(c) or cache.cap end
+        end
         -- a truck can show more than one n/m (fuel, load, milk): the readout
         -- that NAMES milk/liquid wins, so "Amount 20/100" never masks
         -- "MilkTypeLabel Empty 0/50"
-        local best, bestScore = nil, -1
+        local best, bestScore, bestLabel = nil, -1, nil
         for _, d in ipairs(m:GetDescendants()) do
             if d:IsA("TextLabel") then
                 local a, c = tostring(d.Text):match("(%d+)%s*/%s*(%d+)")
@@ -8435,9 +8494,13 @@ local okBuild, errBuild = pcall(function()
                     if score > bestScore then
                         bestScore = score
                         best = { now = tonumber(a), cap = tonumber(c) }
+                        bestLabel = d
                     end
                 end
             end
+        end
+        if bestLabel then
+            milkFast.amounts[m] = { label = bestLabel, cap = best.cap }
         end
         if not best then
             for _, nm in ipairs({ "Milk", "Amount", "Contents", "Liquid" }) do
@@ -8646,6 +8709,10 @@ local okBuild, errBuild = pcall(function()
         local start, cap = milkStoreAmount(dest)
         log(string.format("store: %d milk jug(s) waiting — destination %s at %s/%s",
             #jugs, dest.Name, tostring(start or "?"), tostring(cap or "?")))
+        -- ▸ the pass TIMES ITSELF so "lightning fast" is a measured number on
+        --   the panel, not a feeling: seconds per jug shows up in the final line
+        --   (kept in milkFast so this function needs no extra local)
+        milkFast.t0 = os.clock()
 
         local moved, missed, picked, full = 0, 0, false, false
         for _ = 1, 20 do
@@ -8679,40 +8746,34 @@ local okBuild, errBuild = pcall(function()
                     -- teleport on every single barrel)
                     if grab > 1 and milkStoreDoubleKnown == false then break end
                     local jugCountBefore = #jugs
-                    milkTp(jug.part.Position + Vector3.new(0, 3, 0))
-                    -- ▸ POLL, don't sleep (user: "make it load up the milk
-                    --   faster"): the game offering Carry IS the proof the
-                    --   jug is in reach, so E goes out the moment it appears.
-                    task.wait(0.15) -- floor: let the teleport land
+                    milkTp(jug.part.Position + Vector3.new(0, 3, 0), true)
+                    -- ▸ ~50 ms of frames, not 0.15 s: physics replication runs at
+                    --   about 20 Hz, so the server needs roughly that long to see
+                    --   a CFrame move - one frame was too eager for a distance
+                    --   check, 0.15 s was nine frames of dead time
+                    for _ = 1, 3 do milkFrame() end
                     -- ▸ REMOTE FIRST (recorded call: EVTRequestToCarry(jug)).
                     --   That is the request the E press sends, so fire it and
                     --   let the world answer: the jug appearing in CarryLinks
-                    --   is the proof. Skips waiting for the context button
-                    --   (≤0.6 s) and the key round trip. If it does not land,
-                    --   the untouched key path below still runs.
+                    --   is the proof. Polling every frame instead of every
+                    --   0.08 s keeps the same 0.5 s deadline but reacts on the
+                    --   frame the hand fills. If it does not land, the key path
+                    --   below still runs.
                     local got = false
                     if milkRemoteFire("carry", jug.model) then
-                        for _ = 1, 6 do -- ≤0.5 s, usually the first read
-                            if milkStopping() or farmTookBody() then break end
+                        got = milkPollFor(function()
                             if grab > 1 then
-                                got = milkStoreHeldCount() > 1
+                                return milkStoreHeldCount() > 1
                                     or #milkStoreJugs(cf, size) < jugCountBefore
-                            else
-                                got = milkStoreHolding() ~= nil
                             end
-                            if got then break end
-                            task.wait(0.08)
-                        end
+                            return milkStoreHolding() ~= nil
+                        end, 0.5)
                         if not got then milkRemoteMiss("carry") end
                     end
 
                     if not got then
-                        local up = false
-                        for _ = 1, 6 do -- ≤0.6 s more, usually the first read
-                            if milkStopping() or farmTookBody() then break end
-                            if milkStoreCarryUp() then up = true break end
-                            task.wait(0.1)
-                        end
+                        -- the untouched key path, now frame-stepped
+                        local up = milkPollFor(function() return milkStoreCarryUp() end, 0.6)
                         -- hands full and no second Carry on offer: this build
                         -- takes one jug. Learn it after two misses (one can be
                         -- the game lagging behind the key press) and stop
@@ -8727,18 +8788,10 @@ local okBuild, errBuild = pcall(function()
                         end
                         if milkStopping() or farmTookBody() then break end
                         pressKey(Enum.KeyCode.E) -- Carry = E
-                        -- the jug appearing in CarryLinks is the proof it is in
-                        -- our hands — no need to sit out the old 0.9 s
-                        for _ = 1, 9 do -- ≤0.9 s, normally the first read
-                            if milkStoreHolding() then break end
-                            task.wait(0.1)
-                        end
+                        milkPollFor(function() return milkStoreHolding() ~= nil end, 0.9)
                         if not milkStoreHolding() then
                             milkFeedButton("Carry") -- the game's own visible Carry button
-                            for _ = 1, 7 do -- ≤0.7 s (was a flat wait)
-                                if milkStoreHolding() then break end
-                                task.wait(0.1)
-                            end
+                            milkPollFor(function() return milkStoreHolding() ~= nil end, 0.7)
                         end
                         if not milkStoreHolding() then
                             log("store: E did not pick up " .. jug.model:GetFullName()
@@ -8780,11 +8833,12 @@ local okBuild, errBuild = pcall(function()
                 end
             end
 
-            milkTp(stand + Vector3.new(0, 3, 0))
-            -- ▸ the same floor the key path used: the server has to see us at
-            --   the carrier before it will accept the fill, so never shorten
-            --   this just because the remote is quicker
-            task.wait(0.25)
+            milkTp(stand + Vector3.new(0, 3, 0), true)
+            -- ▸ ~50 ms of frames instead of the old 0.25 s floor: physics
+            --   replication runs at about 20 Hz, so the server needs roughly
+            --   that long to see the move before the fill is judged; the rest
+            --   of the wait is now the fill's own answer
+            for _ = 1, 3 do milkFrame() end
             local before, count = milkStoreAmount(dest), #milkStoreJugs(cf, size)
             local heldBefore = milkStoreHolding()
             local done, fullNow, how = false, false, nil
@@ -8812,37 +8866,26 @@ local okBuild, errBuild = pcall(function()
             --   the tank rising / the jug leaving our hands.
             if milkRemoteFire("fill", dest) then
                 how = "remote EVTFillLiquidCarrier"
-                for _ = 1, 8 do -- ≤0.8 s: a jug lands in well under one
-                    if milkStopping() or farmTookBody() then break end
-                    task.wait(0.1)
-                    local okFill, seenFull = took()
-                    if okFill then done = true break end
-                    if seenFull then fullNow = true break end
-                end
+                done = milkPollFor(function() -- "the fill landed?" (no local: budget)
+                    local okFill, isFull = took()
+                    if isFull then fullNow = true end
+                    return okFill
+                end, 0.8, function() return fullNow end)
                 if not done and not fullNow then milkRemoteMiss("fill") end
             end
 
             if not done and not fullNow then
-                -- ▸ the key path, unchanged: poll for the fill action to be
-                --   offered here instead of a flat 1.1 s, stand where the
-                --   game's own action is adorned when the pivot is wrong, then
-                --   press it
-                for _ = 1, 10 do -- ≤0.8 s
-                    if milkStopping() or farmTookBody() then break end
-                    if milkStoreFillAction() then break end
-                    task.wait(0.08)
-                end
+                -- ▸ the key path, unchanged except the polls are per frame:
+                --   wait for the fill action to be offered here, stand where
+                --   the game's own action is adorned when the pivot is wrong,
+                --   then press it
+                milkPollFor(function() return milkStoreFillAction() ~= nil end, 0.8)
                 if milkStopping() or farmTookBody() then break end
                 if not milkStoreFillAction() then
                     local ad = milkStoreAdornee(dest)
                     if ad and (ad.Position - stand).Magnitude > 1 then
-                        milkTp(ad.Position + Vector3.new(0, 3, 0))
-                        task.wait(0.25)
-                        for _ = 1, 8 do -- ≤0.8 s, stops the moment the action is there
-                            if milkStopping() or farmTookBody() then break end
-                            if milkStoreFillAction() then break end
-                            task.wait(0.1)
-                        end
+                        milkTp(ad.Position + Vector3.new(0, 3, 0), true)
+                        milkPollFor(function() return milkStoreFillAction() ~= nil end, 0.8)
                     end
                 end
                 how = milkStorePress(milkStoreFillAction())
@@ -8853,13 +8896,14 @@ local okBuild, errBuild = pcall(function()
             -- the confirmation window only runs when the remote did not already
             -- prove the jug went in; read every 0.2 s (was 0.5)
             if not done and not fullNow then
-                for _ = 1, 30 do -- ≤6 s, unchanged ceiling
-                    if milkStopping() or farmTookBody() then break end
-                    task.wait(0.2)
-                    local okFill, seenFull = took()
-                    if okFill then done = true break end
-                    if seenFull then fullNow = true break end
-                end
+                -- same 6 s ceiling, but checked every frame instead of every
+                -- 0.2 s: the barrel lands inside one, so this notices it inside
+                -- one rather than after up to 200 ms of standing still
+                done = milkPollFor(function()
+                    local okFill, isFull = took()
+                    if isFull then fullNow = true end
+                    return okFill
+                end, 6, function() return fullNow end)
             end
             if done then
                 moved += 1
@@ -8883,7 +8927,7 @@ local okBuild, errBuild = pcall(function()
                 end
                 if picked then
                     pressKey(Enum.KeyCode.X) -- Drop = X: never leave OUR jug in hand
-                    task.wait(0.5)
+                    milkPollFor(function() return milkStoreHolding() == nil end, 0.5)
                 end
                 break
             end
@@ -8894,8 +8938,9 @@ local okBuild, errBuild = pcall(function()
                 or "store: the milk jugs could not be reached"
         end
         local final, fcap = milkStoreAmount(dest)
-        return string.format("store: %d jug(s) into %s%s (%s/%s)",
+        return string.format("store: %d jug(s) into %s%s in %.1fs (%s/%s)",
             moved, dest.Name, (missed > 0 and not full) and ", a drop failed" or "",
+            os.clock() - milkFast.t0,
             tostring(final or "?"), tostring(fcap or cap or "?")), full
     end
 

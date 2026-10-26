@@ -71,6 +71,32 @@ Cow happiness decides milk quality (<60% spoiled, 60–89% regular, 90%+ free-ra
 The milk store step only loads **free-range** jugs — regular and spoiled are left
 on the ground for selling (`store: leaving N non-free-range jug(s)`).
 
+### Speed — what was actually slow
+Measured, not guessed. The deposit pass now prints its own time:
+`store: 20 jug(s) into LH150 in 5.8s (100/180)`.
+
+- **`task.wait(t)` is frame-quantised.** It sleeps *at least* `t` and then
+  resumes on the next Heartbeat, so at 60 FPS `task.wait(0.2)` costs 200–216 ms
+  and a loop of them is pure stand-still. The store step now polls **every
+  frame** (same deadline in seconds, so a high-FPS client does not give up
+  early) against a read the game already answers: the jug leaving the world,
+  the hand filling, the tank label changing.
+- **`FireServer` does not wait for a reply.** Only the *result* has to come back,
+  so the fast path is one network round trip per action, not a fixed sleep.
+- **A CFrame teleport needs ~50 ms to reach the server** (physics replication is
+  ~20 Hz), so the step waits three frames after a teleport instead of 150–250 ms.
+- **GUI-shaped reads stay at 50 ms**, not per frame: `milkMenuFor`, `milkStallGui`
+  and `milkDrops` walk the GUI/world, so polling them per frame would cost more
+  CPU than it saves.
+
+Measured with [tools/store_timing.py](tools/store_timing.py) (virtual clock, real
+extracted functions, `task.wait` modelled as frame-quantised): a 10-jug pass at
+120 ms latency went **5.42 s → 2.75 s** (0.54 → 0.27 s per jug), at 40 ms it went
+**4.08 s → 1.50 s**. Arm-the-herd (`milkHerdArm`) went **1.6 s → ~0.05 s** per cow
+when the menu is up, and the old 3.6 s "no menu" timeout is 3.0 s
+([tools/herd_arm_test.py](tools/herd_arm_test.py)). The rest of the time is the
+cows walking in and the server's own answer — no script can remove those.
+
 Economy (per seed box = 50 crops, average prices): Wheat ≈3,000/hr … **Tomatoes
 ≈7,686/hr** (best field crop), Potatoes ≈7,500/hr, Cabbage ≈6,500/hr; Cocoa raw ≈5,625/hr
 but is meant for chocolate milk (S-tier); Pine logs ≈19,500/hr; Cypress logs ≈63,000/hr.
