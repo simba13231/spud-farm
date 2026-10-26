@@ -35,6 +35,12 @@ local records = {}      -- chronological: {kind="call"|"mark", ...}
 local MAXREC = 1500
 local hooked, hookHow, hookErr = false, "none", nil
 local original      -- the namecall we replaced (for the restore)
+local gui, guiStatus -- the little panel
+
+function spudRemoteClosePanel()
+    if gui then pcall(function() gui:Destroy() end) end
+    gui, guiStatus = nil, nil
+end
 
 -- ▸ INSIDE THE HOOK: PROPERTY READS ONLY. GetFullName, FindFirstChild and
 --   GetChildren are themselves NAMECALLS, and calling one while a namecall is
@@ -291,6 +297,7 @@ end
 -- a way out that does NOT upload: restores the game's own call path at once
 function spudRemoteRestore()
     restore()
+    spudRemoteClosePanel()
     print("[spud-remote] hook removed — the game's own calls are untouched again")
 end
 
@@ -312,14 +319,143 @@ function spudRemoteStop()
         print("✔ upload blocked — the whole report is on your clipboard, paste it in a notes app and send it")
     end
     print("════════════════════════════════════════")
+    spudRemoteClosePanel()
     return link
 end
+
+--------------------------------------------------------------- the panel
+-- ▸ SMALL CONTROL PANEL (user: "give it a small gui please so i can copy and
+--   stop it"). Plain Roblox GUI on purpose — no library, no hooking of its
+--   own — so the copy/stop buttons keep working even when the game's own UI
+--   is the thing acting up.
+local function buildGui()
+    local parent
+    pcall(function() if gethui then parent = gethui() end end)
+    if not parent then
+        pcall(function() parent = LP:FindFirstChildOfClass("PlayerGui") end)
+    end
+    if not parent then
+        pcall(function() parent = game:GetService("CoreGui") end)
+    end
+    if not parent then return false end
+
+    local sg = Instance.new("ScreenGui")
+    sg.Name = "SpudRemotePanel"
+    sg.ResetOnSpawn = false
+    sg.IgnoreGuiInset = true
+    sg.DisplayOrder = 999
+    sg.Parent = parent
+
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.fromOffset(200, 156)
+    frame.Position = UDim2.fromOffset(16, 16)
+    frame.BackgroundColor3 = Color3.fromRGB(24, 24, 28)
+    frame.BackgroundTransparency = 0.08
+    frame.BorderSizePixel = 0
+    frame.Active = true
+    frame.Draggable = true
+    frame.Parent = sg
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8)
+    corner.Parent = frame
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Color3.fromRGB(72, 72, 84)
+    stroke.Thickness = 1
+    stroke.Parent = frame
+
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, -16, 0, 18)
+    title.Position = UDim2.fromOffset(8, 6)
+    title.BackgroundTransparency = 1
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 12
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.TextColor3 = Color3.fromRGB(240, 240, 245)
+    title.Text = "SPUD REMOTE PROBE"
+    title.Parent = frame
+
+    guiStatus = Instance.new("TextLabel")
+    guiStatus.Size = UDim2.new(1, -16, 0, 16)
+    guiStatus.Position = UDim2.fromOffset(8, 25)
+    guiStatus.BackgroundTransparency = 1
+    guiStatus.Font = Enum.Font.Gotham
+    guiStatus.TextSize = 11
+    guiStatus.TextXAlignment = Enum.TextXAlignment.Left
+    guiStatus.TextColor3 = Color3.fromRGB(170, 200, 170)
+    guiStatus.Text = "starting…"
+    guiStatus.Parent = frame
+
+    local function mkButton(text, y, color, onClick)
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(1, -16, 0, 26)
+        b.Position = UDim2.fromOffset(8, y)
+        b.BackgroundColor3 = color
+        b.BorderSizePixel = 0
+        b.AutoButtonColor = true
+        b.Font = Enum.Font.Gotham
+        b.TextSize = 12
+        b.TextColor3 = Color3.fromRGB(245, 245, 250)
+        b.Text = text
+        b.Parent = frame
+        local c = Instance.new("UICorner")
+        c.CornerRadius = UDim.new(0, 5)
+        c.Parent = b
+        b.MouseButton1Click:Connect(function()
+            local okRun, errRun = pcall(onClick)
+            if not okRun then print("[spud-remote] panel button error: " .. tostring(errRun)) end
+        end)
+        return b
+    end
+
+    mkButton("Copy report", 50, Color3.fromRGB(52, 52, 64), function()
+        local text = buildReport()
+        local okCopy = pcall(function() setclipboard(text) end)
+        print(okCopy and "[spud-remote] report copied to the clipboard"
+            or "[spud-remote] no setclipboard in this executor")
+        if guiStatus then
+            guiStatus.Text = okCopy and "copied — paste it to me" or "clipboard unavailable"
+        end
+    end)
+
+    mkButton("Upload & stop", 82, Color3.fromRGB(38, 108, 64), function()
+        spudRemoteStop()
+    end)
+
+    mkButton("Stop (no upload)", 114, Color3.fromRGB(118, 54, 54), function()
+        spudRemoteRestore()
+    end)
+
+    gui = sg
+    return true
+end
+
+local okPanel, panelRes = pcall(buildGui)
+if not okPanel then
+    print("[spud-remote] the panel errored (" .. tostring(panelRes) .. ") — the console commands still work")
+elseif not panelRes then
+    print("[spud-remote] the panel didn't build — the console commands still work")
+end
+
+task.spawn(function()
+    while gui do
+        task.wait(0.5)
+        if guiStatus and gui then
+            local n = 0
+            for _, r in ipairs(records) do if r.kind == "call" then n += 1 end end
+            guiStatus.Text = string.format("%d call(s) · %s", n,
+                hooked and "recording" or "stopped")
+        end
+    end
+end)
 
 -- safety net: a forgotten probe must never leave the hook installed
 if hooked then
     task.delay(600, function()
         if hooked then
             restore()
+            spudRemoteClosePanel()
             print("[spud-remote] 10 minutes passed — recording stopped and the game's own call path was restored")
         end
     end)
@@ -331,6 +467,6 @@ print("if ANY button stops responding: run  spudRemoteRestore()  (or rejoin)")
 print("1) pick up a milk jug (Carry/E)")
 print("2) walk to the truck and press Fill (V) once")
 print("3) milk one cow")
-print("4) run  spudRemoteStop()  and send the link")
+print("4) press  Copy report  on the little panel (or run spudRemoteStop()) and send it")
 print("   (spudRemoteMark(\"carry\") / (\"fill\") / (\"milk\") between steps if you like)")
 print("════════════════════════════════════════")

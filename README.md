@@ -117,8 +117,10 @@ Run it in game, then do one milk deposit **by hand** (pick up a jug, press Fill 
 the truck, milk one cow) and run `spudRemoteStop()`. It records every
 `FireServer` / `InvokeServer` the game itself makes, with the exact remote name
 and arguments, lists every remote in `ReplicatedStorage`, uploads the report and
-copies the link to the clipboard. It fires nothing. Used to decide whether the
-milk path can be a direct remote call instead of a teleport + key press.
+copies the link to the clipboard. It fires nothing. A small on-screen panel has
+**Copy report**, **Upload & stop** and **Stop (no upload)** so neither step needs
+the executor console. Used to decide whether the milk path can be a direct
+remote call instead of a teleport + key press.
 
 ## Contributing / fixing names
 Found a wrong in-game name after a game update? Open an issue (or PR) with the
