@@ -6195,11 +6195,19 @@ local okBuild, errBuild = pcall(function()
     end
 
     function milkStoreCandidate(m)
+        -- ▸ NO WAGON (user: "remove the wagon from the milk, it's not a thing
+        --   it's a prop"). "wagon" used to make any prop with that word in its
+        --   name look like a milk carrier — even one called "Milk Wagon" — so
+        --   a wagon-shaped model never qualifies on its NAME. It can still
+        --   earn a place with real liquid evidence (CarryType, a milk/liquid
+        --   label or attribute), which a plain prop has none of.
         local nm = tostring(m.Name):lower()
-        for _, w in ipairs({ "silo", "trailer", "tanker", "tank", "liquid",
-                             "milk", "cistern", "reservoir", "bulk", "churn",
-                             "barrel", "cart", "wagon" }) do
-            if nm:find(w, 1, true) then return true end
+        if not nm:find("wagon", 1, true) then
+            for _, w in ipairs({ "silo", "trailer", "tanker", "tank", "liquid",
+                                 "milk", "cistern", "reservoir", "bulk", "churn",
+                                 "barrel", "cart" }) do
+                if nm:find(w, 1, true) then return true end
+            end
         end
         -- ▸ A PLAIN TRUCK IS NOT A MILK CARRIER (user: "Don't offer UH at
         --   all", "dont run in UH"). UH/MTS are EquipmentType=Truck with no
@@ -6211,7 +6219,7 @@ local okBuild, errBuild = pcall(function()
         --   as MediumLiquidTruck). Trailers/silos are untouched.
         local et = tostring(m:GetAttribute("EquipmentType") or ""):lower()
         for _, w in ipairs({ "trailer", "tanker", "transport",
-                             "liquid", "tank", "silo", "cart", "wagon" }) do
+                             "liquid", "tank", "silo", "cart" }) do
             if et:find(w, 1, true) then return true end
         end
         -- the game's own load tag: CarryType=Liquid is how LH150 says it is a
