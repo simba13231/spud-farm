@@ -6493,8 +6493,10 @@ local okBuild, errBuild = pcall(function()
 
     -- the lasso: herd mode puts HerdTarget billboards on the spots a herded
     -- animal can be sent to (dump 26 = ...GuiViews.Animal.HerdingMode.
-    -- HerdingVisuals.<HerdTarget>.Trigger). The barn one is whichever target
-    -- stands nearest the barn, so pick by geometry - the names are $0/GateLarge.
+    -- HerdingVisuals.<HerdTarget>.Trigger). USER RULE: the one to press is the
+    -- BARN, never a gate. So every target carries whether it sits inside
+    -- AutoWoodenBarn, the barn sorts first, and a gate-named target is only
+    -- ever a last resort (labelled as such by the caller).
     function milkHerdTargets()
         local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
         local vis = pg and pg:FindFirstChild("HerdingVisuals", true)
@@ -6503,20 +6505,35 @@ local okBuild, errBuild = pcall(function()
         local out = {}
         for _, b in ipairs(vis and vis:GetChildren() or {}) do
             if b:IsA("BillboardGui") and b.Name == "HerdTarget" then
-                local ad, pos = b.Adornee, nil
+                local ad, pos, path, inBarn = b.Adornee, nil, "?", false
                 if ad then
                     local okp, p = pcall(function() return ad:GetPivot().Position end)
                     if okp then pos = p end
+                    path = ad.Name
+                    local o = ad
+                    for _ = 1, 10 do
+                        if o == barn then inBarn = true break end
+                        o = o.Parent
+                        if not o or o == workspace then break end
+                        path = o.Name .. "/" .. path
+                    end
                 end
                 out[#out + 1] = {
                     trig = b:FindFirstChild("Trigger"),
                     pos = pos,
-                    label = ad and ad.Name or "?",
+                    label = (ad and ad.Name) or "?",
+                    path = path,
+                    inBarn = inBarn,
+                    gate = (path:find("Gate") ~= nil),
                     dist = (pos and bp) and math.floor((pos - bp).Magnitude) or nil,
                 }
             end
         end
-        table.sort(out, function(a, b) return (a.dist or 1e9) < (b.dist or 1e9) end)
+        table.sort(out, function(a, b)
+            if a.inBarn ~= b.inBarn then return a.inBarn end
+            if a.gate ~= b.gate then return b.gate end -- barn, then non-gate, gates last
+            return (a.dist or 1e9) < (b.dist or 1e9)
+        end)
         return out
     end
 
@@ -6601,21 +6618,12 @@ local okBuild, errBuild = pcall(function()
         return true
     end
 
-    -- ▸ ONE LASSO FOR THE WHOLE HERD. Every cow is armed and herd mode is still
-    --   open, so a single press of the barn's HerdTarget sends the lot. We then
-    --   just count the stalls that fill up instead of guessing per cow.
+    -- ▸ ONE LASSO FOR THE WHOLE HERD, PRESSED ON THE BARN. Every cow is armed
+    --   and herd mode is still open, so a single press of the BARN's HerdTarget
+    --   sends the lot (user: it must be the barn, never the gate). We wait at
+    --   the stall inside the barn, press that target, then count arrivals.
     function milkHerdSend(picks)
         if #picks == 0 then return 0 end
-        local stall = picks[1].spot
-        local trig = stall:FindFirstChild("ProximityPart", true)
-        local centre = stall:FindFirstChild("Center", true)
-        local dest = (trig and trig.Position) or (centre and centre.Position)
-        if not dest then
-            log("milk: the stall has no readable spot to stand on")
-            return 0
-        end
-        milkTp(dest + Vector3.new(0, 3, 0))
-        task.wait(1.8) -- herd mode re-draws the targets where we land, not before
         local targets = milkHerdTargets()
         for _ = 1, 6 do -- up to 3 s for the targets to appear
             if #targets > 0 or milkStopping() or farmTookBody() then break end
@@ -6623,9 +6631,33 @@ local okBuild, errBuild = pcall(function()
             targets = milkHerdTargets()
         end
         for i, t in ipairs(targets) do
-            log(string.format("milk: herd target %d '%s' @ %s (%s from barn)", i, t.label,
+            log(string.format("milk: herd target %d '%s' [%s] @ %s (%s from barn)%s", i, t.label,
+                t.path,
                 t.pos and string.format("%d,%d,%d", t.pos.X, t.pos.Y, t.pos.Z) or "?",
-                t.dist and (tostring(t.dist) .. " studs") or "?"))
+                t.dist and (tostring(t.dist) .. " studs") or "?",
+                t.inBarn and " <- BARN" or (t.gate and " (gate)" or "")))
+        end
+        local barnT
+        for _, t in ipairs(targets) do
+            if t.inBarn then barnT = t break end
+        end
+        if not barnT then
+            for _, t in ipairs(targets) do
+                if not t.gate then barnT = t break end
+            end
+            if barnT then
+                log("milk: no HerdTarget inside the barn - using the one that is not a gate")
+            end
+        end
+        if not (barnT and barnT.trig) then
+            log("milk: no barn HerdTarget to press - refusing to touch a gate")
+            return 0
+        end
+        local stall = picks[1].spot
+        local st = stall:FindFirstChild("ProximityPart", true) or stall:FindFirstChild("Center", true)
+        if st then
+            milkTp(st.Position + Vector3.new(0, 3, 0)) -- wait at the stall, inside the barn
+            task.wait(1.8) -- herd mode re-draws the targets where we land
         end
         local function landed()
             local n = 0
@@ -6637,15 +6669,10 @@ local okBuild, errBuild = pcall(function()
         end
         local got = 0
         for attempt = 1, 2 do
-            local t = milkHerdTargets()[1]
-            if not (t and t.trig) then
-                log("milk: herd mode offered no HerdTarget to press")
-                break
-            end
-            local c, how = invokeHandlers(t.trig)
-            if not c then pcall(function() t.trig:Activate() end) end
-            log(string.format("milk: lasso pressed on '%s' (%s) - %d cow(s) armed", t.label,
-                tostring(how or "activate()"), #picks))
+            local c, how = invokeHandlers(barnT.trig)
+            if not c then pcall(function() barnT.trig:Activate() end) end
+            log(string.format("milk: lasso pressed on the BARN '%s' (%s) - %d cow(s) armed",
+                barnT.label, tostring(how or "activate()"), #picks))
             task.wait(2.0) -- let the herd actually take the order
             local t0 = os.clock()
             while os.clock() - t0 < 25 do
@@ -6655,7 +6682,10 @@ local okBuild, errBuild = pcall(function()
                 task.wait(0.5)
             end
             if got > 0 or attempt == 2 then break end
-            log("milk: no cow moved - one more lasso press")
+            log("milk: no cow moved - one more lasso press on the barn")
+            for _, t in ipairs(milkHerdTargets()) do
+                if t.inBarn then barnT = t break end
+            end
         end
         for _, p in ipairs(picks) do
             local o = p.spot:FindFirstChild("Occupant")
