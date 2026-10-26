@@ -8146,6 +8146,15 @@ local okBuild, errBuild = pcall(function()
         return first and tostring(first.Name) or nil
     end
 
+    -- how many jugs the game says we hold. CarryLinks gets one child per
+    -- carried item, so two jugs read as 2; a build that merges them into one
+    -- link simply reads 1 and the deposit stays single-carry without erroring
+    function milkStoreHeldCount()
+        local ch = LocalPlayer.Character
+        local links = ch and ch:FindFirstChild("CarryLinks")
+        return links and #links:GetChildren() or 0
+    end
+
     -- where to stand at the carrier: its own billboard Adornee first (that is
     -- the spot the game points its fill action at), then a trigger/centre
     -- part, then the model's pivot.
@@ -8245,6 +8254,16 @@ local okBuild, errBuild = pcall(function()
             end
         end)
         return out
+    end
+
+    -- is the game offering Carry right now? With the hands already full this
+    -- is the test for a SECOND jug: a build that only allows one shows Drop
+    -- instead, so nothing is ever pressed blindly.
+    function milkStoreCarryUp()
+        for _, a in ipairs(milkStoreActs()) do
+            if a.name == "Carry" or a.name == "LockedCarry" then return true end
+        end
+        return false
     end
 
     -- the game's own fill/load action, most specific first. Never Unload: that
@@ -8390,47 +8409,95 @@ local okBuild, errBuild = pcall(function()
             if #jugs == 0 and not held then break end
 
             if not held then
-                local jug = jugs[1]
-                if not jug then break end
-                milkTp(jug.part.Position + Vector3.new(0, 3, 0))
-                -- ▸ POLL, don't sleep (user: "make it load up the milk faster"):
-                --   the game offering Carry IS the proof the jug is in reach,
-                --   so E goes out the moment it appears (was a flat 0.8 s).
-                task.wait(0.15) -- floor: let the teleport land
-                for _ = 1, 6 do -- ≤0.6 s more, usually the first read
-                    if milkStopping() or farmTookBody() then break end
+                -- ▸ TWO JUGS PER TRIP (user: "make it carry 2 jugs at a time").
+                --   The first jug is grabbed as before; the SECOND is only
+                --   attempted, and only at the jug — with hands already full
+                --   the game has to keep offering Carry for it to happen. A
+                --   build that allows one jug shows Drop instead, the check
+                --   fails, and we leave carrying the one we have.
+                for grab = 1, 2 do
+                    jugs = milkStoreJugs(cf, size)
+                    local jug = jugs[1]
+                    if not jug then break end
+                    -- once this build has PROVED it takes one jug, never pay
+                    -- the detour to the next jug again (it would be a wasted
+                    -- teleport on every single barrel)
+                    if grab > 1 and milkStoreDoubleKnown == false then break end
+                    local jugCountBefore = #jugs
+                    milkTp(jug.part.Position + Vector3.new(0, 3, 0))
+                    -- ▸ POLL, don't sleep (user: "make it load up the milk
+                    --   faster"): the game offering Carry IS the proof the
+                    --   jug is in reach, so E goes out the moment it appears.
+                    task.wait(0.15) -- floor: let the teleport land
                     local up = false
-                    for _, a in ipairs(milkStoreActs()) do
-                        if a.name == "Carry" or a.name == "LockedCarry" then
-                            up = true
-                            break
-                        end
+                    for _ = 1, 6 do -- ≤0.6 s more, usually the first read
+                        if milkStopping() or farmTookBody() then break end
+                        if milkStoreCarryUp() then up = true break end
+                        task.wait(0.1)
                     end
-                    if up then break end
-                    task.wait(0.1)
-                end
-                if milkStopping() or farmTookBody() then break end
-                pressKey(Enum.KeyCode.E) -- Carry = E
-                -- the jug appearing in CarryLinks is the proof it is in our
-                -- hands — no need to sit out the old 0.9 s when it is instant
-                for _ = 1, 9 do -- ≤0.9 s, normally the first read
-                    if milkStoreHolding() then break end
-                    task.wait(0.1)
-                end
-                if not milkStoreHolding() then
-                    milkFeedButton("Carry") -- the game's own visible Carry button
-                    for _ = 1, 7 do -- ≤0.7 s (was a flat wait)
+                    -- hands full and no second Carry on offer: this build takes
+                    -- one jug. Learn it after two misses (one can be the game
+                    -- lagging behind the key press) and stop paying the detour.
+                    if grab > 1 and not up then
+                        milkStoreDoubleFails = (milkStoreDoubleFails or 0) + 1
+                        if milkStoreDoubleFails >= 2 then
+                            milkStoreDoubleKnown = false
+                            log("store: this build carries one jug at a time — single trips from now on")
+                        end
+                        break
+                    end
+                    if milkStopping() or farmTookBody() then break end
+                    pressKey(Enum.KeyCode.E) -- Carry = E
+                    -- the jug appearing in CarryLinks is the proof it is in
+                    -- our hands — no need to sit out the old 0.9 s
+                    for _ = 1, 9 do -- ≤0.9 s, normally the first read
                         if milkStoreHolding() then break end
                         task.wait(0.1)
                     end
+                    if not milkStoreHolding() then
+                        milkFeedButton("Carry") -- the game's own visible Carry button
+                        for _ = 1, 7 do -- ≤0.7 s (was a flat wait)
+                            if milkStoreHolding() then break end
+                            task.wait(0.1)
+                        end
+                    end
+                    if not milkStoreHolding() then
+                        log("store: E did not pick up " .. jug.model:GetFullName()
+                            .. " — the game offers: " .. milkFeedActs())
+                        break
+                    end
+                    picked = true
+                    local inHand = milkStoreHeldCount()
+                    log(string.format("store: carrying %s (%d in hand)",
+                        jug.model.Name, inHand > 0 and inHand or 1))
+                    if grab == 2 then
+                        -- the proof the second jug was really taken is that it
+                        -- LEFT THE WORLD (a build that swaps instead of
+                        -- stacking still ships one jug, and still counts)
+                        local left = #milkStoreJugs(cf, size)
+                        if milkStoreHeldCount() > 1 or left < jugCountBefore then
+                            milkStoreDoubleKnown = true
+                            milkStoreDoubleFails = 0
+                            log("store: two jugs in hand — one trip per pair")
+                        else
+                            -- two misses in a row and this build is a
+                            -- one-jug carrier: stop trying (a single miss can
+                            -- just be the game lagging behind the key press)
+                            milkStoreDoubleFails = (milkStoreDoubleFails or 0) + 1
+                            if milkStoreDoubleFails >= 2 then
+                                milkStoreDoubleKnown = false
+                                log("store: this build carries one jug at a time — single trips from now on")
+                            end
+                        end
+                    end
                 end
-                if not milkStoreHolding() then
-                    log("store: E did not pick up " .. jug.model:GetFullName()
-                        .. " — the game offers: " .. milkFeedActs())
-                    break
+                -- a second grab can put the first jug back down: re-read, and
+                -- never walk to the carrier to press Fill with empty hands
+                held = milkStoreHolding()
+                if not held then
+                    log("store: nothing in hand after the double grab — retrying next pass")
+                    continue
                 end
-                picked = true
-                log("store: carrying " .. jug.model.Name)
             end
 
             milkTp(stand + Vector3.new(0, 3, 0))
