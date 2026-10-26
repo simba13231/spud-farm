@@ -8160,6 +8160,63 @@ local okBuild, errBuild = pcall(function()
     --   counts as stored when it leaves the world (or the carrier's own
     --   n/m readout rises); a key press alone never counts.
     ----------------------------------------------------------------
+    -- ▸ THE GAME'S OWN REMOTES — recorded, not guessed.
+    --   SpudRemoteProbe.lua caught these while the whole job was done by hand:
+    --     EVTFillLiquidCarrier:FireServer(<carrier model>)
+    --     EVTRequestToCarry:FireServer(<draggable model>)
+    --   Firing one sends exactly what the key press sends, without the key
+    --   press or waiting for the context button to show up at this spot.
+    --   Nothing is trusted: a jug only counts once it is in CarryLinks and a
+    --   fill only once the tank rises (or the jug leaves), and three ignored
+    --   calls put the old key path back for the rest of the session.
+    ----------------------------------------------------------------
+    local milkRemoteOff, milkRemoteFails, milkRemoteCache = false, 0, nil
+
+    function milkRemotes()
+        -- only a SUCCESS is cached: a build that has no such remote (or one
+        -- still loading) is re-checked next time instead of being written off
+        if milkRemoteCache then return milkRemoteCache end
+        local rs = game:GetService("ReplicatedStorage")
+        local mods = rs:FindFirstChild("Modules")
+        local larry = mods and mods:FindFirstChild("Larry")
+        if not larry then return nil end
+        local out = {}
+        for _, spec in ipairs({ { "carry", "EVTRequestToCarry" },
+                                { "fill", "EVTFillLiquidCarrier" } }) do
+            local ev = larry:FindFirstChild(spec[2])
+            if ev and ev:IsA("RemoteEvent") then out[spec[1]] = ev end
+        end
+        if not (out.carry and out.fill) then return nil end
+        milkRemoteCache = out
+        return out
+    end
+
+    function milkRemoteFire(kind, arg)
+        if milkRemoteOff then return false end
+        local ev = (milkRemotes() or {})[kind]
+        if not ev then return false end
+        local ok
+        if arg == nil then
+            ok = pcall(function() ev:FireServer() end)
+        else
+            ok = pcall(function() ev:FireServer(arg) end)
+        end
+        return ok
+    end
+
+    -- three ignored calls and remotes are off: the key path is always there,
+    -- and a silent no-op is worse than a slow press. Three, not two: one lag
+    -- spike must not disable the fast path for the whole session.
+    function milkRemoteMiss(kind)
+        if milkRemoteOff then return end
+        milkRemoteFails += 1
+        if milkRemoteFails >= 3 then
+            milkRemoteOff = true
+            log("store: the game ignored the remote " .. tostring(kind)
+                .. " three times — back to key presses for this session")
+        end
+    end
+
     function milkStoreJugs(cf, size)
         local out = {}
         local objs = workspace:FindFirstChild("Objects")
@@ -8506,42 +8563,67 @@ local okBuild, errBuild = pcall(function()
                     --   faster"): the game offering Carry IS the proof the
                     --   jug is in reach, so E goes out the moment it appears.
                     task.wait(0.15) -- floor: let the teleport land
-                    local up = false
-                    for _ = 1, 6 do -- ≤0.6 s more, usually the first read
-                        if milkStopping() or farmTookBody() then break end
-                        if milkStoreCarryUp() then up = true break end
-                        task.wait(0.1)
-                    end
-                    -- hands full and no second Carry on offer: this build takes
-                    -- one jug. Learn it after two misses (one can be the game
-                    -- lagging behind the key press) and stop paying the detour.
-                    if grab > 1 and not up then
-                        milkStoreDoubleFails = (milkStoreDoubleFails or 0) + 1
-                        if milkStoreDoubleFails >= 2 then
-                            milkStoreDoubleKnown = false
-                            log("store: this build carries one jug at a time — single trips from now on")
+                    -- ▸ REMOTE FIRST (recorded call: EVTRequestToCarry(jug)).
+                    --   That is the request the E press sends, so fire it and
+                    --   let the world answer: the jug appearing in CarryLinks
+                    --   is the proof. Skips waiting for the context button
+                    --   (≤0.6 s) and the key round trip. If it does not land,
+                    --   the untouched key path below still runs.
+                    local got = false
+                    if milkRemoteFire("carry", jug.model) then
+                        for _ = 1, 6 do -- ≤0.5 s, usually the first read
+                            if milkStopping() or farmTookBody() then break end
+                            if grab > 1 then
+                                got = milkStoreHeldCount() > 1
+                                    or #milkStoreJugs(cf, size) < jugCountBefore
+                            else
+                                got = milkStoreHolding() ~= nil
+                            end
+                            if got then break end
+                            task.wait(0.08)
                         end
-                        break
+                        if not got then milkRemoteMiss("carry") end
                     end
-                    if milkStopping() or farmTookBody() then break end
-                    pressKey(Enum.KeyCode.E) -- Carry = E
-                    -- the jug appearing in CarryLinks is the proof it is in
-                    -- our hands — no need to sit out the old 0.9 s
-                    for _ = 1, 9 do -- ≤0.9 s, normally the first read
-                        if milkStoreHolding() then break end
-                        task.wait(0.1)
-                    end
-                    if not milkStoreHolding() then
-                        milkFeedButton("Carry") -- the game's own visible Carry button
-                        for _ = 1, 7 do -- ≤0.7 s (was a flat wait)
+
+                    if not got then
+                        local up = false
+                        for _ = 1, 6 do -- ≤0.6 s more, usually the first read
+                            if milkStopping() or farmTookBody() then break end
+                            if milkStoreCarryUp() then up = true break end
+                            task.wait(0.1)
+                        end
+                        -- hands full and no second Carry on offer: this build
+                        -- takes one jug. Learn it after two misses (one can be
+                        -- the game lagging behind the key press) and stop
+                        -- paying the detour.
+                        if grab > 1 and not up then
+                            milkStoreDoubleFails = (milkStoreDoubleFails or 0) + 1
+                            if milkStoreDoubleFails >= 2 then
+                                milkStoreDoubleKnown = false
+                                log("store: this build carries one jug at a time — single trips from now on")
+                            end
+                            break
+                        end
+                        if milkStopping() or farmTookBody() then break end
+                        pressKey(Enum.KeyCode.E) -- Carry = E
+                        -- the jug appearing in CarryLinks is the proof it is in
+                        -- our hands — no need to sit out the old 0.9 s
+                        for _ = 1, 9 do -- ≤0.9 s, normally the first read
                             if milkStoreHolding() then break end
                             task.wait(0.1)
                         end
-                    end
-                    if not milkStoreHolding() then
-                        log("store: E did not pick up " .. jug.model:GetFullName()
-                            .. " — the game offers: " .. milkFeedActs())
-                        break
+                        if not milkStoreHolding() then
+                            milkFeedButton("Carry") -- the game's own visible Carry button
+                            for _ = 1, 7 do -- ≤0.7 s (was a flat wait)
+                                if milkStoreHolding() then break end
+                                task.wait(0.1)
+                            end
+                        end
+                        if not milkStoreHolding() then
+                            log("store: E did not pick up " .. jug.model:GetFullName()
+                                .. " — the game offers: " .. milkFeedActs())
+                            break
+                        end
                     end
                     picked = true
                     local inHand = milkStoreHeldCount()
@@ -8578,54 +8660,84 @@ local okBuild, errBuild = pcall(function()
             end
 
             milkTp(stand + Vector3.new(0, 3, 0))
-            -- ▸ POLL for the fill action to be offered here instead of a flat
-            --   1.1 s (its absence is what the adornee fallback below is for).
-            --   Tighter than before so a second barrel does not pay 1.3 s.
+            -- ▸ the same floor the key path used: the server has to see us at
+            --   the carrier before it will accept the fill, so never shorten
+            --   this just because the remote is quicker
             task.wait(0.25)
-            for _ = 1, 10 do -- ≤0.8 s more
-                if milkStopping() or farmTookBody() then break end
-                if milkStoreFillAction() then break end
-                task.wait(0.08)
-            end
-            if milkStopping() or farmTookBody() then break end
-            -- nothing on offer at the pivot? stand where the game's own action
-            -- is adorned and ask again
-            if not milkStoreFillAction() then
-                local ad = milkStoreAdornee(dest)
-                if ad and (ad.Position - stand).Magnitude > 1 then
-                    milkTp(ad.Position + Vector3.new(0, 3, 0))
-                    task.wait(0.25)
-                    for _ = 1, 8 do -- ≤0.8 s, stops the moment the action is there
-                        if milkStopping() or farmTookBody() then break end
-                        if milkStoreFillAction() then break end
-                        task.wait(0.1)
-                    end
-                end
-            end
             local before, count = milkStoreAmount(dest), #milkStoreJugs(cf, size)
             local heldBefore = milkStoreHolding()
-            local how = milkStorePress(milkStoreFillAction())
-            log(string.format("store: sent %s at %s (%d jug(s) outside, %s/%s)",
-                how, dest.Name, count, tostring(before or "?"), tostring(cap or "?")))
+            local done, fullNow, how = false, false, nil
 
-            local done, fullNow = false, false
-            -- read every 0.2 s (was 0.5): the barrel lands in well under a
-            -- second, and the old cadence waited up to 6 s to notice
-            for _ = 1, 30 do -- ≤6 s, unchanged ceiling
-                if milkStopping() or farmTookBody() then break end
-                task.wait(0.2)
+            -- what "the fill landed" means, read from the world only
+            local function took()
                 local now, nowCount = milkStoreAmount(dest), #milkStoreJugs(cf, size)
                 local heldNow = milkStoreHolding()
                 if (heldBefore and not heldNow) or nowCount < count
                     or (now and before and now > before) then
-                    done = true
-                    break
+                    return true, false
                 end
                 -- the tank is at its cap: nothing more will go in, so waiting
                 -- out the window would only look like standing still
                 if now and cap and cap > 0 and now >= cap then
-                    fullNow = true
-                    break
+                    return false, true
+                end
+                return false, false
+            end
+
+            -- ▸ REMOTE FILL FIRST (recorded call:
+            --   EVTFillLiquidCarrier(<carrier>)). That is exactly what the V
+            --   press sends, without waiting for the context button to appear
+            --   at this spot (≤1.05 s) or the key round trip. Proof is still
+            --   the tank rising / the jug leaving our hands.
+            if milkRemoteFire("fill", dest) then
+                how = "remote EVTFillLiquidCarrier"
+                for _ = 1, 8 do -- ≤0.8 s: a jug lands in well under one
+                    if milkStopping() or farmTookBody() then break end
+                    task.wait(0.1)
+                    local okFill, seenFull = took()
+                    if okFill then done = true break end
+                    if seenFull then fullNow = true break end
+                end
+                if not done and not fullNow then milkRemoteMiss("fill") end
+            end
+
+            if not done and not fullNow then
+                -- ▸ the key path, unchanged: poll for the fill action to be
+                --   offered here instead of a flat 1.1 s, stand where the
+                --   game's own action is adorned when the pivot is wrong, then
+                --   press it
+                for _ = 1, 10 do -- ≤0.8 s
+                    if milkStopping() or farmTookBody() then break end
+                    if milkStoreFillAction() then break end
+                    task.wait(0.08)
+                end
+                if milkStopping() or farmTookBody() then break end
+                if not milkStoreFillAction() then
+                    local ad = milkStoreAdornee(dest)
+                    if ad and (ad.Position - stand).Magnitude > 1 then
+                        milkTp(ad.Position + Vector3.new(0, 3, 0))
+                        task.wait(0.25)
+                        for _ = 1, 8 do -- ≤0.8 s, stops the moment the action is there
+                            if milkStopping() or farmTookBody() then break end
+                            if milkStoreFillAction() then break end
+                            task.wait(0.1)
+                        end
+                    end
+                end
+                how = milkStorePress(milkStoreFillAction())
+            end
+            log(string.format("store: sent %s at %s (%d jug(s) outside, %s/%s)",
+                tostring(how or "?"), dest.Name, count, tostring(before or "?"), tostring(cap or "?")))
+
+            -- the confirmation window only runs when the remote did not already
+            -- prove the jug went in; read every 0.2 s (was 0.5)
+            if not done and not fullNow then
+                for _ = 1, 30 do -- ≤6 s, unchanged ceiling
+                    if milkStopping() or farmTookBody() then break end
+                    task.wait(0.2)
+                    local okFill, seenFull = took()
+                    if okFill then done = true break end
+                    if seenFull then fullNow = true break end
                 end
             end
             if done then

@@ -86,7 +86,11 @@ Roblox detection has three layers. **No Luau script can affect layer 1:**
    snap teleport, fast; the default) or Tween (slow stepped glide, safer) —
    Walkspeed/Jump clamps, NoClip force-blocked in stealth, all actions via
    real context-key binds (F/X/E/V) via virtual input (no RemoteEvent guessing =
-   no honeypot risk).
+   no honeypot risk). **One exception:** the milk store step fires two remotes
+   *recorded from the game itself* (`EVTRequestToCarry`, `EVTFillLiquidCarrier`)
+   to skip the context-button wait. Nothing is trusted: a jug only counts once
+   it is in `CarryLinks`, a fill only once the tank rises, three ignored calls
+   put the key path back for the session.
 3. **Behavioral/ML scoring** — flags robotic timing, 24/7 sessions, crowded-server
    play. Mitigations built in: ±40% timing jitter, random micro-pauses, session
    limiter (auto-break, default 45 min on / 4 min off).
@@ -119,8 +123,10 @@ the truck, milk one cow) and run `spudRemoteStop()`. It records every
 and arguments, lists every remote in `ReplicatedStorage`, uploads the report and
 copies the link to the clipboard. It fires nothing. A small on-screen panel has
 **Copy report**, **Upload & stop** and **Stop (no upload)** so neither step needs
-the executor console. Used to decide whether the milk path can be a direct
-remote call instead of a teleport + key press.
+the executor console. The report it produced is what the milk store step now
+uses: `EVTFillLiquidCarrier(<carrier>)` and `EVTRequestToCarry(<jug>)` are fired
+as a fast path, with the key presses kept as the fallback whenever the world does
+not confirm the result.
 
 ## Contributing / fixing names
 Found a wrong in-game name after a game update? Open an issue (or PR) with the
