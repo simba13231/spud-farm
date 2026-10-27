@@ -6,7 +6,7 @@
 
 local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/releases/latest/download/Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.13 · fluent gui"
+local VERSION    = "rebuild v1.14 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -7065,8 +7065,114 @@ local okBuild, errBuild = pcall(function()
         return kept, dropped
     end
 
+    -- ▸ THE STALL SCAN, NARROWED (user: "is there any way we can make the cow
+    --   checks faster?" / "a faster way to scan the stalls"). The scan used to
+    --   be workspace:GetDescendants() plus a name compare on every instance -
+    --   the dump counted 112,531 instances in this game, so every pass built
+    --   that whole table and read all of it to find a dozen parts. The dump
+    --   also says where the stalls are: inside a barn building, as
+    --   Spots.<n>.Adornee_BarnStallMenu (that numbered folder holds the
+    --   stall's ProximityPart / Filth / Hay / Occupant), and barns are the
+    --   models in Objects.Buildings. So the scan starts at the few barn
+    --   buildings instead. The whole-map walk is kept as a FALLBACK: if the
+    --   buildings turn up no stalls at all, the old scan runs exactly as
+    --   before, so a layout that does not match cannot lose its stalls.
+    function milkBarnStalls(barn, wantOwner, cf, size, out)
+        local spots = barn:FindFirstChild("Spots")
+            or (barn.Name:lower():find("barn", 1, true) and barn:FindFirstChild("Spots", true)) or nil
+        if not spots then return 0, 0 end
+        local took, skipped = 0, 0
+        for _, num in ipairs(spots:GetChildren()) do
+            local d = num:FindFirstChild("Adornee_BarnStallMenu", true)
+            if d then
+                local pos
+                pcall(function()
+                    if d:IsA("BasePart") then
+                        pos = d.Position
+                    elseif d:IsA("BillboardGui") or d:IsA("SurfaceGui") then
+                        local ad = d.Adornee
+                        if ad and ad:IsA("BasePart") then pos = ad.Position end
+                    end
+                end)
+                local owner = milkOwnerOf(d)
+                local mine = owner and wantOwner and owner:lower() == wantOwner:lower()
+                local near = (owner == nil) and cf and pos and milkInBox(pos, cf, size, 80)
+                if mine or near then
+                    out[#out + 1] = {
+                        pos = pos,
+                        owner = owner,
+                        part = d,
+                        spot = num,
+                        -- which building this stall stands in: the barn we just
+                        -- walked (the whole-map scan read the same thing off
+                        -- Spots.Parent.Parent)
+                        barn = barn,
+                        trigger = milkTrigger(num),
+                    }
+                    took += 1
+                else
+                    skipped += 1
+                end
+            end
+        end
+        return took, skipped
+    end
+
+    -- ▸ THE STALL'S Occupant VALUE, REMEMBERED (user: "a faster way to scan the
+    --   stalls"). The arrival wait reads this once per stall, five times a
+    --   second, and the milk step reads it again for every cow: two instance
+    --   calls each time. The INSTANCE is cached per stall (the .Parent check is
+    --   what proves it is still live), so a repeat read is one property access.
+    milkSpotFast = setmetatable({}, { __mode = "k" })
+    function milkStallOccupant(spot)
+        local hit = milkSpotFast[spot]
+        if hit and hit.Parent then return hit end
+        local o = spot and spot:FindFirstChild("Occupant")
+        if o and o:IsA("ObjectValue") then milkSpotFast[spot] = o end
+        return o
+    end
+
     local function milkStalls(wantOwner, cf, size)
         local out, skipped = {}, 0
+        -- the barn buildings this pass will look at. The locked one is the whole
+        -- answer when there is a lock (one building, a dozen reads). Without a
+        -- lock the candidates are the models in Objects.Buildings that are not
+        -- across the map - deliberately NOT a workspace:FindFirstChild(name,
+        -- true), which walks the whole map by name and cost more than the walk
+        -- it was replacing. A layout that keeps its barn somewhere else still
+        -- falls through to the old scan below, which then locks a barn for good.
+        local roots, seenRoot = {}, {}
+        local function root(r)
+            if r and not seenRoot[r] then seenRoot[r] = true; roots[#roots + 1] = r end
+        end
+        root(milkBarnPicked())
+        if #roots == 0 then
+            local objects = workspace:FindFirstChild("Objects")
+            local bld = objects and objects:FindFirstChild("Buildings")
+            for _, b in ipairs(bld and bld:GetChildren() or {}) do
+                if b:IsA("Model") then
+                    local far = false
+                    if cf then
+                        local ok, p = pcall(function() return b:GetPivot().Position end)
+                        far = ok and p and (p - cf.Position).Magnitude > 1200
+                    end
+                    if not far then root(b) end
+                end
+            end
+        end
+        if #roots > 0 then
+            local took = 0
+            for _, b in ipairs(roots) do
+                local n, skip = milkBarnStalls(b, wantOwner, cf, size, out)
+                took += n
+                skipped += skip
+            end
+            if took > 0 then
+                local kept, dropped = milkBarnKeep(out, wantOwner, cf)
+                return kept, skipped + (tonumber(dropped) or 0)
+            end
+            out = {} -- nothing in the buildings: the old scan below runs instead
+        end
         for _, d in ipairs(workspace:GetDescendants()) do
             if d.Name == "Adornee_BarnStallMenu" then
                 -- dump: 12 parts carry this name (the ADORNEE targets), so a
@@ -7162,7 +7268,7 @@ local okBuild, errBuild = pcall(function()
         end
         local containers = {}
         for _, s in ipairs(stalls or {}) do
-            local o = s.spot and s.spot:FindFirstChild("Occupant")
+            local o = milkStallOccupant(s.spot)
             if o and o:IsA("ObjectValue") and o.Value then add(o.Value, s.spot) end
             local cont = s.spot and s.spot.Parent and s.spot.Parent.Parent
             if cont and not containers[cont] then
@@ -7536,7 +7642,7 @@ local okBuild, errBuild = pcall(function()
         animals = animals and animals:FindFirstChild("Animals")
         local function stallOf(model)
             for _, s in ipairs(stalls or {}) do
-                local o = s.spot and s.spot:FindFirstChild("Occupant")
+                local o = milkStallOccupant(s.spot)
                 if o and o:IsA("ObjectValue") and o.Value == model then return s.spot end
             end
             return nil
@@ -7613,7 +7719,7 @@ local okBuild, errBuild = pcall(function()
         local free, parked = {}, 0
         for _, s in ipairs(stalls or {}) do
             if s.spot then
-                local o = s.spot:FindFirstChild("Occupant")
+                local o = milkStallOccupant(s.spot)
                 if o and o:IsA("ObjectValue") and o.Value then
                     parked += 1
                 else
@@ -7917,7 +8023,7 @@ local okBuild, errBuild = pcall(function()
             -- own state off "IdleLocked"
             for _ = 1, 8 do
                 task.wait(0.5)
-                local o = spot:FindFirstChild("Occupant")
+                local o = milkStallOccupant(spot)
                 local still = (o and o:IsA("ObjectValue") and cow and cow.model
                     and o.Value == cow.model) and true or false
                 local st = cow and cow.model and milkStateOf(cow.model)
@@ -7954,7 +8060,7 @@ local okBuild, errBuild = pcall(function()
         if not cow or not cow.model then return false end
         local occupied = false
         if cow.stall then
-            local o = cow.stall:FindFirstChild("Occupant")
+            local o = milkStallOccupant(cow.stall)
             occupied = (o and o:IsA("ObjectValue") and o.Value == cow.model) or false
         end
         local st = milkStateOf(cow.model)
@@ -8306,7 +8412,7 @@ local okBuild, errBuild = pcall(function()
             --   second, because parked cows sitting in the barn count as that.
             local fresh = false
             for _, s in ipairs(stalls or {}) do
-                local o = s.spot and s.spot:FindFirstChild("Occupant")
+                local o = milkStallOccupant(s.spot)
                 local m = (o and o:IsA("ObjectValue")) and o.Value or nil
                 if m and not took[m] then
                     fresh = true
@@ -9463,7 +9569,11 @@ local okBuild, errBuild = pcall(function()
                 end
             end
         end
+        -- the scan is logged with its own time: the narrow walk reads a dozen
+        -- parts, so a millisecond here and a hundred there is the whole story
+        local stallAt = os.clock()
         local stalls, skipped = milkStalls(owner, cf, size)
+        local stallMs = (os.clock() - stallAt) * 1000
 
         -- ▸ 1. CLEAN FIRST. The user's rule is absolute: a dirty stall is
         --   cleaned before the loop does anything else at all.
@@ -9471,9 +9581,12 @@ local okBuild, errBuild = pcall(function()
         if #stalls > 0 then
             local trig = 0
             for _, s in ipairs(stalls) do if s.trigger then trig += 1 end end
-            log(string.format("milk: %d stall(s) - checking them before anything else (%d with a trigger volume)",
-                #stalls, trig))
+            log(string.format("milk: %d stall(s) found by the narrow scan in %.0f ms - checking them before anything else (%d with a trigger volume)",
+                #stalls, stallMs, trig))
             dirty, cleaned, unknown = milkClean(stalls)
+        else
+            log(string.format("milk: no stall found for %s in %.0f ms (%d skipped)",
+                tostring(owner), stallMs, skipped))
         end
 
         -- ▸ 2. cows + their production number (field ones AND the ones parked

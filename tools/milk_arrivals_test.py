@@ -39,6 +39,8 @@ TAKEN = false
 LOG = {}
 MILKS = {}
 milkBatchSize = 5
+-- the real milkStallOccupant (extracted below) caches into this
+milkSpotFast = setmetatable({}, { __mode = "k" })
 
 milkStopping = function() return STOP end
 farmTookBody = function() return TAKEN and VT >= TAKEN end
@@ -169,6 +171,19 @@ print(fails == 0 and "ALL OK" or (fails .. " FAILED"))
 """
 
 
+def dedent(block: str) -> str:
+    return "\n".join(line[4:] if line.startswith("    ") else line for line in block.splitlines())
+
+
+def extract_occupant(text: str) -> str:
+    """The REAL stall Occupant reader the arrival gate uses, not a copy."""
+    m1 = re.search(r"^    function milkStallOccupant\(", text, re.M)
+    m2 = re.search(r"^    local function milkStalls\(", text, re.M)
+    if not m1 or not m2 or m2.start() < m1.start():
+        raise SystemExit("milkStallOccupant not found in SpudFarm_Full.lua")
+    return dedent(text[m1.start():m2.start()])
+
+
 def extract(text: str) -> str:
     m1 = re.search(r"^    function milkArrivals\(", text, re.M)
     # the section header that follows the function (the switch one is a
@@ -177,7 +192,7 @@ def extract(text: str) -> str:
     if not m1 or not m2:
         raise SystemExit("milkArrivals not found in SpudFarm_Full.lua")
     block = text[m1.start():m1.start() + m2.start()]
-    return "\n".join(line[4:] if line.startswith("    ") else line for line in block.splitlines())
+    return dedent(block)
 
 
 def main() -> int:
@@ -185,7 +200,9 @@ def main() -> int:
     exe = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else base / "luau.exe"
     src = SRC.read_text(encoding="utf-8")
     with tempfile.NamedTemporaryFile("w", suffix=".lua", delete=False, encoding="utf-8") as fh:
-        fh.write(PRE + extract(src) + POST)
+        # the occupant reader first: it is a local in this chunk, so the
+        # function defined after it captures it as an upvalue
+        fh.write(PRE + extract_occupant(src) + "\n" + extract(src) + POST)
         path = fh.name
     out = subprocess.run([str(exe), path], capture_output=True, encoding="utf-8", errors="replace")
     print(out.stdout.strip())

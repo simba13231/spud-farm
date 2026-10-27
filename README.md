@@ -129,6 +129,22 @@ turns up parked. [tools/milk_arrivals_test.py](tools/milk_arrivals_test.py) coun
 the scans: 6 scans over the 12.6 s a five-cow batch took, where the old code
 scanned on every 200 ms poll (~60).
 
+**The stall scan, narrowed.** Finding one barn's stalls was
+`workspace:GetDescendants()` plus a name compare per instance — and this game has
+~112,531 instances (run-3 dump), so every pass built that table to find a dozen
+parts. The stalls are `<barn>.Spots.<n>.Adornee_BarnStallMenu` and barns are the
+models in `Objects.Buildings`, so the scan now starts at those few buildings (and
+at the barn the farm is already locked to, which is one building). Measured on a
+95k-instance fake map with 8 barns and the real functions
+([tools/stall_scan_bench.py](tools/stall_scan_bench.py)): **95,517 calls + 95,410
+name reads per pass → 73 calls + 0 name reads** once the barn is locked, 101 on
+the first pass, 380 if the distance prune takes nothing out. Same 12 stalls kept,
+and the whole-map walk still runs as a fallback if a layout matches none of this.
+The stall's `Occupant` value is cached per stall too (the arrival wait reads it
+five times a second, and the milk step reads it per cow), so a repeat read is one
+property access instead of two instance calls. The pass now prints the scan time:
+`milk: 12 stall(s) found by the narrow scan in 0 ms - ...`.
+
 **Farms are teleported to, not walked to.** A distant plot is streamed *out* of
 workspace, so the pass saw "no plot" and moved on - a farm that was never really
 looked at. Each farm's plot centre is remembered on first sight; when the plot is
