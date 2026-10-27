@@ -9253,17 +9253,26 @@ local okBuild, errBuild = pcall(function()
                 log("milk cycle failed: " .. tostring(ran))
             end
             -- the farm loop owns the body while it drives: peek every 5 s and
-            -- do nothing. Otherwise a successful herd means "go again at
-            -- once", an issue means retry soon, nothing means once a minute.
+            -- do nothing. Otherwise a pass that herded or milked anything goes
+            -- straight back in, an issue means retry soon, nothing means once
+            -- a minute.
             local busy = ((tonumber(dirty) or 0) + (tonumber(unknown) or 0)) > 0
             local idle = 60
             if deferred == "defer" then idle = 5
-            elseif herded == true then idle = 2
+            -- ▸ THE NEXT ROUND STARTS THE INSTANT THE LAST ONE ENDS (user: "i
+            --   also want the next round of milking to start right when the
+            --   last round finished"). A productive pass no longer sleeps at
+            --   all: the arm-the-next-batch work IS the next round, and the
+            --   old 2 s here was only the barn standing empty. A pass with
+            --   nothing to do still rests for a minute, so this cannot spin.
+            elseif herded == true then idle = 0
             elseif busy then idle = 6 end
             if deferred ~= "defer" then
-                log(string.format("milk: %s - next barn check in %d s",
+                log(string.format("milk: %s - %s",
                     busy and "issues found"
-                        or (herded and "one barn job done" or "no dirty stall seen"), idle))
+                        or (herded and "one barn job done" or "no dirty stall seen"),
+                    idle == 0 and "next round at once"
+                        or string.format("next barn check in %d s", idle)))
             end
             for _ = 1, idle * 2 do -- half-second slices so OFF reacts at once
                 if milkStopping() then break end

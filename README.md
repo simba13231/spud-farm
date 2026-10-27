@@ -46,7 +46,8 @@ Everything merged into one paste-and-run file:
   AnimalFoodBoxes), live status paragraph, **milk loop** toggle. The loop cleans
   dirty stalls first, herds the batch in, then **milks each cow the moment it
   lands in its stall** and waits for the next one — it does not sit until the
-  whole herd is parked
+  whole herd is parked — and a finished round goes **straight into the next
+  one** (no idle gap); only a pass with nothing to do rests for a minute
 - **Player tab** — walkspeed, jump power, infinite jump, noclip, anti-AFK, FPS boost
 - **Teleport tab** — Ctrl+Click teleport + FarmCo / AnimalCo / TractorCo / LumberCo /
   Bulk Store / Warehouse / **My Farm** (resolves your plot by its "Your Farm"
