@@ -39,7 +39,10 @@ Everything merged into one paste-and-run file:
   Cake & Eggs (**7 steps**: eggs → milk → wheat/milk/egg deposits → 4 levers →
   **batter → oven bake** → collect + sell), Wool Run (shear → spindel bundles,
   5 wool each → sell); LOOP toggle, STOP button
-- **Milk tab** — pick whose plot to work, the **herd batch size typed in a box
+- **Milk tab** — **three Farm pickers worked in a rotation** (farm 1 → 2 → 3;
+  a slot left on "(none)" is skipped, farm 3 wraps back to farm 1, and a farm
+  takes over as soon as the current one has nothing left to milk), the **herd
+  batch size typed in a box
   (1–12)**, **Store milk in** (live list of the picked account's trailers/silos;
   only free-range jugs are loaded there), **Deliver all milk** switch, **Refill
   feed dispenser** switch (tops the plot's FeedDispenser up from the

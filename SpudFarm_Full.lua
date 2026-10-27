@@ -6,7 +6,7 @@
 
 local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/releases/latest/download/Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.10 · fluent gui"
+local VERSION    = "rebuild v1.11 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -6100,20 +6100,98 @@ local okBuild, errBuild = pcall(function()
     end
 
     local milkChoices0 = milkUserChoices()
-    milkUser = milkChoices0[1]
+
+    ------------------------------------------------------------
+    -- ▸ THREE FARMS, WORKED IN A ROTATION (user: "add more farms it can milk
+    --   on, 2 more drop downs like the first one except it does farm1>farm2>
+    --   farm3 if no farm2 but there is a farm3 do farm3 but if there is no
+    --   farm3 make it go to 1 ... make it run in a loop"). Every slot picks
+    --   from the same players list and any of them can be left on "(none)":
+    --   the rotation skips empty slots and wraps farm 3 -> farm 1, so with only
+    --   farm 1 set it behaves exactly as the single picker did.
+    --   GLOBAL state on purpose - a local here costs a register in the build
+    --   closure, and its 200-local budget is one local from trouble.
+    ------------------------------------------------------------
+    milkPicks = { "(none)", "(none)", "(none)" }
+    if milkChoices0[1] and milkChoices0[1]:sub(1, 1) ~= "(" then
+        milkPicks[1] = milkChoices0[1] -- start where the single picker did
+    end
+    milkTurn = 0
+    milkDrops = {}
+
+    -- a slot only counts when it names a real player: "(none)" and the
+    -- "(nobody else is here)" placeholder do not
+    function milkFarmOf(slot)
+        local v = milkPicks and milkPicks[slot or milkTurn or 1]
+        if not v or v == "" or v:sub(1, 1) == "(" then return nil end
+        return v
+    end
+
+    -- what every farm dropdown offers: "(none)" first, then the other players
+    function milkFarmOptions()
+        local out = { "(none)" }
+        for _, n in ipairs(milkUserChoices()) do
+            if n:sub(1, 1) ~= "(" then out[#out + 1] = n end
+        end
+        return out
+    end
+
+    -- ▸ MOVE TO THE NEXT FARM: skips empty slots, wraps farm 3 -> farm 1.
+    --   The store pick is reset ONLY when the account really changed - that
+    --   picker names one account's carrier, so the next scan has to rank the
+    --   new farm's carriers first instead of hauling its milk across the map.
+    --   Returns the name, or nil when no slot is set at all.
+    function milkFarmNext()
+        for _ = 1, 3 do
+            milkTurn = (milkTurn or 0) % 3 + 1
+            local who = milkFarmOf(milkTurn)
+            if who then
+                if milkUser ~= who then
+                    milkStorePick, milkStoreScanAt = nil, nil
+                end
+                milkUser = who
+                return who
+            end
+        end
+        milkUser = nil
+        return nil
+    end
+
+    -- a slot changed by hand: follow it when it is the one being worked (an
+    -- emptied slot hands over to the next farm), or adopt it when nothing is
+    -- picked at all
+    function milkFarmChanged(slot)
+        local who = milkFarmOf(slot)
+        if (milkTurn or 0) == slot then
+            if who then
+                milkUser = who
+            else
+                milkUser = milkFarmNext()
+            end
+        elseif not milkUser then
+            milkTurn = slot
+            milkUser = who
+        end
+        return milkUser
+    end
+
     -- ▸ HOW MANY COWS AT A TIME (user: "a type section that i can put the number
     --   of cows i want to milk at a time from 1-12"). One number drives the
     --   herding batch AND how many arrivals the milk step waits for. GLOBAL on
     --   purpose: a local here costs a register in the build closure.
     milkBatchSize = 5
-    local milkDrop = Tabs.Milk:CreateDropdown("milkUser", {
-        Title = "User",
-        Values = milkChoices0,
+
+    -- the three pickers, built one by one; their objects live in milkDrops so
+    -- the refresh below can refill all three when players join or leave
+    milkDrops[1] = Tabs.Milk:CreateDropdown("milkFarm1", {
+        Title = "Farm 1",
+        Values = milkFarmOptions(),
         Multi = false,
-        Default = milkUser,
+        Default = milkPicks[1],
         Callback = function(v)
-            milkUser = v
-            log("milk: user = " .. tostring(v))
+            milkPicks[1] = v
+            milkFarmChanged(1)
+            log("milk: farm 1 = " .. tostring(v))
             -- the store list is that ACCOUNT's carriers: re-scan on the switch
             -- (the picker is built further down, so guard the early call)
             if type(milkStoreRefresh) == "function" then
@@ -6121,7 +6199,37 @@ local okBuild, errBuild = pcall(function()
             end
         end,
     })
-    log("milk: users — " .. table.concat(milkChoices0, ", "))
+    milkDrops[2] = Tabs.Milk:CreateDropdown("milkFarm2", {
+        Title = "Farm 2",
+        Values = milkFarmOptions(),
+        Multi = false,
+        Default = milkPicks[2],
+        Callback = function(v)
+            milkPicks[2] = v
+            milkFarmChanged(2)
+            log("milk: farm 2 = " .. tostring(v))
+            if type(milkStoreRefresh) == "function" then
+                pcall(milkStoreRefresh, true)
+            end
+        end,
+    })
+    milkDrops[3] = Tabs.Milk:CreateDropdown("milkFarm3", {
+        Title = "Farm 3",
+        Values = milkFarmOptions(),
+        Multi = false,
+        Default = milkPicks[3],
+        Callback = function(v)
+            milkPicks[3] = v
+            milkFarmChanged(3)
+            log("milk: farm 3 = " .. tostring(v))
+            if type(milkStoreRefresh) == "function" then
+                pcall(milkStoreRefresh, true)
+            end
+        end,
+    })
+    milkUser = milkFarmNext() -- slot 1 when it is set, else the first that is
+    log(string.format("milk: farms — 1=%s 2=%s 3=%s (passes work the next farm that is set)",
+        tostring(milkPicks[1]), tostring(milkPicks[2]), tostring(milkPicks[3])))
 
     -- ▸ the typed number itself (user: 1-12). Fluent hands over the box text;
     --   the clamp keeps a typo from asking for 0 or 400 cows.
@@ -6618,22 +6726,44 @@ local okBuild, errBuild = pcall(function()
     local milkRefreshWorks = true
     local function refreshMilkUsers()
         if not milkRefreshWorks then return end
-        local list = milkUserChoices()
-        local ok = pcall(function() milkDrop:SetValues(list) end)
-        if not ok then ok = pcall(function() milkDrop:Refresh(list) end) end
-        if not ok then
+        local list = milkFarmOptions()
+        local okAll = true
+        for slot = 1, 3 do
+            local drop = milkDrops[slot]
+            local ok = pcall(function() drop:SetValues(list) end)
+            if not ok then ok = pcall(function() drop:Refresh(list) end) end
+            if not ok then okAll = false end
+            -- a farm that left the server hands its slot back to "(none)"
+            local mine, found = milkPicks[slot], false
+            for _, n in ipairs(list) do
+                if n == mine then found = true break end
+            end
+            if not found then
+                milkPicks[slot] = "(none)"
+                pcall(function() drop:SetValue("(none)") end)
+            end
+        end
+        if not okAll then
             milkRefreshWorks = false
             log("milk: this build's dropdown can't be refilled — reload the script to see players who joined later")
             return
         end
-        local found = false
-        for _, n in ipairs(list) do
-            if n == milkUser then found = true break end
+        -- nobody picked anywhere yet: adopt the first other player, the way the
+        -- single picker used to
+        if not (milkFarmOf(1) or milkFarmOf(2) or milkFarmOf(3)) then
+            for _, n in ipairs(list) do
+                if n ~= "(none)" then
+                    milkPicks[1] = n
+                    pcall(function() milkDrops[1]:SetValue(n) end)
+                    log("milk: farm 1 = " .. n)
+                    break
+                end
+            end
         end
-        if not found then
-            milkUser = list[1]
-            log("milk: the picked user left — now on " .. tostring(milkUser))
-            pcall(function() Fluent.Options.milkUser:SetValue(milkUser) end)
+        -- the farm being worked must still exist
+        if not milkFarmOf(milkTurn) then
+            local who = milkFarmNext()
+            log("milk: the picked farm left — now on " .. tostring(who or "(nothing picked)"))
         end
     end
     Players.PlayerAdded:Connect(function(p)
@@ -9253,7 +9383,8 @@ local okBuild, errBuild = pcall(function()
         local lines = {}
         local parked = 0
         for _, c in ipairs(cows) do if c.inBarn then parked += 1 end end
-        lines[#lines + 1] = string.format("%s - plot %s - %d stall(s) - %d cow(s), %d in a barn", owner,
+        lines[#lines + 1] = string.format("farm %d/3: %s - plot %s - %d stall(s) - %d cow(s), %d in a barn",
+            milkTurn or 1, owner,
             plot and plot.Name or ("NOT FOUND [" .. tostring(plotsSeen) .. "]"), #stalls, #cows, parked)
         for i, c in ipairs(cows) do
             local where = c.stall and (" [barn " .. tostring(c.stall.Name) .. "]")
@@ -9280,6 +9411,22 @@ local okBuild, errBuild = pcall(function()
         if feedLine then lines[#lines + 1] = feedLine end
         if storeLine then lines[#lines + 1] = storeLine end
         if leftLine then lines[#lines + 1] = leftLine end
+        -- ▸ ROTATE WHEN THIS FARM IS DONE (user: "farm1>farm2>farm3 ... make it
+        --   run in a loop"). "Done" is narrow and honest: the pass herded
+        --   nothing, milked nothing and left no ready cow in the field, so
+        --   there is nothing more to do here for now. Then the next slot with a
+        --   farm takes over - empty slots are skipped, farm 3 wraps to farm 1.
+        --   With a single farm set this changes nothing at all.
+        if not herded and not milked and left == 0 then
+            local was = milkUser
+            local nxt = milkFarmNext()
+            if nxt and nxt ~= was then
+                log(string.format("milk: %s is done - the next pass works %s",
+                    tostring(was or "this farm"), nxt))
+            elseif not nxt and was then
+                log("milk: no farm is set any more - pick one in the Milk tab")
+            end
+        end
         milkSetStatus(table.concat(lines, "\n"))
         log("milk: " .. table.concat(lines, " | "))
         return true, dirty, unknown, (herded or milked)
@@ -9336,8 +9483,9 @@ local okBuild, errBuild = pcall(function()
                 --   defers while the farm loop is driving and works in its
                 --   rest windows (waiting for the crops to grow). A loop
                 --   already ON is refused at its OWN toggle below.
-                if not milkUser or milkUser:sub(1, 1) == "(" then
-                    log("milk loop: pick a user first — the dropdown names whose plot to work on")
+                milkUser = milkFarmOf(milkTurn) or milkFarmNext()
+                if not milkUser then
+                    log("milk loop: pick a farm first — Farm 1/2/3 name whose plot to work on")
                     pcall(function()
                         (Fluent.Options and Fluent.Options.milkLoop
                             or milkToggle):SetValue(false)
