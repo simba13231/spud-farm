@@ -6,7 +6,7 @@
 
 local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/releases/latest/download/Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.14 · fluent gui"
+local VERSION    = "rebuild v1.15 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -7011,12 +7011,30 @@ local okBuild, errBuild = pcall(function()
             math.floor(p.X + 0.5), math.floor(p.Y + 0.5), math.floor(p.Z + 0.5))
     end
 
-    -- the building this owner is locked to, while it is still in the world
-    function milkBarnPicked()
-        local rec = milkBarns and milkBarns[(milkUser or "?"):lower()]
+    -- ▸ THE LIVE BUILDING FOR A LOCK RECORD (user: "it herds the cows but does
+    --   not send them to the barn"). The record used to hold the INSTANCE the
+    --   first scan locked, and return nil once that instance left the world - a
+    --   barn that streams out and back is a NEW instance, so from then on the
+    --   herd step fell back to a name lookup, and every plot names its barn
+    --   AutoWoodenBarn: it pressed ANOTHER PLOT'S barn, so the cows were herded
+    --   and then sent nowhere. The record's KEY (name + where it stands) is
+    --   what survives streaming, so that is what the live building is found by.
+    function milkBarnLive(rec)
         if not rec then return nil end
         if rec.inst and rec.inst.Parent then return rec.inst end
-        return nil -- streamed out: the callers fall back to their own default
+        local objects = workspace:FindFirstChild("Objects")
+        local bld = objects and objects:FindFirstChild("Buildings")
+        local hit
+        for _, b in ipairs(bld and bld:GetChildren() or {}) do
+            if b:IsA("Model") and milkBarnKey(b) == rec.key then hit = b break end
+        end
+        rec.inst = hit -- nil until it streams back in, then bound once and kept
+        return hit
+    end
+
+    -- the building this owner is locked to, wherever it is now
+    function milkBarnPicked()
+        return milkBarnLive(milkBarns and milkBarns[(milkUser or "?"):lower()])
     end
 
     -- keep only the stalls of ONE building: chosen once per owner (the one
@@ -7458,7 +7476,15 @@ local okBuild, errBuild = pcall(function()
         local vis = pg and pg:FindFirstChild("HerdingVisuals", true)
         -- the LOCKED building for this farm when there is one, so the lasso is
         -- pressed on the same barn the stalls and the batch belong to
-        local barn = milkBarnPicked() or workspace:FindFirstChild("AutoWoodenBarn", true)
+        local barn = milkBarnPicked()
+        if not barn then
+            -- only when this farm has no lock yet (the scan sets one on every
+            -- pass, before the herd): a name lookup can find another plot's barn
+            barn = workspace:FindFirstChild("AutoWoodenBarn", true)
+            if barn then
+                log("milk: this farm has no barn locked yet - matching the herd targets by name, which can be another plot's barn")
+            end
+        end
         local bp = barn and barn:GetPivot().Position
         local out = {}
         for _, b in ipairs(vis and vis:GetChildren() or {}) do
@@ -7471,6 +7497,15 @@ local okBuild, errBuild = pcall(function()
                     local o = ad
                     for _ = 1, 10 do
                         if o == barn then inBarn = true break end
+                        -- only when this farm has NO barn identity at all: a node
+                        -- that owns stalls IS a barn, which beats pressing
+                        -- whatever the game listed first. With a barn known,
+                        -- identity stays strict so another plot's barn can never
+                        -- be marked as ours
+                        if not barn and o ~= workspace and o:FindFirstChild("Spots") then
+                            inBarn = true
+                            break
+                        end
                         o = o.Parent
                         if not o or o == workspace then break end
                         path = o.Name .. "/" .. path
@@ -7490,7 +7525,13 @@ local okBuild, errBuild = pcall(function()
         table.sort(out, function(a, b)
             if a.inBarn ~= b.inBarn then return a.inBarn end
             if a.gate ~= b.gate then return b.gate end -- barn, then non-gate, gates last
-            return (a.dist or 1e9) < (b.dist or 1e9)
+            local da, db = a.dist or 1e9, b.dist or 1e9
+            if da ~= db then return da < db end
+            -- ▸ a TOTAL order. When every distance is unreadable (no barn in the
+            --   world) the old comparator answered false for every pair, and
+            --   Lua's sort is free to shuffle an all-equal list - which is how a
+            --   loose target could end up first and take the lasso press.
+            return a.path < b.path
         end)
         return out
     end

@@ -54,8 +54,15 @@ Everything merged into one paste-and-run file:
   finished round goes **straight into the next one** (no idle gap); only a pass
   with nothing to do rests for a minute. If a plot has **more than one barn
   building**, the first cycle locks to one of them (the one nearest the plot
-  centre) for the rest of the session, so stalls, the parked count, the batch
-  and the lasso press are never split across two barns
+  centre)  for the rest of the session, so stalls, the parked count, the batch
+  and the lasso press are never split across two barns. That lock is held as
+  **name + where the building stands**, not as the model itself: a barn that
+  streams out and comes back is a *new* instance, and matching it by identity
+  used to leave the herd step with no barn at all — it then fell back to the
+  first building named `AutoWoodenBarn` in the map, which is another player's,
+  so the cows were herded and sent to the wrong barn (or nowhere). The bug, its
+  reproduction and the fix are in
+  [tools/herd_send_test.py](tools/herd_send_test.py)
 - **Player tab** — walkspeed, jump power, infinite jump, noclip, anti-AFK, FPS boost
 - **Teleport tab** — Ctrl+Click teleport + FarmCo / AnimalCo / TractorCo / LumberCo /
   Bulk Store / Warehouse / **My Farm** (resolves your plot by its "Your Farm"

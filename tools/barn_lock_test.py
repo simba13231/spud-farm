@@ -44,12 +44,26 @@ LocalPlayer = { Name = "Me" }
 LOG = {}
 log = function(s) LOG[#LOG + 1] = s end
 
+-- the world holds the buildings that are currently streamed in, which is what
+-- milkBarnLive looks through to re-find a build that came back as a new instance
+WORLD = { all = {} }
 local function barn(name, x)
-    return {
+    local b = {
         Name = name, Parent = true,
+        IsA = function(self, cls) return cls == "Model" end,
         GetPivot = function() return { Position = Vector3.new(x, 0, 0) } end,
     }
+    WORLD.all[#WORLD.all + 1] = b
+    return b
 end
+
+local BUILDINGS = { GetChildren = function()
+    local out = {}
+    for _, b in ipairs(WORLD.all) do if b.Parent then out[#out + 1] = b end end
+    return out
+end }
+local OBJECTS = { FindFirstChild = function(_, n) if n == "Buildings" then return BUILDINGS end end }
+workspace = { FindFirstChild = function(_, n) if n == "Objects" then return OBJECTS end end }
 
 BARN_NEAR = barn("AutoWoodenBarn", 10)
 BARN_FAR = barn("AutoWoodenBarn", 200)
@@ -113,14 +127,25 @@ check("single barn: nothing dropped, nothing logged",
     #kept5 == 2 and dropped5 == 0 and #LOG == 0,
     string.format("kept %d, dropped %d, log %d", #kept5, dropped5, #LOG))
 
--- 7. milkBarnPicked: the instance while it lives, nil once it is gone
+-- 7. milkBarnPicked: the live instance, and after the build streams out and
+--    back it is found again BY ITS SPOT - a rebuilt barn is a NEW instance, and
+--    before this it returned nil and the herd step fell back to a name lookup,
+--    which picks whatever barn the map lists first - another plot's
 fresh()
 milkBarnKeep({ stall(BARN_NEAR), stall(BARN_FAR) }, "Simba", CF)
 check("picked building is handed to the other steps", milkBarnPicked() == BARN_NEAR,
     tostring(milkBarnPicked() and milkBarnPicked().Name))
+rebuilt.Parent = nil -- test 4 left a LIVE barn at the same name+spot, and the
+                     -- live lookup finds by spot, so it has to leave first
 BARN_NEAR.Parent = nil
-check("a streamed-out build falls back to nil", milkBarnPicked() == nil,
-    tostring(milkBarnPicked()))
+check("streamed out with nothing at its spot: nothing picked", milkBarnPicked() == nil,
+    milkBarnPicked() and tostring(milkBarnPicked().Name) or "nil")
+local atSameSpot = barn("AutoWoodenBarn", 10) -- it streams back in
+local otherPlot = barn("AutoWoodenBarn", 9000)
+check("a rebuilt barn at the same spot is picked again", milkBarnPicked() == atSameSpot,
+    tostring(milkBarnPicked() and milkBarnPicked().Name))
+check("another plot's barn is never picked instead", milkBarnPicked() ~= otherPlot,
+    tostring(milkBarnPicked() and milkBarnPicked().Name))
 
 print(fails == 0 and "ALL OK" or (fails .. " FAILED"))
 """
