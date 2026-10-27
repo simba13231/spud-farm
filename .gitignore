@@ -6,6 +6,7 @@ game_dump*.txt
 spud_dump.txt
 
 # OS / editor noise
+__pycache__/
 Thumbs.db
 Desktop.ini
 .DS_Store

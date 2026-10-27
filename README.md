@@ -114,6 +114,29 @@ when the menu is up, and the old 3.6 s "no menu" timeout is 3.0 s
 ([tools/herd_arm_test.py](tools/herd_arm_test.py)). The rest of the time is the
 cows walking in and the server's own answer — no script can remove those.
 
+**The cow checks, cached.** A scan (`milkCows`) reads three things off every
+animal in the world, and the Owner read walks up to eight parents per animal
+looking for a `Configurations.Owner` when the animal has none - which is most of
+them. The **instances** are now remembered per model in a weak-keyed table, so a
+repeat read is one property access. Measured on a fake 120-animal world (40 tagged,
+80 strays) with the real functions ([tools/cow_scan_bench.py](tools/cow_scan_bench.py)):
+**1400 → 560 instance calls per scan** (11.7 → 4.7 per cow) once warm; the cold
+pass is unchanged, and an animal is never cached as untagged, so a cow that gets
+its owner a moment later is still picked up. The **arrival wait** no longer scans
+at all while nothing is happening: it watches the plot's own stall `Occupant`
+values (12 parts, ~30 reads) and only scans when a cow that was not milked yet
+turns up parked. [tools/milk_arrivals_test.py](tools/milk_arrivals_test.py) counts
+the scans: 6 scans over the 12.6 s a five-cow batch took, where the old code
+scanned on every 200 ms poll (~60).
+
+**Farms are teleported to, not walked to.** A distant plot is streamed *out* of
+workspace, so the pass saw "no plot" and moved on - a farm that was never really
+looked at. Each farm's plot centre is remembered on first sight; when the plot is
+missing the character teleports to the remembered centre and waits up to 4 s for
+the plot to stream back in, and when the plot is visible but we are more than 200
+studs away the pass jumps to it before reading anything (every other step already
+teleports to its own target, so the walk was the only slow part of a farm change).
+
 Economy (per seed box = 50 crops, average prices): Wheat ≈3,000/hr … **Tomatoes
 ≈7,686/hr** (best field crop), Potatoes ≈7,500/hr, Cabbage ≈6,500/hr; Cocoa raw ≈5,625/hr
 but is meant for chocolate milk (S-tier); Pine logs ≈19,500/hr; Cypress logs ≈63,000/hr.

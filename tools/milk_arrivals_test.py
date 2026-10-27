@@ -31,6 +31,7 @@ local VT = 0.0
 os = { clock = function() return VT end }
 task = { wait = function(t)
     VT = math.ceil((VT + math.max(t or 0, FRAME)) / FRAME - 1e-9) * FRAME
+    if SYNC then SYNC() end -- the game parks cows as time passes, not on a scan
 end }
 
 STOP = false
@@ -57,8 +58,11 @@ local function sync()
         if m.at and VT >= m.at and not m.milked then m.inStall = true end
     end
 end
+SYNC = sync
 
+SCANS = 0 -- how many full animal scans the wait actually ran
 milkCows = function()
+    SCANS = SCANS + 1
     sync()
     local out = {}
     for i, m in ipairs(world.cows) do
@@ -67,6 +71,22 @@ milkCows = function()
             state = m.inStall and "IdleLocked" or "Wander",
             stall = m.milked and nil or {}, inBarn = true,
         }
+    end
+    return out
+end
+
+-- the plot's stalls, one per cow: an Occupant appears the moment the cow is in
+-- its stall, which is the cheap gate the arrival wait now reads instead of
+-- scanning every animal in the world
+local function makeStalls(list)
+    local out = {}
+    for i, m in ipairs(list) do
+        out[i] = { spot = { FindFirstChild = function(_, n)
+            if n == "Occupant" and m.inStall then
+                return { IsA = function(_, c) return c == "ObjectValue" end, Value = m }
+            end
+            return nil
+        end } }
     end
     return out
 end
@@ -91,8 +111,10 @@ local function reset(cows, want, taken)
         m.refuses = c[4] == true
     end
     VT, STOP, LOG, MILKS = 0.0, false, {}, {}
+    SCANS = 0
     milkBatchSize = want or 5
     TAKEN = taken or false
+    STALLS = makeStalls(world.cows)
 end
 
 local fails = 0
@@ -104,7 +126,7 @@ end
 
 -- 1. the cow that lands first is milked long before the last one lands
 reset({ { "c1", 1.1 }, { "c2", 1.6 }, { "c3", 6.0 }, { "c4", 6.5 }, { "c5", 11.0 } }, 5)
-local done, handled, arrived = milkArrivals("Simba", nil, nil, {}, 5)
+local done, handled, arrived = milkArrivals("Simba", nil, nil, STALLS, 5)
 check("first milk before the last cow arrives", #MILKS > 0 and MILKS[1].at < 2.5,
     MILKS[1] and string.format("first milk at %.2fs, cow 5 lands at 11.0s", MILKS[1].at))
 check("all five milked", done == 5 and handled == 5 and arrived == 5,
@@ -112,11 +134,13 @@ check("all five milked", done == 5 and handled == 5 and arrived == 5,
 check("milked in arrival order", #MILKS == 5 and MILKS[1].name == "c1" and MILKS[5].name == "c5",
     MILKS[1] and (MILKS[1].name .. " .. " .. MILKS[5].name) or "none")
 check("no 25 s tail after the last cow", VT < 20, string.format("clock %.2fs", VT))
+check("the wait did not re-scan every poll", SCANS <= 8,
+    string.format("%d scan(s) over %.1fs of waiting", SCANS, VT))
 
 -- 2. one cow never walks in: the wait ends `quiet` seconds after the last
 --    event instead of the 300 s cap
 reset({ { "c1", 1.1 }, { "c2", 2.0 }, { "c3", nil } }, 3)
-done, handled, arrived = milkArrivals("Simba", nil, nil, {}, 3)
+done, handled, arrived = milkArrivals("Simba", nil, nil, STALLS, 3)
 check("missing cow ends via the quiet window", done == 2 and handled == 2,
     string.format("done=%d handled=%d clock %.1fs", done, handled, VT))
 check("quiet window is 25 s, not the 300 s cap", VT > 25 and VT < 45,
@@ -124,21 +148,22 @@ check("quiet window is 25 s, not the 300 s cap", VT > 25 and VT < 45,
 
 -- 3. a cow that refuses to milk still gets one attempt, and the wait goes on
 reset({ { "c1", 1.1, 300, true }, { "c2", 2.0 } }, 2)
-done, handled, arrived = milkArrivals("Simba", nil, nil, {}, 2)
+done, handled, arrived = milkArrivals("Simba", nil, nil, STALLS, 2)
 check("refused milk counts as handled, not as done", done == 1 and handled == 2,
     string.format("done=%d handled=%d", done, handled))
 
 -- 4. the farm loop wants the body: bail at once
 reset({ { "c1", nil }, { "c2", nil } }, 2, 3.0)
-done, handled, arrived = milkArrivals("Simba", nil, nil, {}, 2)
+done, handled, arrived = milkArrivals("Simba", nil, nil, STALLS, 2)
 check("farmTookBody stops the wait", handled == 0 and VT >= 3 and VT < 5,
     string.format("clock %.2fs", VT))
 
 -- 5. nothing at all arrives: quiet window, no milk presses
 reset({ { "c1", nil } }, 1)
-done, handled, arrived = milkArrivals("Simba", nil, nil, {}, 1)
+done, handled, arrived = milkArrivals("Simba", nil, nil, STALLS, 1)
 check("no arrival: nothing milked, exits on quiet", done == 0 and handled == 0 and #MILKS == 0,
     string.format("clock %.1fs", VT))
+check("an empty wait scans once (the entry scan)", SCANS <= 1, string.format("%d scan(s)", SCANS))
 
 print(fails == 0 and "ALL OK" or (fails .. " FAILED"))
 """

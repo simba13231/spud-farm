@@ -6,7 +6,7 @@
 
 local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/releases/latest/download/Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.12 · fluent gui"
+local VERSION    = "rebuild v1.13 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -6817,13 +6817,32 @@ local okBuild, errBuild = pcall(function()
 
     -- Configurations.Owner, walked up a few parents (plot / field / vehicle /
     -- animal all carry it in the dump)
+    -- ▸ THE COW CHECKS, CACHED (user: "is there any way we can make the cow
+    --   checks faster?"). Every scan re-walked each model for the same three
+    --   children, and the owner walk ran again for every animal in the world -
+    --   several times a second while the milk step waits for a cow to walk in.
+    --   The INSTANCES are remembered per model in a weak-keyed table (a
+    --   streamed-out and rebuilt model is a new key, so nothing stale can
+    --   survive) which turns a repeat read into one property access.
+    milkCowFast = {
+        prod = setmetatable({}, { __mode = "k" }),
+        state = setmetatable({}, { __mode = "k" }),
+        owner = setmetatable({}, { __mode = "k" }),
+    }
+
     local function milkOwnerOf(inst)
-        local p = inst
+        local hit = milkCowFast.owner[inst]
+        if hit then return hit end -- only hits are cached: a miss re-walks, so a
+        local p = inst             -- cow tagged later is still picked up
         for _ = 1, 8 do
             if not p then break end
             local conf = p:FindFirstChild("Configurations")
             local o = conf and conf:FindFirstChild("Owner")
-            if o and o:IsA("ObjectValue") and o.Value then return o.Value.Name end
+            if o and o:IsA("ObjectValue") and o.Value then
+                local who = o.Value.Name
+                milkCowFast.owner[inst] = who
+                return who
+            end
             p = p.Parent
         end
         return nil
@@ -6861,11 +6880,19 @@ local okBuild, errBuild = pcall(function()
     --   Configurations.Production = 300 and Configurations.Mood). So the whole
     --   read costs nothing: no menu, no teleport, no waiting.
     local function milkPercentOf(m)
-        local conf = m:FindFirstChild("Configurations")
-        local prod = conf and conf:FindFirstChild("Production")
-        if prod and prod:IsA("NumberValue") then
+        -- the already-found value instance: one .Parent check is all the proof
+        -- needed that the model still owns it
+        local prod = milkCowFast.prod[m]
+        if prod and prod.Parent then
             return math.floor(prod.Value + 0.5)
         end
+        local conf = m:FindFirstChild("Configurations")
+        prod = conf and conf:FindFirstChild("Production")
+        if prod and prod:IsA("NumberValue") then
+            milkCowFast.prod[m] = prod
+            return math.floor(prod.Value + 0.5)
+        end
+        milkCowFast.prod[m] = nil
         for _, a in ipairs({ "Production", "ProductionPercent", "Milk" }) do
             local v = m:GetAttribute(a)
             if type(v) == "number" then return math.floor(v + 0.5) end
@@ -6875,9 +6902,18 @@ local okBuild, errBuild = pcall(function()
 
     -- "Wander" = out in the field, "IdleLocked" = parked in a barn stall
     local function milkStateOf(m)
+        local st = milkCowFast.state[m]
+        if st and st.Parent then
+            local v = st.Value
+            return v ~= "" and v or nil
+        end
         local conf = m:FindFirstChild("Configurations")
-        local st = conf and conf:FindFirstChild("AnimoidState")
-        if st and st:IsA("StringValue") and st.Value ~= "" then return st.Value end
+        st = conf and conf:FindFirstChild("AnimoidState")
+        if st and st:IsA("StringValue") and st.Value ~= "" then
+            milkCowFast.state[m] = st
+            return st.Value
+        end
+        milkCowFast.state[m] = nil
         return nil
     end
 
@@ -6961,6 +6997,9 @@ local okBuild, errBuild = pcall(function()
     --   building for that owner and every later cycle keeps it until the
     --   script is reloaded.
     milkBarns = {}
+    -- where each farm's plot was last seen: a plot across the map is STREAMED
+    -- OUT, so the pass has to stand there before it can examine it
+    milkFarmSpot = {}
 
     -- identity of a building that survives streaming: its name and where it
     -- stands (a streamed-out barn comes back as a NEW instance)
@@ -8251,31 +8290,55 @@ local okBuild, errBuild = pcall(function()
         local want = math.floor((tonumber(expect) or milkBatchSize or 5) + 0.5)
         if want < 1 then want = 1 elseif want > 12 then want = 12 end
         local waitFor = quiet or 25
+        local first = true -- one scan up front, so a cow that was already parked is never missed
         local beat, t0 = os.clock(), os.clock()
+        local lastComing = false
         while true do
             if milkStopping() or farmTookBody() then break end
-            local cows = milkCows(owner, cf, size, stalls)
-            -- ▸ WHO IS READY *NOW*. Scan order picks the first cow that is
-            --   really in a stall and waiting; "coming" is a cow that is in
-            --   the barn but still walking to its stall, which keeps the wait
-            --   alive instead of ending it early.
+            -- ▸ CHEAP GATE (user: "is there any way we can make the cow checks
+            --   faster?"). Waiting for a cow to walk in re-read EVERY animal in
+            --   the world five times a second. The plot's own stalls (12 parts,
+            --   ~30 reads) already say whether anything new is standing in one,
+            --   so the full scan runs only when a stall really changed - the
+            --   scan runs once at entry, and after that only when a cow that
+            --   was not milked yet turns up parked. Rescanning on "a cow is in
+            --   the barn" too would put the wait straight back to four scans a
+            --   second, because parked cows sitting in the barn count as that.
+            local fresh = false
+            for _, s in ipairs(stalls or {}) do
+                local o = s.spot and s.spot:FindFirstChild("Occupant")
+                local m = (o and o:IsA("ObjectValue")) and o.Value or nil
+                if m and not took[m] then
+                    fresh = true
+                    break
+                end
+            end
             local ready, coming = nil, false
-            for _, c in ipairs(cows) do
-                if not took[c.model] then
-                    local inNow = milkInStallNow(c)
-                    if inNow and not seen[c.model] then
-                        seen[c.model] = true
-                        arrived += 1
-                        beat = os.clock()
-                        log(string.format("milk: cow %d is in the barn (%d of %d) - milking it now",
-                            c.index or 0, arrived, want))
-                    end
-                    if inNow and (c.percent == nil or c.percent >= 300) then
-                        ready = ready or c
-                    elseif c.stall or c.inBarn then
-                        coming = true
+            if fresh or first then
+                first = false
+                local cows = milkCows(owner, cf, size, stalls)
+                -- ▸ WHO IS READY *NOW*. Scan order picks the first cow that is
+                --   really in a stall and waiting; "coming" is a cow that is in
+                --   the barn but still walking to its stall, which keeps the
+                --   wait alive instead of ending it early.
+                for _, c in ipairs(cows) do
+                    if not took[c.model] then
+                        local inNow = milkInStallNow(c)
+                        if inNow and not seen[c.model] then
+                            seen[c.model] = true
+                            arrived += 1
+                            beat = os.clock()
+                            log(string.format("milk: cow %d is in the barn (%d of %d) - milking it now",
+                                c.index or 0, arrived, want))
+                        end
+                        if inNow and (c.percent == nil or c.percent >= 300) then
+                            ready = ready or c
+                        elseif c.stall or c.inBarn then
+                            coming = true
+                        end
                     end
                 end
+                lastComing = coming
             end
             if ready then
                 -- the same two steady reads milkAllParked makes: a cow that
@@ -8297,13 +8360,14 @@ local okBuild, errBuild = pcall(function()
                     task.wait(0.2)
                 end
             else
-                if handled >= want or (arrived >= want and not coming) then break end
+                if handled >= want
+                    or (arrived >= want and not (coming or lastComing)) then break end
                 if os.clock() - beat > waitFor then
                     log(string.format("milk: no cow in the barn for %d s - %d of %d handled, the rest walk in next cycle",
                         waitFor, handled, want))
                     break
                 end
-                task.wait(0.2) -- milkCows walks the world; 200 ms is plenty
+                task.wait(0.2) -- cheap while the gate above is closed
             end
             if os.clock() - t0 > 300 then break end
         end
@@ -9355,6 +9419,50 @@ local okBuild, errBuild = pcall(function()
         local plot, plotsSeen = milkPlotOf(owner)
         local cf, size
         if plot then cf, size = plot:GetBoundingBox() end
+        -- ▸ REMEMBER WHERE EACH FARM IS, AND GO THERE (user: "i think it does
+        --   not reach the farms by distance maybe make the character teleport
+        --   to the farm"). Roblox streams distant builds OUT, so a farm across
+        --   the map is not in workspace at all: the plot reads as missing, the
+        --   pass finds nothing to do and the rotation moves on - a farm that
+        --   was never really looked at. The plot centre is remembered per farm;
+        --   when the plot cannot be seen the character teleports to where it
+        --   was and waits for the world to stream back in. And when the plot IS
+        --   visible but we are still standing across the map, the pass jumps to
+        --   the plot centre before reading anything - every other step of the
+        --   pass already teleports to its own target, so the walk was the only
+        --   part of a farm change that cost real time (and the far half of the
+        --   farm can still be streamed out from there).
+        local spotKey = (owner or "?"):lower()
+        if plot and cf then
+            milkFarmSpot[spotKey] = cf.Position
+            local root = LocalPlayer.Character
+                and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+            local here = root and root.Position
+            if here and (cf.Position - here).Magnitude > 200 then
+                log(string.format("milk: %s is %d studs away - teleported to its plot",
+                    tostring(owner), math.floor((cf.Position - here).Magnitude)))
+                milkTp(cf.Position + Vector3.new(0, 12, 0))
+            end
+        else
+            local spot = milkFarmSpot[spotKey]
+            if spot then
+                milkTp(spot + Vector3.new(0, 12, 0))
+                log(string.format("milk: %s is not streamed in - teleported to its plot (%d, %d, %d) and waiting",
+                    tostring(owner), math.floor(spot.X), math.floor(spot.Y), math.floor(spot.Z)))
+                for _ = 1, 8 do -- up to 4 s for the plot to come back
+                    if milkStopping() or farmTookBody() then break end
+                    task.wait(0.5)
+                    plot, plotsSeen = milkPlotOf(owner)
+                    if plot then break end
+                end
+                if plot then
+                    cf, size = plot:GetBoundingBox()
+                    log("milk: " .. tostring(owner) .. "'s plot streamed in - carrying on there")
+                else
+                    log("milk: " .. tostring(owner) .. "'s plot did not stream in - this pass may find nothing")
+                end
+            end
+        end
         local stalls, skipped = milkStalls(owner, cf, size)
 
         -- ▸ 1. CLEAN FIRST. The user's rule is absolute: a dirty stall is
