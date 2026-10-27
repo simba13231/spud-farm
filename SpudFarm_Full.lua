@@ -6,7 +6,7 @@
 
 local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/releases/latest/download/Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.9 · fluent gui"
+local VERSION    = "rebuild v1.10 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -7375,21 +7375,59 @@ local okBuild, errBuild = pcall(function()
         local want = math.floor((tonumber(milkBatchSize) or 5) + 0.5)
         if want < 1 then want = 1 elseif want > 12 then want = 12 end
         if parked >= want or #free == 0 then return 0, 0, parked, {} end
-        local picks, tried = {}, 0
+
+        -- ▸ NEAREST FIRST (user: "i want it to start with the cows that are in
+        --   stall so it is much faster"). The walk-in is the slow part of a
+        --   round: a cow 200 studs out holds the whole batch up, because the
+        --   milk step can only take them one at a time as they land. So the
+        --   ready cows are sorted by how far they are from the barn and the
+        --   closest are armed first - the batch starts arriving immediately
+        --   while the far ones are still walking, instead of the pick being
+        --   whatever order the world happens to list them in.
+        local ready = {}
         for _, c in ipairs(cows or {}) do
-            if #picks >= want - parked or #free == 0 then break end
             if not c.inBarn and not c.stall and c.state ~= "IdleLocked"
                 and (c.percent or 0) >= 300 then
-                tried += 1
-                local slot = table.remove(free, 1)
-                if milkHerdArm(c, tried == 1) then
-                    picks[#picks + 1] = { spot = slot.spot, cow = c }
-                else
-                    free[1] = slot -- it stayed in the field, so keep its stall
-                end
-                task.wait(1.0) -- gap between Herd presses, the menu animates
-                if milkStopping() or farmTookBody() then break end
+                ready[#ready + 1] = c
             end
+        end
+        local anchor
+        do
+            local barn = workspace:FindFirstChild("AutoWoodenBarn", true)
+            if barn then
+                local okP, p = pcall(function() return barn:GetPivot().Position end)
+                if okP then anchor = p end
+            end
+            if not anchor then -- no barn model: the nearest free stall will do
+                for _, s in ipairs(free) do
+                    if s.pos then anchor = s.pos break end
+                end
+            end
+        end
+        if anchor then
+            local function away(c)
+                if not c.pos then return 1e9 end -- unreadable position: last
+                return (c.pos - anchor).Magnitude
+            end
+            table.sort(ready, function(a, b) return away(a) < away(b) end)
+        end
+        if #ready > 0 then
+            log(string.format("herd: %d ready cow(s) - herding the %d closest to the barn first",
+                #ready, math.min(want - parked, #ready)))
+        end
+
+        local picks, tried = {}, 0
+        for _, c in ipairs(ready) do
+            if #picks >= want - parked or #free == 0 then break end
+            tried += 1
+            local slot = table.remove(free, 1)
+            if milkHerdArm(c, tried == 1) then
+                picks[#picks + 1] = { spot = slot.spot, cow = c }
+            else
+                free[1] = slot -- it stayed in the field, so keep its stall
+            end
+            task.wait(1.0) -- gap between Herd presses, the menu animates
+            if milkStopping() or farmTookBody() then break end
         end
         local done = 0
         if #picks > 0 then
@@ -9129,6 +9167,10 @@ local okBuild, errBuild = pcall(function()
         --   are in stalls"). A barn holding one ready cow used to wait for four
         --   more to be shoved in before anything was milked.
         local milkDone, milkTried = milkAllParked(cows)
+        if milkDone > 0 then
+            log(string.format("milk: %d cow(s) were already in a stall - milked before any herding",
+                milkDone))
+        end
 
         -- ▸ 2b. HERD A BATCH OF milkBatchSize (user: "herd 5 cows per herding
         --   and milk them all then do the checks then restart", now 1-12 from
