@@ -52,7 +52,10 @@ Everything merged into one paste-and-run file:
   the round up), **milks each cow the moment it lands in its stall** and waits
   for the next one — it does not sit until the whole herd is parked — and a
   finished round goes **straight into the next one** (no idle gap); only a pass
-  with nothing to do rests for a minute
+  with nothing to do rests for a minute. If a plot has **more than one barn
+  building**, the first cycle locks to one of them (the one nearest the plot
+  centre) for the rest of the session, so stalls, the parked count, the batch
+  and the lasso press are never split across two barns
 - **Player tab** — walkspeed, jump power, infinite jump, noclip, anti-AFK, FPS boost
 - **Teleport tab** — Ctrl+Click teleport + FarmCo / AnimalCo / TractorCo / LumberCo /
   Bulk Store / Warehouse / **My Farm** (resolves your plot by its "Your Farm"

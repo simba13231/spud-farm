@@ -6,7 +6,7 @@
 
 local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/releases/latest/download/Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.11 · fluent gui"
+local VERSION    = "rebuild v1.12 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -6952,6 +6952,80 @@ local okBuild, errBuild = pcall(function()
         return ok and part or nil
     end
 
+    -- ▸ ONE BARN PER FARM (user: "if the user has more than 1 barn make it
+    --   chose only 1 of the barns to use for the rest of the scripts life
+    --   untill reloaded"). A plot with two barn buildings used to spread its
+    --   stalls - and with them the parked count, the herd batch, the barn press
+    --   and the cleaned stalls - over both of them, so a batch could end up
+    --   half in one building and half in the other. The first cycle picks ONE
+    --   building for that owner and every later cycle keeps it until the
+    --   script is reloaded.
+    milkBarns = {}
+
+    -- identity of a building that survives streaming: its name and where it
+    -- stands (a streamed-out barn comes back as a NEW instance)
+    function milkBarnKey(barn)
+        if not barn then return nil end
+        local ok, p = pcall(function() return barn:GetPivot().Position end)
+        if not ok or not p then return tostring(barn.Name) end
+        return string.format("%s@%d,%d,%d", tostring(barn.Name),
+            math.floor(p.X + 0.5), math.floor(p.Y + 0.5), math.floor(p.Z + 0.5))
+    end
+
+    -- the building this owner is locked to, while it is still in the world
+    function milkBarnPicked()
+        local rec = milkBarns and milkBarns[(milkUser or "?"):lower()]
+        if not rec then return nil end
+        if rec.inst and rec.inst.Parent then return rec.inst end
+        return nil -- streamed out: the callers fall back to their own default
+    end
+
+    -- keep only the stalls of ONE building: chosen once per owner (the one
+    -- closest to the plot centre), then kept for the session. Returns the kept
+    -- stalls and how many were left out.
+    function milkBarnKeep(out, wantOwner, cf)
+        local key = (wantOwner or (LocalPlayer and LocalPlayer.Name) or "?"):lower()
+        local rec = milkBarns[key]
+        if not rec then
+            local seen, distinct, best, bestD = {}, 0, nil, nil
+            for _, s in ipairs(out or {}) do
+                if s.barn and not seen[s.barn] then
+                    seen[s.barn] = true
+                    distinct += 1
+                    local bp
+                    pcall(function() bp = s.barn:GetPivot().Position end)
+                    local dist = (bp and cf) and (bp - cf.Position).Magnitude or nil
+                    if not best or (dist and (not bestD or dist < bestD)) then
+                        best, bestD = s.barn, dist
+                    end
+                end
+            end
+            if best then
+                rec = { inst = best, key = milkBarnKey(best) }
+                milkBarns[key] = rec
+                if distinct > 1 then
+                    log(string.format("milk: this farm has %d buildings with stalls - locked to %s%s until reload",
+                        distinct, tostring(best.Name),
+                        bestD and string.format(" (%.0f studs from the plot centre)", bestD) or ""))
+                end
+            end
+        end
+        if not rec then return out, 0 end
+        local kept, dropped = {}, 0
+        for _, s in ipairs(out or {}) do
+            -- a stall whose building cannot be read is always kept: there is
+            -- nothing to compare it against
+            if not s.barn then
+                kept[#kept + 1] = s
+            elseif s.barn == rec.inst or milkBarnKey(s.barn) == rec.key then
+                kept[#kept + 1] = s
+            else
+                dropped += 1
+            end
+        end
+        return kept, dropped
+    end
+
     local function milkStalls(wantOwner, cf, size)
         local out, skipped = {}, 0
         for _, d in ipairs(workspace:GetDescendants()) do
@@ -6981,6 +7055,9 @@ local okBuild, errBuild = pcall(function()
                         owner = owner,
                         part = d,
                         spot = spot,
+                        -- which building this stall stands in (nil when the
+                        -- layout is not the dumped Spots.<n> shape)
+                        barn = spot and spot.Parent and spot.Parent.Parent,
                         trigger = milkTrigger(spot),
                     }
                 else
@@ -6988,7 +7065,9 @@ local okBuild, errBuild = pcall(function()
                 end
             end
         end
-        return out, skipped
+        -- ONE BARN PER FARM: everything below works the locked building only
+        local kept, dropped = milkBarnKeep(out, wantOwner, cf)
+        return kept, skipped + (tonumber(dropped) or 0)
     end
 
     local function milkCows(wantOwner, cf, size, stalls)
@@ -7232,7 +7311,9 @@ local okBuild, errBuild = pcall(function()
     function milkHerdTargets()
         local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
         local vis = pg and pg:FindFirstChild("HerdingVisuals", true)
-        local barn = workspace:FindFirstChild("AutoWoodenBarn", true)
+        -- the LOCKED building for this farm when there is one, so the lasso is
+        -- pressed on the same barn the stalls and the batch belong to
+        local barn = milkBarnPicked() or workspace:FindFirstChild("AutoWoodenBarn", true)
         local bp = barn and barn:GetPivot().Position
         local out = {}
         for _, b in ipairs(vis and vis:GetChildren() or {}) do
@@ -7523,7 +7604,7 @@ local okBuild, errBuild = pcall(function()
         end
         local anchor
         do
-            local barn = workspace:FindFirstChild("AutoWoodenBarn", true)
+            local barn = milkBarnPicked() or workspace:FindFirstChild("AutoWoodenBarn", true)
             if barn then
                 local okP, p = pcall(function() return barn:GetPivot().Position end)
                 if okP then anchor = p end

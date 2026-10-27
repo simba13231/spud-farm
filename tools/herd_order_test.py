@@ -55,6 +55,8 @@ workspace = { FindFirstChild = function(_, n)
     if n == "AutoWoodenBarn" then return barn end
     return nil
 end }
+-- no barn locked for this owner: the anchor falls back to the barn above
+milkBarnPicked = function() return nil end
 
 -- what got armed, in order
 ARMED = {}
