@@ -6,7 +6,7 @@
 
 local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/releases/latest/download/Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.7 · fluent gui"
+local VERSION    = "rebuild v1.8 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -6101,6 +6101,11 @@ local okBuild, errBuild = pcall(function()
 
     local milkChoices0 = milkUserChoices()
     milkUser = milkChoices0[1]
+    -- ▸ HOW MANY COWS AT A TIME (user: "a type section that i can put the number
+    --   of cows i want to milk at a time from 1-12"). One number drives the
+    --   herding batch AND how many arrivals the milk step waits for. GLOBAL on
+    --   purpose: a local here costs a register in the build closure.
+    milkBatchSize = 5
     local milkDrop = Tabs.Milk:CreateDropdown("milkUser", {
         Title = "User",
         Values = milkChoices0,
@@ -6117,6 +6122,27 @@ local okBuild, errBuild = pcall(function()
         end,
     })
     log("milk: users — " .. table.concat(milkChoices0, ", "))
+
+    -- ▸ the typed number itself (user: 1-12). Fluent hands over the box text;
+    --   the clamp keeps a typo from asking for 0 or 400 cows.
+    Tabs.Milk:CreateInput("milkBatch", {
+        Title = "Cows at a time (1-12)",
+        Placeholder = tostring(milkBatchSize),
+        Value = tostring(milkBatchSize),
+        Callback = function(text)
+            local n = tonumber(tostring(text):match("%d+") or "")
+            if not n then
+                log("milk: cows at a time — '" .. tostring(text)
+                    .. "' is not a number (1-12), keeping " .. tostring(milkBatchSize))
+                return
+            end
+            n = math.floor(n + 0.5)
+            if n < 1 then n = 1 elseif n > 12 then n = 12 end
+            if n == milkBatchSize then return end
+            milkBatchSize = n
+            log("milk: " .. n .. " cow(s) at a time (per herd batch and milk run)")
+        end,
+    })
 
     ------------------------------------------------------------
     -- ▸ WHERE THE MILK GOES (user: "when it has nothing to do i need a
@@ -6561,6 +6587,20 @@ local okBuild, errBuild = pcall(function()
                     end
                 end)
             end)
+        end,
+    })
+
+    -- ▸ FEED TOP-UP AS A SWITCH (user: "i want the thing that re puts seeds in
+    --   the feeder, make it a switch in the milk section"). ON = every milk
+    --   pass tops the plot's FeedDispenser up from the AnimalFoodBoxes, exactly
+    --   what the loop always did; OFF = the dispenser is left alone.
+    milkFeedOn = true
+    Tabs.Milk:CreateToggle("milkFeed", {
+        Title = "Refill feed dispenser",
+        Default = true,
+        Callback = function(on)
+            milkFeedOn = on == true
+            log("feed: dispenser top-up " .. (milkFeedOn and "on" or "off"))
         end,
     })
 
@@ -7269,23 +7309,26 @@ local okBuild, errBuild = pcall(function()
             log(string.format("milk: lasso pressed on the BARN '%s' (%s) - %d cow(s) armed",
                 barnT.label, tostring(how or "activate()"), #picks))
             task.wait(2.0) -- let the herd actually take the order
-            -- ▸ WAIT FOR EVERY COW (user: "make it wait till they are all in").
-            --   They walk in from the field one behind the other, so keep
-            --   counting until all are parked. The old 12 s idle break fired
-            --   BEFORE the first arrival, which is exactly how cows that were
-            --   still walking got reported missing: no cow arrival can be
-            --   assumed early. Now it waits the full window for the first one,
-            --   and only gives up 20 s after the herd has stopped moving.
-            local t0, last, beat = os.clock(), 0, os.clock()
+            -- ▸ WAIT FOR THE FIRST COW, THEN HAND OVER. The full 45 s window
+            --   is kept for the FIRST arrival (a slow first walk-in must never
+            --   be written off early, which is how the old 12 s break reported
+            --   cows missing), but the rest of the herd is no longer waited
+            --   for here at all.
+            -- ▸ THE FIRST ARRIVAL IS ENOUGH (user: "i want the actual milking
+            --   the cows to start when the first cow is in the actual barn
+            --   ready to milk then stop and wait till the next one for all the
+            --   cows"). Waiting for the REST of the herd happens in
+            --   milkArrivals, which milks each cow the moment it lands, so
+            --   this step hands over as soon as ONE cow is in. Zero arrivals
+            --   in the whole window still means the order did not take, and
+            --   only then is the barn pressed again.
+            local t0 = os.clock()
             while os.clock() - t0 < 45 do
                 if milkStopping() or farmTookBody() then break end
                 got = landed()
-                if got >= #picks then break end
-                if got ~= last then
-                    last, beat = got, os.clock()
-                    log(string.format("milk: %d of %d cow(s) in the barn", got, #picks))
-                elseif got > 0 and os.clock() - beat > 20 then
-                    log(string.format("milk: the herd stopped moving at %d of %d", got, #picks))
+                if got > 0 then
+                    log(string.format("milk: %d of %d cow(s) in the barn - the milk step takes them from here",
+                        got, #picks))
                     break
                 end
                 task.wait(0.5)
@@ -7301,14 +7344,21 @@ local okBuild, errBuild = pcall(function()
             local at = stallOf(p.cow.model)
             log(string.format("milk: cow %d -> %s", p.cow.index or 0,
                 at and ("barn stall " .. tostring(at.Name))
-                    or (parked(p.cow.model) and "in the barn" or "STILL OUT in the field")))
+                    or (parked(p.cow.model) and "in the barn" or "still on the way in")))
+        end
+        if got < #picks then
+            log(string.format("milk: %d of %d cow(s) in so far - no more waiting here, each one is milked as it lands",
+                got, #picks))
         end
         return got
     end
 
-    -- ▸ ONE HERDING RUN = UP TO 5 COWS (user: "herd 5 cows per herding and milk
-    --   them all then do the checks then restart"): arm them all into one herd,
-    --   one lasso, then hand the body back so the caller can milk the batch.
+    -- ▸ ONE HERDING RUN = UP TO milkBatchSize COWS (user: "herd 5 cows per
+    --   herding and milk them all then do the checks then restart", and now:
+    --   "the number of cows i want to milk at a time from 1-12"): arm them all
+    --   into one herd, one lasso, then hand the body back so the caller can
+    --   milk the batch. Returns the picks as the 4th value so the caller knows
+    --   how many cows to wait for.
     function milkHerdBatch(stalls, cows)
         local free, parked = {}, 0
         for _, s in ipairs(stalls or {}) do
@@ -7321,10 +7371,13 @@ local okBuild, errBuild = pcall(function()
                 end
             end
         end
-        if parked >= 5 or #free == 0 then return 0, 0, parked end
+        -- the user's number, clamped to the 1-12 the box promises
+        local want = math.floor((tonumber(milkBatchSize) or 5) + 0.5)
+        if want < 1 then want = 1 elseif want > 12 then want = 12 end
+        if parked >= want or #free == 0 then return 0, 0, parked, {} end
         local picks, tried = {}, 0
         for _, c in ipairs(cows or {}) do
-            if #picks >= 5 - parked or #free == 0 then break end
+            if #picks >= want - parked or #free == 0 then break end
             if not c.inBarn and not c.stall and c.state ~= "IdleLocked"
                 and (c.percent or 0) >= 300 then
                 tried += 1
@@ -7345,7 +7398,7 @@ local okBuild, errBuild = pcall(function()
             milkHerdOff()
             task.wait(1.5) -- and before the next cycle opens its own herd
         end
-        return done, tried, parked + done
+        return done, tried, parked + done, picks
     end
 
     -- ▸ THE MILK STEP (wiki: "go inside the barn to the stall the cow is in and
@@ -7930,6 +7983,82 @@ local okBuild, errBuild = pcall(function()
             end
         end
         return done, tried
+    end
+
+    -- ▸ MILK AS THEY ARRIVE (user: "i want the actual milking the cows to
+    --   start when the first cow is in the actual barn ready to milk then stop
+    --   and wait till the next one for all the cows"). One cow at a time: the
+    --   moment a cow is really in a stall with production waiting it is milked
+    --   and its gate opened, and then the step goes back to WAITING for the
+    --   next one - waiting for the whole herd to be parked first is exactly
+    --   what this replaces. `expect` is how many cows the herd sent in, so the
+    --   wait ends when they are all handled, or when nothing has arrived for
+    --   `quiet` seconds, or when the farm loop wants the body back.
+    --   GLOBAL on purpose: a local here would cost a register in the build
+    --   closure (its 200-local ceiling is real).
+    function milkArrivals(owner, cf, size, stalls, expect, quiet)
+        local handled, arrived, done = 0, 0, 0
+        local seen, took = {}, {}
+        local want = math.floor((tonumber(expect) or milkBatchSize or 5) + 0.5)
+        if want < 1 then want = 1 elseif want > 12 then want = 12 end
+        local waitFor = quiet or 25
+        local beat, t0 = os.clock(), os.clock()
+        while true do
+            if milkStopping() or farmTookBody() then break end
+            local cows = milkCows(owner, cf, size, stalls)
+            -- ▸ WHO IS READY *NOW*. Scan order picks the first cow that is
+            --   really in a stall and waiting; "coming" is a cow that is in
+            --   the barn but still walking to its stall, which keeps the wait
+            --   alive instead of ending it early.
+            local ready, coming = nil, false
+            for _, c in ipairs(cows) do
+                if not took[c.model] then
+                    local inNow = milkInStallNow(c)
+                    if inNow and not seen[c.model] then
+                        seen[c.model] = true
+                        arrived += 1
+                        beat = os.clock()
+                        log(string.format("milk: cow %d is in the barn (%d of %d) - milking it now",
+                            c.index or 0, arrived, want))
+                    end
+                    if inNow and (c.percent == nil or c.percent >= 300) then
+                        ready = ready or c
+                    elseif c.stall or c.inBarn then
+                        coming = true
+                    end
+                end
+            end
+            if ready then
+                -- the same two steady reads milkAllParked makes: a cow that
+                -- just arrived is still playing its walk-in
+                local settled = milkInStallNow(ready)
+                if settled then
+                    task.wait(0.7)
+                    settled = milkInStallNow(ready)
+                end
+                if settled then
+                    took[ready.model] = true
+                    handled += 1
+                    beat = os.clock()
+                    if milkCowInStall(ready) then done += 1 end
+                    log(string.format("milk: %d of %d cow(s) milked - waiting for the next one",
+                        done, want))
+                else
+                    beat = os.clock() -- it got up again: give it another moment
+                    task.wait(0.2)
+                end
+            else
+                if handled >= want or (arrived >= want and not coming) then break end
+                if os.clock() - beat > waitFor then
+                    log(string.format("milk: no cow in the barn for %d s - %d of %d handled, the rest walk in next cycle",
+                        waitFor, handled, want))
+                    break
+                end
+                task.wait(0.2) -- milkCows walks the world; 200 ms is plenty
+            end
+            if os.clock() - t0 > 300 then break end
+        end
+        return done, handled, arrived
     end
 
     -- ▸ FEED TOP-UP (user: "if the FeedDispenser is at 100/500 it gets the
@@ -9001,12 +9130,16 @@ local okBuild, errBuild = pcall(function()
         --   more to be shoved in before anything was milked.
         local milkDone, milkTried = milkAllParked(cows)
 
-        -- ▸ 2b. HERD A BATCH OF 5 (user: "herd 5 cows per herding and milk them
-        --   all then do the checks then restart"). One run fills the barn to 5
-        --   parked cows instead of one cow per cycle.
-        local herdLine, herded = nil, false
+        -- ▸ 2b. HERD A BATCH OF milkBatchSize (user: "herd 5 cows per herding
+        --   and milk them all then do the checks then restart", now 1-12 from
+        --   the typed box). One run fills the barn instead of one cow per cycle.
+        local herdLine, herded, sent = nil, false, 0
         do
-            local done, tried, parkedNow = milkHerdBatch(stalls, cows)
+            local done, tried, parkedNow, picks = milkHerdBatch(stalls, cows)
+            -- ▸ how many cows this herd actually sent in: the arrival-milk step
+            --   waits for exactly that many, so it never waits for cows that
+            --   never left the field (a lasso that took nobody gets sent = 0).
+            if done > 0 then sent = #(picks or {}) end
             herded = done > 0
             if tried == 0 then
                 herdLine = string.format("herd: %d cow(s) already in the barn - no ready cow left to herd", parkedNow)
@@ -9016,23 +9149,35 @@ local okBuild, errBuild = pcall(function()
             end
         end
 
-        -- ▸ 2c. MILK THE WHOLE BATCH, then the checks run on the fresh numbers.
-        --   The herd moved cows, so re-read them instead of trusting the snapshot.
+        -- ▸ 2c. MILK EACH COW AS IT WALKS IN (user: "i want the actual milking
+        --   the cows to start when the first cow is in the actual barn ready to
+        --   milk then stop and wait till the next one for all the cows").
+        --   Whoever is already parked is milked first (the rule above), then
+        --   milkArrivals takes the batch ONE COW AT A TIME - the moment each
+        --   one lands in its stall - instead of waiting for the whole herd to
+        --   be in before the first press.
         local milkLine, milked = nil, false
         do
             cows = milkCows(owner, cf, size, stalls)
             local done, tried = milkAllParked(cows)
             milkDone += done
             milkTried += tried
+            if sent > 0 then
+                local adone, atried = milkArrivals(owner, cf, size, stalls, sent)
+                milkDone += adone
+                milkTried += atried
+            end
             milked = milkDone > 0
             milkLine = milkTried == 0 and "milk: no ready cow standing in a stall yet"
-                or string.format("milk: %d of %d parked cow(s) milked", milkDone, milkTried)
+                or string.format("milk: %d of %d cow(s) milked", milkDone, milkTried)
         end
 
-        -- ▸ 2c2. FEED TOP-UP (user: after the milk loop, fill the cows' feed
-        --   dispenser with AnimalFoodBoxes until it reads full). Runs after
-        --   the milk so a milking batch never waits on a feed trip.
-        local feedLine = milkFeedTopUp(cf, size)
+        -- ▸ 2c2. FEED TOP-UP, NOW A SWITCH (user: "i want the thing that re puts
+        --   seeds in the feeder, make it a switch in the milk section"). ON it
+        --   runs after the milk, so a milking batch never waits on a feed trip;
+        --   OFF the dispenser is left exactly as it is.
+        local feedLine = nil
+        if milkFeedOn then feedLine = milkFeedTopUp(cf, size) end
 
         -- ▸ 2c3. THE IDLE JOB (user: "when it has nothing to do ... wich
         --   trailer/silo to put the milk in"): every other step is done, so

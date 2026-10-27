@@ -39,6 +39,14 @@ Everything merged into one paste-and-run file:
   Cake & Eggs (**7 steps**: eggs → milk → wheat/milk/egg deposits → 4 levers →
   **batter → oven bake** → collect + sell), Wool Run (shear → spindel bundles,
   5 wool each → sell); LOOP toggle, STOP button
+- **Milk tab** — pick whose plot to work, the **herd batch size typed in a box
+  (1–12)**, **Store milk in** (live list of the picked account's trailers/silos;
+  only free-range jugs are loaded there), **Deliver all milk** switch, **Refill
+  feed dispenser** switch (tops the plot's FeedDispenser up from the
+  AnimalFoodBoxes), live status paragraph, **milk loop** toggle. The loop cleans
+  dirty stalls first, herds the batch in, then **milks each cow the moment it
+  lands in its stall** and waits for the next one — it does not sit until the
+  whole herd is parked
 - **Player tab** — walkspeed, jump power, infinite jump, noclip, anti-AFK, FPS boost
 - **Teleport tab** — Ctrl+Click teleport + FarmCo / AnimalCo / TractorCo / LumberCo /
   Bulk Store / Warehouse / **My Farm** (resolves your plot by its "Your Farm"
@@ -126,6 +134,29 @@ Roblox detection has three layers. **No Luau script can affect layer 1:**
 **Honest limits:** these reduce risk, they do not make you invisible. Use a **free VIP
 server** (this game has them), keep sessions short, and consider an alt account.
 Running 24/7 in public servers is the fastest way to get reported regardless.
+
+**"Modified client" is layer 1, not layer 2 or 3.** That exact wording is
+Hyperion/Byfron reporting the **injector** (or a patched Roblox build — FPS
+unlockers that patch the client, modded mobile APKs), not your movement or timing.
+No edit to this script can change it: every line here runs *after* the executor has
+already injected, and the check fires on the injection itself. Tween mode, quieter
+timings and shorter sessions do **nothing** for that notice. The only lever is not
+injecting on that account.
+
+**If you get a warning, stop on that account.** Roblox enforcement escalates —
+notice, then short bans (1/3/7 days), then permanent — and a warned account's next
+catch comes faster than the first. Read the exact wording under Account → Settings
+→ Violations & Appeals. If it names exploiting / a modified client, standing down
+means standing down: don't relaunch the executor "just to test" a build. If you
+ever resume in a stock client, the loudest *script* signal is the **snap teleport**
+(`root.CFrame = ...`, one jump per jug, many per minute): Tween movement plus the
+key-only milk path (no fast remote) is the quietest this gets.
+
+**The probes are louder than the farm loop.** `SpudRemoteProbe.lua`, `SpudDump.lua`
+and the other scrapers hook `game`'s `__namecall` with `getrawmetatable` /
+`hookmetamethod`. The farm script itself never touches the metatable — it only
+presses keys and writes CFrames. If the warning came right after running a probe,
+that is the more likely trigger; don't run them on an account you care about.
 
 ### `FarmingAndFriends_Main.lua` — earlier generic version
 Generic crop-plot script (attribute/remote auto-detection). Kept as a fallback;
