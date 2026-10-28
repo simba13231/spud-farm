@@ -293,7 +293,9 @@ attributes, every part with its transparency/position, which stain parts are
 actually **visible**, every dirt-sounding instance in the stall / barn / plot
 with its full path, and the game's own `CleanAnimalContainer` billboard (what it
 is adorned to, whether it is enabled, and the key it prints). It presses nothing,
-teleports nothing and writes nothing. Stand on the farm and run:
+teleports nothing and writes nothing, and the whole report is also shown in a
+small on-screen panel with **COPY REPORT** / **CLOSE** (the report is put on the
+clipboard as soon as it finishes). Stand on the farm and run:
 
 ```lua
 loadstring(game:HttpGet("https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudStallProbe.lua?t=" .. os.time()))()

@@ -115,6 +115,26 @@ local pg = node("PlayerGui", "PlayerGui", { guiviews })
 local char = node("Character", "Model", {
     node("HumanoidRootPart", "Part", nil, { Position = vec(100, 3, 0) }),
 })
+
+-- ── the panel: enough of the Roblox UI API for the real code path to run ───
+CREATED, CLIP = {}, nil
+setclipboard = function(t) CLIP = t end
+task = { delay = function(_, fn) fn() end }
+UDim2 = setmetatable({}, { __index = function() return function(...) return { args = { ... } } end end })
+Color3 = setmetatable({}, { __index = function() return function(...) return { args = { ... } } end end })
+Enum = setmetatable({}, { __index = function() return setmetatable({}, { __index = function() return {} end }) end })
+Instance = {
+    new = function(cls)
+        local o = { ClassName = cls, _kids = {} }
+        CREATED[#CREATED + 1] = o
+        return setmetatable(o, {
+            __index = function(_, k)
+                if k == "Destroy" then return function() end end
+                return { Connect = function() end }
+            end,
+        })
+    end,
+}
 local LP = node("Me", "Player", { char })
 LP.Character = char -- a property, not a child: the probe reads it directly
 function LP:FindFirstChildOfClass(c) if c == "PlayerGui" then return pg end end
@@ -127,6 +147,21 @@ game = {
 """
 
 POST = r"""
+local gui, box, copyBtn, closeBtn
+for _, o in ipairs(CREATED) do
+    if o.ClassName == "ScreenGui" then gui = o end
+    if o.ClassName == "TextBox" then box = o end
+    if o.ClassName == "TextButton" and o.Text == "COPY REPORT" then copyBtn = o end
+    if o.ClassName == "TextButton" and o.Text == "CLOSE" then closeBtn = o end
+end
+print("PROBE-CHECK gui=" .. tostring(gui ~= nil and gui.Name == "SpudStallProbe"))
+print("PROBE-CHECK box=" .. tostring(box ~= nil and type(box.Text) == "string"
+    and box.Text:find("SPUD STALL PROBE", 1, true) ~= nil
+    and box.Text:find("== STALL", 1, true) ~= nil))
+print("PROBE-CHECK buttons=" .. tostring(copyBtn ~= nil and closeBtn ~= nil))
+print("PROBE-CHECK clipboard=" .. tostring(CLIP ~= nil
+    and CLIP:find("== STALL", 1, true) ~= nil
+    and CLIP:find("visible stain parts", 1, true) ~= nil))
 """
 
 
@@ -182,6 +217,10 @@ def main() -> int:
     has("adorned to:", "the Clean billboard's adornee is printed")
     has("text: V | Clean", "the Clean billboard's own key is printed")
     has("^ that is inside THIS stall", "it says when the billboard points at the stall")
+    has("PROBE-CHECK gui=true", "a small panel is built on screen")
+    has("PROBE-CHECK box=true", "the report is in the panel's text box")
+    has("PROBE-CHECK buttons=true", "COPY REPORT and CLOSE are on the panel")
+    has("PROBE-CHECK clipboard=true", "the report is copied to the clipboard")
     if "!!" in text:
         fails += 1
         print(f"{'no failure notices (!!) on a normal farm':<56} FAIL")
