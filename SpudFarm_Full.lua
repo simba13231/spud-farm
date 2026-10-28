@@ -6,7 +6,7 @@
 
 local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/releases/latest/download/Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.18 · fluent gui"
+local VERSION    = "rebuild v1.19 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -6997,13 +6997,24 @@ local okBuild, errBuild = pcall(function()
     --   the stall itself - readable from the plot centre, no teleport and no
     --   menu. nil means it could not be read, which the caller treats as "visit
     --   it", never as "clean".
-    -- ▸ A STALL'S DIRT, READ FROM ANYWHERE. The dump lists Spots.<n>.Filth, but
-    --   the live build answered nil to a direct child lookup (the console said
-    --   "12 of 12 stall(s) need a visit (no readable dirt)"), so every shape the
-    --   value could take is tried before giving up. Giving up is NEVER "visit
-    --   it": milkClean only visits a stall that REPORTS dirt, and one that
-    --   cannot be read is cleaned at the stall while a cow there is milked
-    --   (milkCowInStall) - user: "fix it so it does not tp anymore".
+    -- ▸ A STALL'S DIRT, READ FROM ANYWHERE. SpudStallProbe named it in the live
+    --   build: the stall folder (AnimalContainer.Spots.<n>) carries
+    --     FilthLevel      0-4, how many of its four stain levels are showing
+    --     FilthPercentage the meter behind those levels
+    --   with a Filth/ folder holding Level1..Level4 and the Stain parts. So
+    --   FilthLevel > 0 is the game saying "dirt is drawn here" - readable from
+    --   the plot centre, no teleport and no menu.
+    --
+    --   FilthPercentage is deliberately NOT a trigger: the probe found 24% on a
+    --   stall whose every stain was still invisible, so using it as "dirty"
+    --   would put the twelve-stall tour straight back. The other shapes (a Filth
+    --   value child, an attribute, a dirty-named child) are kept as fallbacks
+    --   for builds that do not carry the pair.
+    --
+    --   Giving up is NEVER "visit it": milkClean only visits a stall that
+    --   REPORTS dirt, and one that cannot be read is cleaned at the stall while
+    --   a cow there is milked (milkCowInStall) - user: "fix it so it does not tp
+    --   anymore".
     local function milkFilth(spot)
         if not spot then return nil end
         local function amount(v)
@@ -7011,6 +7022,38 @@ local okBuild, errBuild = pcall(function()
             if type(v) == "boolean" then return v and 1 or 0 end
             if type(v) == "string" then return tonumber(v) end
             return nil
+        end
+        -- 0. the live build's own pair, attributes on the stall folder
+        local okLvl, lvl = pcall(function() return spot:GetAttribute("FilthLevel") end)
+        if okLvl then
+            local n = amount(lvl)
+            -- 0 is a real answer (clean); a string that is not a number falls on
+            if n then return n end
+        end
+        -- 0b. THE SAME ANSWER, DRAWN. The Filth/ folder holds Level1..Level4
+        --    meshes, one per stain level, all invisible while that level is
+        --    clean (the probe dumped exactly that). A build that loses the
+        --    FilthLevel attribute still answers here, and the meaning matches:
+        --    how many levels are showing. Only used when the attribute is
+        --    missing, and only when the folder really has Level parts - a
+        --    Filth folder of another shape falls through instead of answering 0.
+        local folder
+        pcall(function() folder = spot:FindFirstChild("Filth") end)
+        if folder then
+            local isFolder = false
+            pcall(function() isFolder = folder:IsA("Folder") end)
+            if isFolder then
+                local seen, shown = 0, 0
+                pcall(function()
+                    for _, c in ipairs(folder:GetChildren()) do
+                        if c:IsA("BasePart") and tostring(c.Name):match("^Level%d+$") then
+                            seen += 1
+                            if c.Transparency < 0.95 then shown += 1 end
+                        end
+                    end
+                end)
+                if seen > 0 then return shown end
+            end
         end
         -- 1. a value object named Filth: direct child (the dump's shape) first,
         --    then anywhere inside the stall folder

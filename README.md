@@ -169,11 +169,21 @@ used to mean **teleporting into all twelve stalls every pass** — 0.2 s for the
 teleport to settle plus a 0.3 s floor before the first read, so a barn with
 nothing to clean still cost twelve teleports and 6.00 s of standing still, every
 single pass. The answer is read without moving, and the pass only visits a stall
-that **reports** dirt. Where the dirt lives differs by build: the value is tried
-as a direct `Filth` child (the dump's shape), anywhere inside the stall folder,
-as an attribute on the stall (`Filth` / `Dirt` / `Grime`), and under any
-dirty-sounding child name — the same widening every other reader in this script
-had to do after a game update.
+that **reports** dirt. What the live build actually uses was named by
+`SpudStallProbe.lua`: the stall folder (`<barn>.AnimalContainer.Spots.<n>`) carries
+**`FilthLevel`** (0–4, how many of its four stain levels are showing) and
+`FilthPercentage`. **`FilthLevel > 0` is the trigger** — it is the game saying
+dirt is drawn there, readable from the plot centre. `FilthPercentage` is
+**deliberately not** a trigger: the probe found 24% on a stall whose every stain
+was still invisible, so treating the meter as dirt would put the twelve-stall
+tour straight back. If a build loses the attribute, the **same answer is read
+from the drawing**: `Filth/Level1..Level4` are the four level meshes and every
+one of them is `Transparency = 1` while its level is clean, so the count of
+visible ones is `FilthLevel` by another route and needs no teleport either. The
+folder is only trusted when it actually holds `Level` parts — any other `Filth`
+shape falls through instead of answering "0". For builds without any of that, a
+direct `Filth` child (the old dump's shape), a nested value, an attribute (`Filth`
+/ `Dirt` / `Grime`) or a dirty-named child are all still read.
 
 A build that exposes **none** of those used to fall back to visiting all twelve
 (every stall "unreadable" = a visit), which is exactly the tour this was meant
@@ -189,8 +199,9 @@ reports dirt, so no teleports`). Measured with
 extracted functions, a fake 12-stall barn): **12 teleports / 6.00 s → 0 / 0.00 s**
 on a clean barn, **12 → 1** when one stall is dirty, **12 → 0** when the dirt is
 unreadable, **12 → 1** for dirt given as an attribute or as a nested value (both
-of which the old read missed entirely), and a stall that keeps refusing Clean
-still gets the same three attempts.
+of which the old read missed entirely), **12 → 1** for dirt that is only drawn as
+visible `Level` meshes and **12 → 0** when those meshes are all hidden, and a
+stall that keeps refusing Clean still gets the same three attempts.
 
 **Letting a cow out, from where we stand.** Opening the stall gate used to
 **always** hop to `Gate.ProximityPart` and sleep a flat 0.9 s first — even though

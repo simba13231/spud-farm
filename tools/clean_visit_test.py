@@ -83,18 +83,36 @@ local function stallSpot(i, spec)
     for _ = 1, (spec.stains or 0) do list[#list + 1] = part("Stain", x) end
     local direct = spec.filth ~= nil and value("Filth", spec.filth) or nil
     local nested = spec.nested ~= nil and value("Filth", spec.nested) or nil
+    -- the live build's Filth/ folder: Level1..Level4 meshes, invisible while
+    -- that level is clean (exactly what SpudStallProbe dumped)
+    local filthFolder
+    if spec.levels ~= nil then
+        local kids = {}
+        for lv = 1, 4 do
+            local p = part("Level" .. lv, x)
+            p.Transparency = (lv <= spec.levels) and 0 or 1
+            kids[#kids + 1] = p
+        end
+        filthFolder = { Name = "Filth", ClassName = "Folder" }
+        function filthFolder:GetChildren() return kids end
+        function filthFolder:IsA(cls) return cls == "Folder" end
+    end
     local attr = (spec.attrs or {}).Filth
+    local level = (spec.attrs or {}).FilthLevel
     local spot = {
         Name = "Spot" .. i, ClassName = "Folder", _x = x, _centre = centre,
         _noOffer = spec.noOffer,
         _dirty = (type(spec.filth) == "number" and spec.filth > 0)
             or (type(spec.nested) == "number" and spec.nested > 0)
             or (type(attr) == "number" and attr > 0)
+            or (type(level) == "number" and level > 0)
+            or (spec.levels or 0) > 0
             or (spec.stains or 0) > 0,
     }
     function spot:FindFirstChild(n, recursive)
         if n == "Center" then return centre end
         if n == "Filth" then
+            if filthFolder and not recursive then return filthFolder end
             if direct then return direct end
             if recursive then return nested end
             return nil
@@ -226,13 +244,41 @@ dirty, cleaned, unknown = run()
 check("nested dirt: that stall is visited and cleaned",
     TELEPORTS == 1 and cleaned == 1, string.format("teleports=%d cleaned=%d", TELEPORTS, cleaned))
 
--- 7. stains only (the other readable signal)
+-- 7. THE LIVE BUILD'S OWN PAIR (SpudStallProbe: AnimalContainer.Spots.<n>
+--    carries FilthLevel 0-4 and FilthPercentage): a level above zero is dirt
+build(function(i) return { attrs = { FilthLevel = (i == 6) and 2 or 0 } } end)
+dirty, cleaned, unknown = run()
+check("FilthLevel: the dirty stall is visited and cleaned",
+    TELEPORTS == 1 and cleaned == 1, string.format("teleports=%d cleaned=%d", TELEPORTS, cleaned))
+
+-- ...but a percentage with no level is NOT dirt: the probe found 24% on a stall
+-- whose stains were every one invisible, and treating that as dirty is exactly
+-- how the twelve-stall tour came back
+build(function(i) return { attrs = { FilthLevel = 0, FilthPercentage = 24 } } end)
+dirty, cleaned, unknown = run()
+check("FilthPercentage alone: no teleports", TELEPORTS == 0 and cleaned == 0,
+    string.format("teleports=%d cleaned=%d", TELEPORTS, cleaned))
+
+-- 7b. no FilthLevel attribute at all: the dirt is only DRAWN, as visible
+--     Level meshes inside Filth/ - still a visit, and still only one
+build(function(i) return { levels = (i == 2) and 3 or 0 } end)
+dirty, cleaned, unknown = run()
+check("drawn Level meshes: the dirty stall is visited and cleaned",
+    TELEPORTS == 1 and cleaned == 1, string.format("teleports=%d cleaned=%d", TELEPORTS, cleaned))
+
+-- ...and a Filth folder whose levels are all invisible is clean: no teleports
+build(function(i) return { levels = 0 } end)
+dirty, cleaned, unknown = run()
+check("drawn levels all hidden: no teleports", TELEPORTS == 0 and cleaned == 0,
+    string.format("teleports=%d cleaned=%d", TELEPORTS, cleaned))
+
+-- 8. stains only (the other readable signal)
 build(function(i) return { stains = (i == 9) and 2 or 0 } end)
 dirty, cleaned, unknown = run()
 check("visible stains: that stall is visited and cleaned",
     TELEPORTS == 1 and cleaned == 1, string.format("teleports=%d cleaned=%d", TELEPORTS, cleaned))
 
--- 8. an unreadable stall does not hide a readable dirty one
+-- 9. an unreadable stall does not hide a readable dirty one
 build(function(i)
     if i == 1 then return {} end
     return { filth = (i == 11) and 3 or 0 }

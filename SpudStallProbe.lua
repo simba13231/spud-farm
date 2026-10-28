@@ -278,8 +278,24 @@ local function run()
         local ad = safe(function() return bill.Adornee end, nil)
         say("billboard: found  enabled=" .. tostring(safe(function() return bill.Enabled end, "?")))
         say("adorned to: " .. (ad and ad:GetFullName() or "nothing"))
-        if ad and F:FindFirstChild(ad.Name, true) then
+        -- walk the ancestry, not the name: every stall has a part called
+        -- "Center", so a name match said "inside THIS stall" for the wrong one
+        local ownerStall = false
+        do
+            local node = ad
+            for _ = 1, 10 do
+                if not node then break end
+                if node == F then
+                    ownerStall = true
+                    break
+                end
+                node = safe(function() return node.Parent end, nil)
+            end
+        end
+        if ownerStall then
             say("  ^ that is inside THIS stall")
+        elseif ad then
+            say("  ^ that is a DIFFERENT stall (this dump is " .. tostring(F.Name) .. ")")
         end
         local texts = {}
         for _, d in ipairs(safe(function() return bill:GetDescendants() end, {})) do
