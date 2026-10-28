@@ -35,6 +35,8 @@ end }
 
 LOG = {}
 milkBatchSize = 5
+-- the probe's clean reading (same default the build uses)
+milkDirtLine = 24
 -- the real milkStallOccupant (extracted below) caches into this
 milkSpotFast = setmetatable({}, { __mode = "k" })
 milkStopping = function() return false end
@@ -79,19 +81,27 @@ milkHerdSend = function(picks)
     return 1
 end
 
-local function spot(occupied)
-    return { Name = "Spots", FindFirstChild = function(_, n)
+local function spot(occupied, attrs)
+    local s = { Name = "Spots", _attrs = attrs or {} }
+    function s:FindFirstChild(n)
         if n == "Occupant" and occupied then
             return { IsA = function(_, c) return c == "ObjectValue" end, Value = { Name = "Cow" } }
         end
         return nil
-    end }
+    end
+    -- the dirt readers walk these; empty means "nothing readable here"
+    function s:GetAttribute(n) return self._attrs[n] end
+    function s:GetChildren() return {} end
+    function s:GetDescendants() return {} end
+    function s:IsA(c) return c == "Folder" end
+    return s
 end
 
-local function stalls(n, occupied)
+local function stalls(n, occupied, dirty)
     local out = {}
     for i = 1, n or 12 do
-        out[i] = { spot = spot(i <= (occupied or 0)), pos = Vector3.new(i, 0, 0) }
+        local attrs = (dirty and dirty[i]) and { FilthLevel = 0, FilthPercentage = 60 } or nil
+        out[i] = { spot = spot(i <= (occupied or 0), attrs), pos = Vector3.new(i, 0, 0) }
     end
     return out
 end
@@ -160,6 +170,27 @@ local done, tried, parked, picks = milkHerdBatch(stalls(12, 3), { cow(1, 10), co
 check("full barn is not herded into", #ARMED == 0 and parked == 3 and done == 0,
     string.format("armed=%d parked=%d", #ARMED, parked))
 
+-- 6. NO COW GOES INTO A DIRTY STALL (user: "before it brings the cows inside
+--    make it check for over 20/24 dirtyness"): one free stall over the line
+reset()
+milkBatchSize = 2
+local barn = stalls(12, 0, { [1] = true })
+local dirtySpot = barn[1].spot
+local d2, t2, p2, picks2, dirtyFree = milkHerdBatch(barn, { cow(1, 10), cow(2, 20) })
+check("a dirty free stall is skipped, the clean one is used",
+    dirtyFree == 1 and picks2 ~= nil and #picks2 == 2 and picks2[1].spot ~= dirtySpot,
+    string.format("dirtyFree=%s picks=%s", tostring(dirtyFree), picks2 and #picks2 or 0))
+
+-- 7. a barn with NOTHING but dirty free stalls herds nobody this pass
+reset()
+local allDirty = {}
+for i = 1, 12 do allDirty[i] = true end
+local d3, t3, p3, picks3, dirtyFree3 = milkHerdBatch(stalls(12, 0, allDirty),
+    { cow(1, 10), cow(2, 20) })
+check("every stall dirty: nobody is armed and the count is said",
+    #ARMED == 0 and d3 == 0 and dirtyFree3 == 12,
+    string.format("armed=%d done=%d dirtyFree=%s", #ARMED, d3, tostring(dirtyFree3)))
+
 print(fails == 0 and "ALL OK" or (fails .. " FAILED"))
 """
 
@@ -175,6 +206,17 @@ def extract_occupant(text: str) -> str:
     if not m1 or not m2 or m2.start() < m1.start():
         raise SystemExit("milkStallOccupant not found in SpudFarm_Full.lua")
     return dedent(text[m1.start():m2.start()])
+
+
+def extract_fn(text: str, name: str) -> str:
+    """One function, by name - the REAL dirt readers the herd gate calls."""
+    m = re.search(r"^    (?:local )?function " + name + r"\(", text, re.M)
+    if not m:
+        raise SystemExit(name + " not found in SpudFarm_Full.lua")
+    tail = text[m.start():]
+    end = re.search(r"\n    (?:local function |function |-- )", tail[10:])
+    block = tail[: end.start() + 10] if end else tail
+    return dedent(block)
 
 
 def extract(text: str) -> str:
@@ -193,7 +235,9 @@ def main() -> int:
     with tempfile.NamedTemporaryFile("w", suffix=".lua", delete=False, encoding="utf-8") as fh:
         # the occupant reader first: it is a local in this chunk, so the batch
         # defined after it captures it as an upvalue
-        fh.write(PRE + extract_occupant(src) + "\n" + extract(src) + POST)
+        dirt = "\n\n".join(extract_fn(src, n) for n in
+                            ("milkStain", "milkFilth", "milkFilthPct", "milkDirtHigh"))
+        fh.write(PRE + extract_occupant(src) + "\n" + dirt + "\n" + extract(src) + POST)
         path = fh.name
     out = subprocess.run([str(exe), path], capture_output=True, encoding="utf-8", errors="replace")
     print(out.stdout.strip())

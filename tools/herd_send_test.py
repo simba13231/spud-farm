@@ -35,7 +35,8 @@ SRC = ROOT / "SpudFarm_Full.lua"
 
 # order matters: each is a local in the generated chunk
 WANTED = [
-    "milkInBox", "milkTrigger", "milkBarnKey", "milkBarnLive", "milkBarnFor", "milkBarnPicked",
+    "milkInBox", "milkTrigger", "milkStain", "milkFilth", "milkFilthPct", "milkDirtHigh",
+    "milkBarnKey", "milkBarnLive", "milkBarnFor", "milkBarnPicked",
     "milkBarnKeep",
     "milkBarnStalls", "milkStallOccupant", "milkStalls", "milkHerdTargets",
     "milkHerdSend", "milkHerdBatch", "milkReadyToHerd", "milkBatchWanted",
@@ -70,10 +71,13 @@ function NODE:GetDescendants()
     return out
 end
 function NODE:IsA(cls) call() return cls == rawget(self, "_cls") end
+function NODE:GetAttribute(n) return (rawget(self, "_attrs") or {})[n] end
 function NODE:GetPivot() call() return { Position = rawget(self, "Position") } end
 function NODE:GetFullName() return (self.Parent and self.Parent:GetFullName() .. "." or "") .. self._name end
 
 VT = 0
+-- the probe's clean reading (same default the build uses)
+milkDirtLine = 24
 os = { clock = function() return VT end }
 task = { wait = function(t) VT = VT + math.max(t or 0, 1 / 60) end }
 PARK_HOOK = nil

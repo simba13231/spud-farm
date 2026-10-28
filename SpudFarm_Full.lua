@@ -6,7 +6,7 @@
 
 local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/releases/latest/download/Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.22 · fluent gui"
+local VERSION    = "rebuild v1.23 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -7005,9 +7005,9 @@ local okBuild, errBuild = pcall(function()
     --   FilthLevel > 0 is the game saying "dirt is drawn here" - readable from
     --   the plot centre, no teleport and no menu.
     --
-    --   FilthPercentage is deliberately NOT a trigger: the probe found 24% on a
-    --   stall whose every stain was still invisible, so using it as "dirty"
-    --   would put the twelve-stall tour straight back. The other shapes (a Filth
+    --   FilthPercentage is a trigger only ABOVE the 24% baseline the probe found
+    --   on a clean stall (milkDirtLine, the user's "over 20/24"), so the clean
+    --   baseline itself can never put the tour back. The other shapes (a Filth
     --   value child, an attribute, a dirty-named child) are kept as fallbacks
     --   for builds that do not carry the pair.
     --
@@ -7088,6 +7088,43 @@ local okBuild, errBuild = pcall(function()
             end
         end
         return nil
+    end
+
+    -- ▸ THE STALL'S DIRT METER. The probe found FilthPercentage=24 on a stall
+    --   whose every Stain and Level was invisible, so 24 is the reading this
+    --   build sits at while CLEAN - a percentage, not "24 units of dirt".
+    --   The user's rule is "over 20/24 dirtyness": a stall whose meter climbs
+    --   above that baseline is cleaned BEFORE cows are put in it, which catches
+    --   a stall that is dirty enough to matter before a stain level is drawn.
+    --   The line only ever moves UP, and only when the game itself says a stall
+    --   it pointed at is clean - so a build with a different baseline costs one
+    --   look and then settles, instead of touring twelve stalls every pass.
+    milkDirtLine = milkDirtLine or 24
+
+    function milkFilthPct(spot)
+        if not spot then return nil end
+        local ok, v = pcall(function() return spot:GetAttribute("FilthPercentage") end)
+        if ok and type(v) == "number" then return v end
+        return nil
+    end
+
+    -- ▸ BEFORE A COW GOES IN: is this stall still too dirty to take one? (user:
+    --   "before it brings the cows inside make it check for over 20/24
+    --   dirtyness"). Same three readings the clean pass uses, so the herd gate
+    --   and the cleaner can never disagree about what "dirty" means.
+    function milkDirtHigh(spot)
+        local level = milkFilth(spot)
+        if type(level) == "number" and level > 0 then
+            return true, "level " .. tostring(level)
+        end
+        local stains = 0
+        pcall(function() stains = milkStain(spot) end)
+        if stains > 0 then return true, stains .. " stain(s)" end
+        local pct = milkFilthPct(spot)
+        if type(pct) == "number" and pct > milkDirtLine then
+            return true, string.format("dirt %.0f%%", pct)
+        end
+        return false
     end
 
     -- the game only offers Clean when you stand in the stall's own trigger
@@ -7899,20 +7936,36 @@ local okBuild, errBuild = pcall(function()
     --   milk the batch. Returns the picks as the 4th value so the caller knows
     --   how many cows to wait for.
     function milkHerdBatch(stalls, cows)
-        local free, parked = {}, 0
+        local free, parked, dirtyFree, dirtWhy = {}, 0, 0, nil
         for _, s in ipairs(stalls or {}) do
             if s.spot then
                 local o = milkStallOccupant(s.spot)
                 if o and o:IsA("ObjectValue") and o.Value then
                     parked += 1
                 else
-                    free[#free + 1] = s
+                    -- ▸ NO COW GOES INTO A DIRTY STALL (user: "before it brings
+                    --   the cows inside make it check for over 20/24
+                    --   dirtyness"). The clean pass runs first, so this only
+                    --   catches a stall it could not clean - and then the cow
+                    --   waits in the field instead of standing in muck.
+                    local high, why = milkDirtHigh(s.spot)
+                    if high then
+                        dirtyFree += 1
+                        dirtWhy = dirtWhy or why
+                    else
+                        free[#free + 1] = s
+                    end
                 end
             end
         end
+        if dirtyFree > 0 then
+            log(string.format(
+                "herd: %d free stall(s) still over the dirt line (%s) - no cow sent into them",
+                dirtyFree, tostring(dirtWhy)))
+        end
         -- the user's number, clamped to the 1-12 the box promises
         local want = milkBatchWanted()
-        if parked >= want or #free == 0 then return 0, 0, parked, {} end
+        if parked >= want or #free == 0 then return 0, 0, parked, {}, dirtyFree end
 
         -- ▸ NEAREST FIRST (user: "i want it to start with the cows that are in
         --   stall so it is much faster"). The walk-in is the slow part of a
@@ -7971,7 +8024,7 @@ local okBuild, errBuild = pcall(function()
             milkHerdOff()
             task.wait(1.5) -- and before the next cycle opens its own herd
         end
-        return done, tried, parked + done, picks
+        return done, tried, parked + done, picks, dirtyFree
     end
 
     -- ▸ THE MILK STEP (wiki: "go inside the barn to the stall the cow is in and
@@ -8512,7 +8565,8 @@ local okBuild, errBuild = pcall(function()
         --   the character already stands: the stall folder carries the game's
         --   own Filth value (milkFilth) and the stain parts are ordinary visible
         --   parts, and neither needs a visit. So only the stalls that SAY
-        --   something get one - filth above zero or a visible stain. A stall
+        --   something get one - a drawn filth level, a visible stain, or a
+        --   meter above the 24% clean baseline (milkDirtLine). A stall
         --   that cannot be read is NOT a reason to visit any more (user: "why is
         --   it still looping inside the stall? remove it bro"): this build has
         --   no Filth value, so "unreadable" meant all twelve were visited every
@@ -8522,9 +8576,18 @@ local okBuild, errBuild = pcall(function()
         for i, s in ipairs(stalls) do
             local f = milkFilth(s.spot)
             local n = milkStain(s.spot)
-            if (type(f) == "number" and f > 0) or n > 0 then
-                todo[#todo + 1] = { i = i, s = s,
-                    why = (type(f) == "number" and f > 0) and ("filth " .. tostring(f)) or (n .. " stain(s)") }
+            local pct = milkFilthPct(s.spot)
+            local overPct = type(pct) == "number" and pct > milkDirtLine
+            if (type(f) == "number" and f > 0) or n > 0 or overPct then
+                local why
+                if n > 0 then why = n .. " stain(s)"
+                elseif type(f) == "number" and f > 0 then why = "filth " .. tostring(f)
+                else why = string.format("dirt %.0f%% (over the %s%% line)", pct, tostring(milkDirtLine)) end
+                todo[#todo + 1] = { i = i, s = s, why = why, pct = pct,
+                    -- the meter was the WHOLE reason for this visit: the only
+                    -- kind that can teach the line anything, because a drawn
+                    -- stain is dirt whatever the meter says
+                    meterOnly = (type(f) ~= "number" or f <= 0) and n == 0 }
             elseif f == nil then
                 blind += 1 -- no Filth value in this build, not "dirty"
             end
@@ -8558,6 +8621,13 @@ local okBuild, errBuild = pcall(function()
             #todo, #stalls, todo[1].why))
         for _, job in ipairs(todo) do
             local i, s = job.i, job.s
+            -- ▸ ONE ANSWER IS ENOUGH: if a stall visited only because of its
+            --   meter turns out clean, the line moves above that reading and
+            --   every other stall at the same reading is dropped instead of
+            --   hopped into (the twelve-stall tour, in miniature).
+            if job.meterOnly and type(job.pct) == "number" and job.pct <= milkDirtLine then
+                continue
+            end
             if milkStopping() then break end
             if farmTookBody() then
                 log("milk: the farm loop took the body back - cleaning stops mid-way")
@@ -8591,6 +8661,19 @@ local okBuild, errBuild = pcall(function()
                             i, stains))
                     end
                 elseif up == false then
+                    -- ▸ THE GAME SAYS CLEAN. A stall visited only because of its
+                    --   meter, where the game offers no Clean, proves that
+                    --   reading is not dirt here - move the line above it so
+                    --   the rest of the barn is not hopped into for nothing.
+                    if job.meterOnly then
+                        local pctNow = milkFilthPct(s.spot)
+                        if type(pctNow) == "number" and pctNow > milkDirtLine then
+                            milkDirtLine = pctNow
+                            log(string.format(
+                                "milk: stall %d reads %.0f%% but the game offers no Clean there - the dirty line moves to %.0f%%",
+                                i, pctNow, milkDirtLine))
+                        end
+                    end
                     if stains > 0 then
                         unknown += 1
                         log(string.format("milk: stall %d - %d stain(s) present but the game offers no Clean here",
@@ -8598,8 +8681,8 @@ local okBuild, errBuild = pcall(function()
                     end
                 else
                     dirty += 1
-                    log(string.format("milk: stall %d is DIRTY (%d stain(s)) - cleaning it now (the game's own V)",
-                        i, stains))
+                    log(string.format("milk: stall %d is DIRTY (%s) - cleaning it now (the game's own V)",
+                        i, job.why))
                     local done = false
                     local cleanAt = os.clock()
                     for attempt = 1, 3 do
@@ -10063,14 +10146,16 @@ local okBuild, errBuild = pcall(function()
         --   the typed box). One run fills the barn instead of one cow per cycle.
         local herdLine, herded, sent = nil, false, 0
         do
-            local done, tried, parkedNow, picks = milkHerdBatch(stalls, cows)
+            local done, tried, parkedNow, picks, dirtyFree = milkHerdBatch(stalls, cows)
             -- ▸ how many cows this herd actually sent in: the arrival-milk step
             --   waits for exactly that many, so it never waits for cows that
             --   never left the field (a lasso that took nobody gets sent = 0).
             if done > 0 then sent = #(picks or {}) end
             herded = done > 0
             if tried == 0 then
-                herdLine = string.format("herd: %d cow(s) already in the barn - no ready cow left to herd", parkedNow)
+                herdLine = (dirtyFree or 0) > 0
+                    and string.format("herd: %d stall(s) still dirty - no cow put in one (the clean pass goes first)", dirtyFree)
+                    or string.format("herd: %d cow(s) already in the barn - no ready cow left to herd", parkedNow)
             else
                 herdLine = string.format("herd: %d of %d cow(s) into the barn (%d parked now)",
                     done, tried, parkedNow)

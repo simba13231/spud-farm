@@ -184,10 +184,16 @@ that **reports** dirt. What the live build actually uses was named by
 `SpudStallProbe.lua`: the stall folder (`<barn>.AnimalContainer.Spots.<n>`) carries
 **`FilthLevel`** (0–4, how many of its four stain levels are showing) and
 `FilthPercentage`. **`FilthLevel > 0` is the trigger** — it is the game saying
-dirt is drawn there, readable from the plot centre. `FilthPercentage` is
-**deliberately not** a trigger: the probe found 24% on a stall whose every stain
-was still invisible, so treating the meter as dirt would put the twelve-stall
-tour straight back. If a build loses the attribute, the **same answer is read
+dirt is drawn there, readable from the plot centre. `FilthPercentage` is the
+meter behind it, and it is a trigger **only above the 24 % baseline** the probe
+found on a stall whose every stain was invisible (the user's "over 20/24
+dirtyness"): the clean reading itself can never bring the twelve-stall tour
+back, but a stall that climbs past it is cleaned before its levels are drawn.
+The line only ever moves **up**, and only when the game itself says a stall it
+pointed at is clean (`... reads 60% but the game offers no Clean there - the
+dirty line moves to 60%`), so a build with a different baseline costs one look
+and then settles instead of hopping into the same stalls every pass. If a build
+loses the attribute, the **same answer is read
 from the drawing**: `Filth/Level1..Level4` are the four level meshes and every
 one of them is `Transparency = 1` while its level is clean, so the count of
 visible ones is `FilthLevel` by another route and needs no teleport either. The
@@ -205,6 +211,16 @@ to give up after **0.96 s** and press for milk while the stall was still being
 cleaned — a press the game ignores, which is one way a cow came back unmilked —
 so it now holds until the offer clears (2.25 s ceiling).
 
+**No cow goes into a dirty stall** (user: "before it brings the cows inside make
+it check for over 20/24 dirtyness"). The clean pass already runs before the
+herd, but if it could not clear a stall, the herd step now **skips that stall**
+instead of shoving a cow into it: `herd: 2 free stall(s) still over the dirt line
+(2 stain(s)) - no cow sent into them`, and the status line repeats it. The same
+three readings decide it (`FilthLevel`, a visible `Stain`, the meter over the
+line), so the gate and the cleaner can never disagree about what dirty means. A
+barn where **every** free stall is dirty herds nobody that pass and retries in
+the usual short interval rather than standing in muck.
+
 A build that exposes **none** of those used to fall back to visiting all twelve
 (every stall "unreadable" = a visit), which is exactly the tour this was meant
 to remove — the console said `12 of 12 stall(s) need a visit (no readable dirt)`.
@@ -220,8 +236,13 @@ extracted functions, a fake 12-stall barn): **12 teleports / 6.00 s → 0 / 0.00
 on a clean barn, **12 → 1** when one stall is dirty, **12 → 0** when the dirt is
 unreadable, **12 → 1** for dirt given as an attribute or as a nested value (both
 of which the old read missed entirely), **12 → 1** for dirt that is only drawn as
-visible `Level` meshes and **12 → 0** when those meshes are all hidden, and a
-stall that keeps refusing Clean still gets the same three attempts.
+visible `Level` meshes, **12 → 0** when those meshes are all hidden, **12 → 1**
+for one stall whose meter reads 60 % over the 24 % line, **12 → 1 → 0** for a
+meter the game disagrees with (the first look teaches the line, the next pass
+hops nowhere), and a stall that keeps refusing Clean still gets the same three
+attempts. [tools/herd_order_test.py](tools/herd_order_test.py) covers the gate
+itself: a dirty free stall is skipped and the clean one used, and a barn with
+every free stall dirty arms nobody.
 
 **Letting a cow out, from where we stand.** Opening the stall gate used to
 **always** hop to `Gate.ProximityPart` and sleep a flat 0.9 s first — even though

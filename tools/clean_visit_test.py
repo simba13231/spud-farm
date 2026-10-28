@@ -26,8 +26,8 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SRC = ROOT / "SpudFarm_Full.lua"
 
-WANTED = ["milkTrigger", "milkStain", "milkFilth", "milkCleanUp", "milkClean"]
-OPTIONAL = {"milkFilth"}
+WANTED = ["milkTrigger", "milkStain", "milkFilth", "milkFilthPct", "milkCleanUp", "milkClean"]
+OPTIONAL = {"milkFilth", "milkFilthPct"}
 
 PRE = r"""
 VT, TELEPORTS, PRESSES = 0, 0, 0
@@ -105,15 +105,17 @@ local function stallSpot(i, spec)
     end
     local attr = (spec.attrs or {}).Filth
     local level = (spec.attrs or {}).FilthLevel
+    local pct = (spec.attrs or {}).FilthPercentage
     local spot = {
         Name = "Spot" .. i, ClassName = "Folder", _x = x, _centre = centre,
         _noOffer = spec.noOffer,
-        _dirty = (type(spec.filth) == "number" and spec.filth > 0)
+        _dirty = not spec.gameClean and ((type(spec.filth) == "number" and spec.filth > 0)
             or (type(spec.nested) == "number" and spec.nested > 0)
             or (type(attr) == "number" and attr > 0)
             or (type(level) == "number" and level > 0)
+            or (type(pct) == "number" and pct > (milkDirtLine or 24))
             or (spec.levels or 0) > 0
-            or (spec.stains or 0) > 0,
+            or (spec.stains or 0) > 0),
     }
     function spot:FindFirstChild(n, recursive)
         if n == "Center" then return centre end
@@ -199,6 +201,7 @@ local function build(spec)
     end
     VT, TELEPORTS, PRESSES, LOG = 0, 0, 0, {}
     milkFilthSaid = nil
+    milkDirtLine = 24 -- the probe's clean reading; see milkFilthPct in the build
     HERE = -1000
 end
 
@@ -275,6 +278,26 @@ build(function(i) return { attrs = { FilthLevel = 0, FilthPercentage = 24 } } en
 dirty, cleaned, unknown = run()
 check("FilthPercentage alone: no teleports", TELEPORTS == 0 and cleaned == 0,
     string.format("teleports=%d cleaned=%d", TELEPORTS, cleaned))
+
+-- 7a. ...but a meter ABOVE that baseline is dirt (user: "before it brings the
+--     cows inside make it check for over 20/24 dirtyness"): one stall at 60%
+build(function(i) return { attrs = { FilthLevel = 0, FilthPercentage = (i == 8) and 60 or 24 } } end)
+dirty, cleaned, unknown = run()
+check("FilthPercentage over the 24% line: one visit, one clean",
+    TELEPORTS == 1 and cleaned == 1,
+    string.format("teleports=%d cleaned=%d", TELEPORTS, cleaned))
+
+-- 7b. ...and a meter the GAME disagrees with teaches the line instead of costing
+--     a tour every pass: 60% there, the game offers no Clean, so 60 is not dirt
+build(function(i) return { attrs = { FilthLevel = 0, FilthPercentage = 60 }, gameClean = true } end)
+dirty, cleaned, unknown = run()
+local firstPass = TELEPORTS
+check("a stall the meter calls dirty but the game calls clean: not counted as cleaned",
+    cleaned == 0 and milkDirtLine >= 60,
+    string.format("cleaned=%d line=%s", cleaned, tostring(milkDirtLine)))
+dirty, cleaned, unknown = run()
+check("...and the next pass does not visit those stalls again",
+    TELEPORTS == firstPass, string.format("%d then %d teleport(s)", firstPass, TELEPORTS))
 
 -- 7b. no FilthLevel attribute at all: the dirt is only DRAWN, as visible
 --     Level meshes inside Filth/ - still a visit, and still only one
