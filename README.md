@@ -152,6 +152,36 @@ five times a second, and the milk step reads it per cow), so a repeat read is on
 property access instead of two instance calls. The pass now prints the scan time:
 `milk: 12 stall(s) found by the narrow scan in 0 ms - ...`.
 
+**The clean pass, without the teleport tour.** Asking "is this stall dirty?"
+used to mean **teleporting into all twelve stalls every pass** — 0.2 s for the
+teleport to settle plus a 0.3 s floor before the first read, so a barn with
+nothing to clean still cost twelve teleports and 6.00 s of standing still, every
+single pass. The answer is readable without moving: the stall folder carries the
+game's own **`Filth`** value and the stains are ordinary visible parts, so the
+pass now decides who needs a visit from where it stands. A clean barn is **0
+teleports and 0.00 s** (`milk: 12 stall(s) read from here - no filth anywhere, so
+nothing to clean and no teleports`); a stall that looks dirty — or whose filth
+*cannot be read* — gets the visit it always got, and there the game's own Clean
+billboard is still the authority, so "no answer" is still reported as unknown and
+never counted as clean. Measured with [tools/clean_visit_test.py](tools/clean_visit_test.py)
+(virtual clock, real extracted functions, a fake 12-stall barn): **12 teleports /
+6.00 s → 0 / 0.00 s** on a clean barn, **12 → 1** teleport when one stall is
+dirty, and a stall that keeps refusing Clean still gets the same three attempts.
+
+**Letting a cow out, from where we stand.** Opening the stall gate used to
+**always** hop to `Gate.ProximityPart` and sleep a flat 0.9 s first — even though
+the game's `BarnDoorInteract` billboard names *that* gate (its `Adornee` is the
+gate's own part) wherever the press comes from, and after milking a cow the
+character is already standing in its stall. So the hop now happens only when the
+action is **not** already offered *and* the character is not already within 8
+studs of the gate, and a retry polls from where it stands instead of jumping to
+the same stud again (two inline poll loops collapsed into one helper, so the file
+has two fewer `task.wait` sites than before). Measured with
+[tools/gate_visit_test.py](tools/gate_visit_test.py): **1 teleport / 1.60 s → 0 /
+0.00 s** when the door is already offered, **4 → 1** hop in the path where the
+game never offers the action at all, and a gate that is *already open* is still
+never pressed again (that press would shut it on the cow).
+
 **Farms are teleported to, not walked to.** A distant plot is streamed *out* of
 workspace, so the pass saw "no plot" and moved on - a farm that was never really
 looked at. Each farm's plot centre is remembered on first sight; when the plot is

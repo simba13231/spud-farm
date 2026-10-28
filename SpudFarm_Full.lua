@@ -6,7 +6,7 @@
 
 local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/releases/latest/download/Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.15 · fluent gui"
+local VERSION    = "rebuild v1.16 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -6976,6 +6976,23 @@ local okBuild, errBuild = pcall(function()
         return n
     end
 
+    -- ▸ THE STALL'S OWN FILTH NUMBER (user: "i just wnat it to stop teleporting,
+    --   it's a huge waist of time"). The dump lists the stall folder as
+    --   Spots.<n>.{ProximityPart, Filth, Hay, Occupant}, and Filth is a value on
+    --   the stall itself - readable from the plot centre, no teleport and no
+    --   menu. nil means it could not be read, which the caller treats as "visit
+    --   it", never as "clean".
+    local function milkFilth(spot)
+        local f = spot and spot:FindFirstChild("Filth")
+        if not f then return nil end
+        local ok, v = pcall(function() return f.Value end)
+        if not ok then return nil end
+        if type(v) == "number" then return v end
+        if type(v) == "boolean" then return v and 1 or 0 end
+        if type(v) == "string" then return tonumber(v) end
+        return nil
+    end
+
     -- the game only offers Clean when you stand in the stall's own trigger
     -- volume (Spot.ProximityPart), NOT at the menu adornee panel - standing at
     -- the panel is why the prompt never lit.
@@ -8029,8 +8046,37 @@ local okBuild, errBuild = pcall(function()
         end
 
         local stand = gatePart.Position + Vector3.new(0, 3, 0)
-        milkTp(stand)
-        task.wait(0.9)
+        -- ▸ DON'T MOVE UNLESS MOVING COULD TELL US SOMETHING (user: "i just wnat
+        --   it to stop teleporting, it's a huge waist of time"). Two facts decide
+        --   that, and neither is a guess: doorBill() is the game's own "the door
+        --   action is offered for THIS gate", and the character's own distance
+        --   says whether a hop could change what the game offers. After milking a
+        --   cow we are still standing in its stall and the action is usually
+        --   already up, so there is no hop and no 0.9 s settle at all; when it is
+        --   not up the hop happens ONCE and the retries poll from where we stand
+        --   instead of jumping to the same stud again and again.
+        local function atGate()
+            local ok, p = pcall(function()
+                local c = LocalPlayer.Character
+                local h = c and c:FindFirstChild("HumanoidRootPart")
+                return h and h.Position
+            end)
+            -- 8 studs: near enough that the trigger volume covers the spot, far
+            -- enough that standing inside the stall still counts as "not there"
+            return (ok and p and (p - stand).Magnitude <= 8) and true or false
+        end
+        local function gateWait(seconds)
+            if not atGate() then
+                milkTp(stand, true)
+            end
+            local by = os.clock() + seconds
+            while os.clock() < by do
+                if milkStopping() or farmTookBody() then break end
+                if doorBill() then break end
+                task.wait(0.05)
+            end
+        end
+        if not doorBill() then gateWait(0.9) end
 
         for attempt = 1, 3 do
             if milkStopping() then return false end
@@ -8038,8 +8084,7 @@ local okBuild, errBuild = pcall(function()
             if not b then
                 log(string.format("milk: %s gate - the game is not offering the door action (try %d)",
                     name, attempt))
-                milkTp(stand)
-                task.wait(0.4)
+                gateWait(0.4)
             else
                 local key, txt = nil, {}
                 for _, d in ipairs(b:GetDescendants()) do
@@ -8061,9 +8106,10 @@ local okBuild, errBuild = pcall(function()
                 end
             end
             -- the cow left when the game clears the stall Occupant or flips its
-            -- own state off "IdleLocked"
+            -- own state off "IdleLocked". Read FIRST, then wait: a gate that
+            -- opened instantly used to cost a flat 0.5 s anyway, and the
+            -- ceiling is unchanged (8 reads, 4 s of waiting).
             for _ = 1, 8 do
-                task.wait(0.5)
                 local o = milkStallOccupant(spot)
                 local still = (o and o:IsA("ObjectValue") and cow and cow.model
                     and o.Value == cow.model) and true or false
@@ -8073,8 +8119,11 @@ local okBuild, errBuild = pcall(function()
                         name, cow and cow.index or 0, st or "no state"))
                     return true
                 end
+                task.wait(0.5)
             end
             log(string.format("milk: %s gate pressed (try %d) but the cow is still inside", name, attempt))
+            -- that press did not land from where we stood: get to the gate
+            gateWait(0.2)
         end
         log(string.format("milk: %s - the gate never opened for cow %d", name, cow and cow.index or 0))
         return false
@@ -8301,7 +8350,36 @@ local okBuild, errBuild = pcall(function()
     -- with no Clean action is logged, never guessed, never counted as cleaned.
     local function milkClean(stalls)
         local dirty, cleaned, unknown = 0, 0, 0
+        -- ▸ A CLEAN BARN COSTS NO TELEPORTS (user: "i just wnat it to stop
+        --   teleporting, it's a huge waist of time"). The pass used to hop into
+        --   EVERY stall just to ask "dirty?" - a dozen teleports and ~6 s on a
+        --   12-stall farm, over and over. But the answer is readable from where
+        --   the character already stands: the stall folder carries the game's
+        --   own Filth value (milkFilth) and the stain parts are ordinary visible
+        --   parts, and neither needs a visit. So only the stalls that SAY
+        --   something get one - filth above zero, a visible stain, or a dirt
+        --   reading that could not be taken at all. A visit then still confirms
+        --   with the game's own Clean action before pressing, exactly as before.
+        local todo = {}
         for i, s in ipairs(stalls) do
+            local f = milkFilth(s.spot)
+            local n = milkStain(s.spot)
+            if f == nil and n == 0 then
+                todo[#todo + 1] = { i = i, s = s, why = "no readable dirt" }
+            elseif (type(f) == "number" and f > 0) or n > 0 then
+                todo[#todo + 1] = { i = i, s = s,
+                    why = (type(f) == "number" and f > 0) and ("filth " .. tostring(f)) or (n .. " stain(s)") }
+            end
+        end
+        if #todo == 0 then
+            log(string.format("milk: %d stall(s) read from here - no filth anywhere, so nothing to clean and no teleports",
+                #stalls))
+            return 0, 0, 0
+        end
+        log(string.format("milk: %d of %d stall(s) need a visit (%s) - the rest are clean",
+            #todo, #stalls, todo[1].why))
+        for _, job in ipairs(todo) do
+            local i, s = job.i, job.s
             if milkStopping() then break end
             if farmTookBody() then
                 log("milk: the farm loop took the body back - cleaning stops mid-way")
@@ -8315,13 +8393,14 @@ local okBuild, errBuild = pcall(function()
                 unknown += 1
                 log(string.format("milk: stall %d has no readable position", i))
             else
-                milkTp(stand + Vector3.new(0, 3, 0))
-                -- ▸ POLL, don't sleep (user: "Poll instead of sleep"). The game
-                --   answers for THIS stall as soon as its Clean action is
-                --   adorned here; nil before that only means "not yet".
-                task.wait(0.3) -- floor: let the teleport land
+                milkTp(stand + Vector3.new(0, 3, 0), true)
+                -- ▸ POLL, don't sleep (user: "Poll instead of sleep"). nil only
+                --   means "not yet": the first read happens on the frame we
+                --   land, and a slow server still has the same 1.2 s ceiling
+                --   the old 0.3 s floor + 8 steps allowed. The floor was pure
+                --   dead time on every stall of every pass.
                 local up
-                for _ = 1, 8 do -- ≤1.2 s more, and usually the first read
+                for _ = 1, 8 do
                     if milkStopping() or farmTookBody() then break end
                     up = milkCleanUp(s.spot)
                     if up ~= nil then break end

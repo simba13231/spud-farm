@@ -4,6 +4,7 @@ The report is read-only, so it can be exercised with stubbed game objects:
 this slices the real code out of the script (no copy-paste) and runs it under
 the real Luau interpreter with fake Vector3 / workspace / equipment.
 """
+import os
 import subprocess
 import sys
 import pathlib
@@ -11,10 +12,11 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SRC = ROOT / "SpudFarm_Full.lua"
-LUAU = pathlib.Path(r"C:/Users/MIOUTH~1/AppData/Local/Temp/luau-check/luau.exe")
+LUAU = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else (
+    pathlib.Path(os.environ.get("LOCALAPPDATA", ".")) / "Temp" / "opencode" / "luau" / "luau.exe")
 
 START = "    local okPanel, errPanel = pcall(function()"
-HSTART = "    local HARVEST_MODEL_NAMES = { ZM80 = true }"
+HSTART = "    function equipTypeOf(m)"
 HEND = "    local function driveWatchTick(tr)"
 END = "    -- ON = spawn the loop on its own thread"
 
@@ -185,10 +187,12 @@ local function fakeModel(name, etype)
   end }
 end
 local byAttr = fakeModel("SOMEHULL", "Harvester")
-local byName = fakeModel("ZM80", nil)
+local byName = fakeModel("SRC6", nil) -- the dump's harvester (ZM80 is the tractor)
+local tractor = fakeModel("ZM80", nil)
 local plow = fakeModel("PLOWY", "Plow")
 assert(isHarvester(byAttr) == true, "EquipmentType attribute not honoured")
-assert(isHarvester(byName) == true, "ZM80 model name not honoured when the attribute is missing")
+assert(isHarvester(byName) == true, "SRC6 model name not honoured when the attribute is missing")
+assert(isHarvester(tractor) == false, "a tractor was classified as the harvester")
 assert(isHarvester(plow) == false, "a plow was classified as the harvester")
 local selfProp = fakeModel("NOTHING", nil)
 assert(isHarvester(selfProp, selfProp) == true,
