@@ -6,7 +6,7 @@
 
 local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/releases/latest/download/Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.20 · fluent gui"
+local VERSION    = "rebuild v1.21 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -9780,30 +9780,37 @@ local okBuild, errBuild = pcall(function()
     --   nil means the farm could not be read at all (streamed out, gone, not
     --   built yet) - the caller never treats that as "empty". GLOBAL for the
     --   same slot-budget reason as milkBarnPicked.
+    --   Two numbers, because a farm can be worth a pass for two reasons: cows out
+    --   in the field that are ready to herd, and cows ALREADY PARKED in its
+    --   stalls waiting to be milked (user: "it's missing sometimes bro" - a farm
+    --   whose cows were all in its barn read as zero ready and never got the
+    --   pass, so its milk sat there). nil means unreadable, never empty.
     function milkFarmReadyCount(who)
         if not who then return nil end
-        local ok, n = pcall(function()
+        local ok, ready, parked = pcall(function()
             local plot = milkPlotOf(who)
             if not plot then return nil end
             local cf, size = plot:GetBoundingBox()
             if not cf then return nil end
             local stalls = milkStalls(who, cf, size)
-            local count = 0
+            local r, p = 0, 0
             for _, c in ipairs(milkCows(who, cf, size, stalls)) do
-                if milkReadyToHerd(c) then count += 1 end
+                if milkReadyToHerd(c) then r += 1 end
+                if c.inBarn or c.stall then p += 1 end
             end
-            return count
+            return r, p
         end)
-        if not ok then return nil end
-        return n
+        if not ok or ready == nil then return nil end
+        return ready, parked or 0
     end
 
     -- ▸ WHO TAKES THE NEXT PASS? (user: "if the farm does not have the set amount
     --   of cows to herd at a time it goes to the next farm"). The whole rule in
     --   one place, so the cycle and the tests cannot drift: a farm that has cows
     --   PARKED is never skipped (there is milk to take), a farm that can fill a
-    --   whole batch is never skipped, and otherwise the farm with MORE ready cows
-    --   than this one takes the next pass - even when that is still under the
+    --   whole batch is never skipped, and otherwise the farm with more cows
+    --   WAITING than this one takes the next pass - ready in the field PLUS the
+    --   ones already standing in its stalls - even when that is still under the
     --   batch size.
     --
     --   ▸ WHY "MORE THAN HERE" AND NOT "A WHOLE BATCH" (user: "it does not
@@ -9824,28 +9831,46 @@ local okBuild, errBuild = pcall(function()
     --   milkFarmGoTo, and the caller does it only when this picks a farm.
     function milkFarmSwitch(want, owner, readyHere, parkedHere)
         readyHere = tonumber(readyHere) or 0
-        if (tonumber(parkedHere) or 0) > 0 then return nil, "parked" end
-        if readyHere >= want then return nil, "full" end
-        local bestSlot, bestWho, bestN, others, blind = nil, nil, nil, 0, nil
+        -- same 7-value shape every way out (see the comment on the last return)
+        if (tonumber(parkedHere) or 0) > 0 then return nil, nil, nil, "parked" end
+        if readyHere >= want then return nil, nil, nil, "full" end
+        local bestSlot, bestWho, bestN, bestParked, others, blind = nil, nil, nil, 0, 0, nil
+        local topWho, topReady, topStuck = nil, nil, 0
         for _, cand in ipairs(milkFarmOrder()) do
-            if milkStopping() or farmTookBody() then return nil, "stopped" end
+            if milkStopping() or farmTookBody() then return nil, nil, nil, "stopped" end
             if cand.who ~= owner then
                 others += 1
-                local n = milkFarmReadyCount(cand.who)
+                local n, stuck = milkFarmReadyCount(cand.who)
                 -- nil = that farm could not be read here: skipped, not emptied
                 if n then
-                    if n > readyHere and (not bestN or n > bestN) then
-                        bestSlot, bestWho, bestN = cand.slot, cand.who, n
+                    stuck = tonumber(stuck) or 0
+                    -- a cow already in a stall counts as much as one in the
+                    -- field: it is milk waiting, and milking it is faster than
+                    -- herding, so a barn full of them is the best pass of all
+                    local worth = n + stuck
+                    local bestWorth = bestN and (bestN + bestParked) or nil
+                    if worth > readyHere and (not bestWorth or worth > bestWorth) then
+                        bestSlot, bestWho, bestN, bestParked = cand.slot, cand.who, n, stuck
+                    end
+                    -- the fullest OTHER farm, kept even when it is not enough,
+                    -- so the console can show what the comparison saw
+                    if not topReady or worth > topReady + topStuck then
+                        topWho, topReady, topStuck = cand.who, n, stuck
                     end
                 else
                     blind = blind or cand.who
                 end
             end
         end
-        if bestSlot then return bestSlot, bestWho, bestN, "better" end
-        -- 3rd value: the first farm that could not be read from here, so the
-        -- console can say why it was not considered instead of looking broken
-        return nil, others > 0 and "nothing-better" or "alone", blind
+        -- ALWAYS the same shape: slot, who, ready, why, blind, parked, fullest-
+        -- other-as-text - so the caller's names cannot mean two things.
+        if bestSlot then return bestSlot, bestWho, bestN, "better", nil, bestParked, nil end
+        local top
+        if topWho then
+            top = string.format("%s: %d ready%s", tostring(topWho), topReady,
+                topStuck > 0 and (" + " .. topStuck .. " in a stall") or "")
+        end
+        return nil, nil, nil, others > 0 and "nothing-better" or "alone", blind, nil, top
     end
 
     -- hand the rotation to a farm the chooser picked, with EXACTLY the hand-over
@@ -9973,16 +9998,20 @@ local okBuild, errBuild = pcall(function()
             if c.inBarn or c.stall then parkedHere += 1 end
         end
         do
-            local nextSlot, nextWho, nextN, why, blind = milkFarmSwitch(want, owner, readyHere, parkedHere)
+            local nextSlot, nextWho, nextN, why, blind, nextParked, top =
+                milkFarmSwitch(want, owner, readyHere, parkedHere)
             if nextSlot then
                 milkFarmGoTo(nextSlot, nextWho)
                 milkFarmStayNote = nil
+                local what = (tonumber(nextParked) or 0) > 0
+                    and string.format("%d ready + %d in a stall", nextN, nextParked)
+                    or string.format("%d ready", nextN)
                 log(string.format(
-                    "milk: %s has %d ready cow(s) - under the %d per herd, so farm %d (%s, %d ready) takes the next pass",
-                    tostring(owner), readyHere, want, nextSlot, tostring(nextWho), nextN))
+                    "milk: %s has %d ready cow(s) - under the %d per herd, so farm %d (%s, %s) takes the next pass",
+                    tostring(owner), readyHere, want, nextSlot, tostring(nextWho), what))
                 milkSetStatus(string.format(
-                    "%s: %d ready cow(s), under the %d per herd\nnext pass works farm %d: %s (%d ready)",
-                    tostring(owner), readyHere, want, nextSlot, tostring(nextWho), nextN))
+                    "%s: %d ready cow(s), under the %d per herd\nnext pass works farm %d: %s (%s)",
+                    tostring(owner), readyHere, want, nextSlot, tostring(nextWho), what))
                 return true, dirty, unknown, false, "skip"
             elseif why == "nothing-better" and milkFarmStayNote ~= owner then
                 -- ▸ SAY WHY IT STAYED (user: "it does not switch the plot/players
@@ -9990,10 +10019,12 @@ local okBuild, errBuild = pcall(function()
                 --   would only cost a teleport and find less. Once per farm, not
                 --   once a pass - the answer does not change until it does.
                 milkFarmStayNote = owner
+                local because = top and ("the fullest other is " .. top)
+                    or (blind and (tostring(blind) .. " could not be read from here"))
+                    or "this is the only farm set"
                 log(string.format(
-                    "milk: %s has %d ready cow(s) - under the %d per herd, but no other farm has more - working this one%s",
-                    tostring(owner), readyHere, want,
-                    blind and (" (" .. tostring(blind) .. " could not be read from here)") or ""))
+                    "milk: %s has %d ready cow(s) - under the %d per herd, but %s - working this one",
+                    tostring(owner), readyHere, want, because))
             end
         end
 

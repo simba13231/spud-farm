@@ -49,16 +49,21 @@ Everything merged into one paste-and-run file:
   300% at the same moment, so the hand-over never fired and a six-cow farm kept
   the pass while a nine-cow farm waited. Cleaning still happens first — a dirty
   stall is never skipped — and a farm with cows **already parked in its
-  stalls** is never skipped either, because there is milk to take. When **no**
-  other farm has more, the current one is worked exactly as before, so a small
-  farm cannot stall the loop, and an equal count never swaps (that would
-  ping-pong two equal alts on every pass). The check reads the other farms
-  without moving the character (see `milkFarmReadyCount`) and never treats a
-  farm it cannot read — streamed out, not built yet — as empty; when one could
-  not be read the console names it, and the status line says `working farm 2/3:
-  <account>` so the active farm is visible without opening the dropdowns. The
-  whole rule lives in one function ([tools/farm_switch_test.py](tools/farm_switch_test.py)
-  exercises the real one: 14 checks, plus 30 more in
+  stalls** is never skipped either, because there is milk to take. What is
+  compared is every cow **waiting** on that farm: ready in the field **plus**
+  the ones already standing in its barn — a farm whose cows are all in its
+  stalls reads as zero *ready*, and leaving it out was the second miss ("it's
+  missing sometimes bro"), so its milk sat there while the shorter farm got the
+  pass. When **no** other farm has more, the current one is worked exactly as
+  before, so a small farm cannot stall the loop, and an equal count never swaps
+  (that would ping-pong two equal alts on every pass). The check reads the
+  other farms without moving the character (see `milkFarmReadyCount`) and never
+  treats a farm it cannot read — streamed out, not built yet — as empty; the
+  stay line names the fullest other farm (or the one that could not be read),
+  and the status line says `working farm 2/3: <account>` so the active farm is
+  visible without opening the dropdowns. The whole rule lives in one function
+  ([tools/farm_switch_test.py](tools/farm_switch_test.py)
+  exercises the real one: 18 checks, plus 30 more in
   [tools/farm_batch_test.py](tools/farm_batch_test.py)). The **herd
   batch size typed in a box
   (1–12)**, **Store milk in** (live list of the picked account's trailers/silos;

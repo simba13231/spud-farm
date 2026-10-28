@@ -46,11 +46,14 @@ milkPlotOf = function(who)
 end
 milkStalls = function() return { {} } end
 milkCows = function(who)
-    local n = READY[who]
-    if n == nil then return {} end
+    local f = READY[who]
+    if f == nil then return {} end
     seenWho[who] = true
+    local n = type(f) == "table" and (f.ready or 0) or f
+    local p = type(f) == "table" and (f.parked or 0) or 0
     local out = {}
-    for i = 1, n do out[i] = { index = i, percent = 300 } end
+    for i = 1, n do out[#out + 1] = { index = i, percent = 300 } end
+    for i = 1, p do out[#out + 1] = { index = 100 + i, percent = 300, inBarn = true } end
     return out
 end
 milkReadyToHerd = function(c) return c ~= nil and (c.percent or 0) >= 300 end
@@ -83,40 +86,63 @@ end
 
 -- the rule no longer demands a FULL batch: 9 beats 6 and takes the pass
 setup({ A = 6, B = 9 }, { "A", "B", "(none)" })
-local slot, who, n, why = milkFarmSwitch(12, "A", 6, 0)
+local slot, who, n, why, blind, parked = milkFarmSwitch(12, "A", 6, 0)
 check("6 here vs 9 there: hand over to the fuller farm", slot == 2 and who == "B" and n == 9,
     desc(slot, who, n, why))
+
+-- a farm whose cows are ALL in its stalls reads as zero ready, and that is
+-- exactly the pass worth taking: the milk is already waiting in the barn
+setup({ A = 6, B = { ready = 0, parked = 9 } }, { "A", "B", "(none)" })
+slot, who, n, why, blind, parked = milkFarmSwitch(12, "A", 6, 0)
+check("a barn full of waiting cows takes the pass",
+    slot == 2 and who == "B" and parked == 9, desc(slot, who, n, parked))
+
+-- ...and a farm with a full barn outranks one with more cows merely ready
+setup({ A = 6, B = { ready = 2, parked = 9 } }, { "A", "B", "(none)" })
+slot, who, n = milkFarmSwitch(12, "A", 6, 0)
+check("ready + parked is what is compared", slot == 2 and who == "B", desc(slot, who, n))
+
+-- one cow parked is worth more than none, even when nothing is ready there
+setup({ A = 6, B = { ready = 0, parked = 1 } }, { "A", "B", "(none)" })
+slot, who = milkFarmSwitch(12, "A", 6, 0)
+check("one waiting cow does NOT outrank six ready ones", slot == nil, desc(slot, who))
 
 -- and it is still only a hand-over when this farm really is short
 -- (a pass that does NOT move returns the reason as its 2nd value)
 setup({ A = 12, B = 12 }, { "A", "B", "(none)" })
-slot, why = milkFarmSwitch(12, "A", 12, 0)
-check("a full batch here is never skipped", slot == nil and why == "full", desc(slot, why))
+local _, _, _, why = milkFarmSwitch(12, "A", 12, 0)
+check("a full batch here is never skipped", why == "full", desc(why))
 
 -- parked cows are milk to take, whatever the field looks like
 setup({ A = 2, B = 11 }, { "A", "B", "(none)" })
-slot, why = milkFarmSwitch(12, "A", 2, 3)
-check("parked cows keep the pass here", slot == nil and why == "parked", desc(slot, why))
+_, _, _, why = milkFarmSwitch(12, "A", 2, 3)
+check("parked cows keep the pass here", why == "parked", desc(why))
 
 -- fewer ready cows over there: no teleport for nothing
 setup({ A = 6, B = 3 }, { "A", "B", "(none)" })
-slot, why = milkFarmSwitch(12, "A", 6, 0)
-check("a barer farm does not steal the pass", slot == nil and why == "nothing-better",
-    desc(slot, why))
+slot, who, n, why, blind, parked, top = milkFarmSwitch(12, "A", 6, 0)
+check("a barer farm does not steal the pass",
+    slot == nil and why == "nothing-better" and top == "B: 3 ready", desc(slot, why, top))
 
 -- an equal farm does not either (>= would ping-pong two equal alts)
 setup({ A = 6, B = 6 }, { "A", "B", "(none)" })
-slot, why = milkFarmSwitch(12, "A", 6, 0)
-check("an equal farm does not steal the pass", slot == nil, desc(slot, why))
+slot, who, n, why, blind, parked, top = milkFarmSwitch(12, "A", 6, 0)
+check("an equal farm does not steal the pass", slot == nil and top == "B: 6 ready",
+    desc(slot, top))
 
--- unreadable is never empty and never a target
+-- unreadable is never empty and never a target...
 setup({ A = 6 }, { "A", "B", "(none)" })
-slot, why = milkFarmSwitch(12, "A", 6, 0)
-check("an unreadable farm is not a target", slot == nil, desc(slot, why))
+slot, who, n, why, blind = milkFarmSwitch(12, "A", 6, 0)
+check("an unreadable farm is not a target", slot == nil and blind == "B",
+    desc(slot, blind))
+-- ...and it is named, so a stay is not a mystery
+setup({ A = 6 }, { "A", "B", "(none)" })
+slot, who, n, why, blind, parked, top = milkFarmSwitch(12, "A", 6, 0)
+check("a farm that cannot be read is named", blind == "B" and top == nil, desc(blind, top))
 
 -- the farm being worked is never its own target, even if it looks fuller
 setup({ A = 6 }, { "A", "(none)", "(none)" })
-slot, why = milkFarmSwitch(12, "A", 6, 0)
+slot, who, n, why = milkFarmSwitch(12, "A", 6, 0)
 check("with one farm set there is nothing to switch to",
     slot == nil and why == "alone", desc(slot, why))
 
@@ -128,7 +154,7 @@ check("the fullest of three farms wins", slot == 3 and who == "C" and n == 10,
 
 -- after the hand-over the old farm cannot take it straight back
 setup({ A = 6, B = 9 }, { "A", "B", "(none)" }, 2)
-slot, why = milkFarmSwitch(12, "B", 9, 0)
+slot, who, n, why = milkFarmSwitch(12, "B", 9, 0)
 check("no ping-pong: the emptier farm stays put", slot == nil, desc(slot, why))
 
 -- an empty farm leaves as soon as anywhere has a cow
@@ -139,7 +165,7 @@ check("an empty farm hands over to one ready cow", slot == 2 and who == "B",
 
 -- and two empty farms do not chase each other
 setup({ A = 0, B = 0 }, { "A", "B", "(none)" })
-slot, why = milkFarmSwitch(12, "A", 0, 0)
+slot, who, n, why = milkFarmSwitch(12, "A", 0, 0)
 check("two empty farms do not chase each other", slot == nil, desc(slot, why))
 
 -- the real reader behind it: count cows, never invent them
