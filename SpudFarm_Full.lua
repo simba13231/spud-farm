@@ -6,7 +6,7 @@
 
 local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/releases/latest/download/Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.17 · fluent gui"
+local VERSION    = "rebuild v1.18 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -6997,14 +6997,53 @@ local okBuild, errBuild = pcall(function()
     --   the stall itself - readable from the plot centre, no teleport and no
     --   menu. nil means it could not be read, which the caller treats as "visit
     --   it", never as "clean".
+    -- ▸ A STALL'S DIRT, READ FROM ANYWHERE. The dump lists Spots.<n>.Filth, but
+    --   the live build answered nil to a direct child lookup (the console said
+    --   "12 of 12 stall(s) need a visit (no readable dirt)"), so every shape the
+    --   value could take is tried before giving up. Giving up is NEVER "visit
+    --   it": milkClean only visits a stall that REPORTS dirt, and one that
+    --   cannot be read is cleaned at the stall while a cow there is milked
+    --   (milkCowInStall) - user: "fix it so it does not tp anymore".
     local function milkFilth(spot)
-        local f = spot and spot:FindFirstChild("Filth")
-        if not f then return nil end
-        local ok, v = pcall(function() return f.Value end)
-        if not ok then return nil end
-        if type(v) == "number" then return v end
-        if type(v) == "boolean" then return v and 1 or 0 end
-        if type(v) == "string" then return tonumber(v) end
+        if not spot then return nil end
+        local function amount(v)
+            if type(v) == "number" then return v end
+            if type(v) == "boolean" then return v and 1 or 0 end
+            if type(v) == "string" then return tonumber(v) end
+            return nil
+        end
+        -- 1. a value object named Filth: direct child (the dump's shape) first,
+        --    then anywhere inside the stall folder
+        for _, direct in ipairs({ true, false }) do
+            local f
+            pcall(function() f = spot:FindFirstChild("Filth", not direct) end)
+            if f then
+                local ok, v = pcall(function() return f.Value end)
+                local n = ok and amount(v) or nil
+                if n then return n end
+            end
+        end
+        -- 2. the same thing as an ATTRIBUTE (every machine in this game carries
+        --    EquipmentType that way, so a stall can carry its dirt that way too)
+        for _, where in ipairs({ spot, spot.Parent }) do
+            for _, name in ipairs({ "Filth", "Dirt", "Grime" }) do
+                local ok, v = pcall(function() return where:GetAttribute(name) end)
+                local n = ok and amount(v) or nil
+                if n then return n end
+            end
+        end
+        -- 3. a value object under any other dirty-sounding name
+        local kids
+        pcall(function() kids = spot:GetChildren() end)
+        for _, c in ipairs(kids or {}) do
+            local nm = tostring(c.Name):lower()
+            if nm:find("filth", 1, true) or nm:find("dirt", 1, true)
+                or nm:find("grime", 1, true) then
+                local ok, v = pcall(function() return c.Value end)
+                local n = ok and amount(v) or nil
+                if n then return n end
+            end
+        end
         return nil
     end
 
@@ -8201,6 +8240,30 @@ local okBuild, errBuild = pcall(function()
         return occupied and st ~= "Wander"
     end
 
+    -- ▸ IS *THIS* STALL DIRTY? The game's Clean billboard carries
+    --   Adornee = the stall's own "Center" part (dump §24), so a match means
+    --   the answer is about this stall. No match = the billboard is pointing at
+    --   some other stall, so this one gets "unknown", never a guess. Defined
+    --   HERE because the stall visit below asks it the moment we stand in a
+    --   stall - a forward local reference would silently become a nil global.
+    local function milkCleanUp(spot)
+        local ok, b = pcall(function()
+            local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+            local hud = pg and pg.GuiViews and pg.GuiViews:FindFirstChild("HUD")
+            local gw = hud and hud:FindFirstChild("MainHUD")
+            local cpa = (gw and gw:FindFirstChild("PCGP_ContextActions"))
+                or (hud and hud:FindFirstChild("PCGP_ContextActions"))
+            return cpa and cpa:FindFirstChild("Billboards")
+                and cpa.Billboards:FindFirstChild("CleanAnimalContainer")
+        end)
+        if not (ok and b) then return nil end
+        local centre = spot:FindFirstChild("Center", true)
+        if not centre then return nil end
+        local okAd, ad = pcall(function() return b.Adornee end)
+        if not okAd or ad ~= centre then return nil end
+        return b.Enabled == true
+    end
+
     local function milkCowInStall(cow)
         local spot, model = cow.stall, cow.model
         if not (spot and model) then return false end
@@ -8216,6 +8279,24 @@ local okBuild, errBuild = pcall(function()
             return false
         end
         milkTp(stand + Vector3.new(0, 3, 0), true)
+        -- ▸ CLEAN THE STALL WE ARE STANDING IN (user: "why is it still looping
+        --   inside the stall? remove it bro"). The sweep that hopped into every
+        --   stall to ask "dirty?" is gone: a farm's Filth value is not readable
+        --   in this build (the console said "12 of 12 ... no readable dirt"),
+        --   so it swept all twelve every pass. The game only offers Clean while
+        --   you stand in the stall, and this is the moment we stand there for a
+        --   milking anyway, so the offer is read here: true = the game wants
+        --   this one cleaned, and V is the game's own key for it.
+        if milkCleanUp(spot) == true then
+            log(string.format("milk: %s is dirty - cleaning it before milking",
+                tostring(spot.Name)))
+            pressKey(Enum.KeyCode.V)
+            for _ = 1, 8 do -- same 1.2 s ceiling the old sweep allowed
+                if milkStopping() or farmTookBody() then break end
+                if milkCleanUp(spot) ~= true then break end
+                task.wait(0.12)
+            end
+        end
         -- ▸ FRAME POLL for the stall's own menu: same 1.35 s ceiling the old
         --   0.45 s floor plus 6 x 0.15 s steps allowed, but a menu that is
         --   already up costs one frame instead of 450 ms per cow
@@ -8361,28 +8442,6 @@ local okBuild, errBuild = pcall(function()
         end
     end
 
-    -- ▸ IS *THIS* STALL DIRTY? The game's Clean billboard carries
-    --   Adornee = the stall's own "Center" part (dump §24), so a match means
-    --   the answer is about this stall. No match = the billboard is pointing at
-    --   some other stall, so this one gets "unknown", never a guess.
-    local function milkCleanUp(spot)
-        local ok, b = pcall(function()
-            local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
-            local hud = pg and pg.GuiViews and pg.GuiViews:FindFirstChild("HUD")
-            local gw = hud and hud:FindFirstChild("MainHUD")
-            local cpa = (gw and gw:FindFirstChild("PCGP_ContextActions"))
-                or (hud and hud:FindFirstChild("PCGP_ContextActions"))
-            return cpa and cpa:FindFirstChild("Billboards")
-                and cpa.Billboards:FindFirstChild("CleanAnimalContainer")
-        end)
-        if not (ok and b) then return nil end
-        local centre = spot:FindFirstChild("Center", true)
-        if not centre then return nil end
-        local okAd, ad = pcall(function() return b.Adornee end)
-        if not okAd or ad ~= centre then return nil end
-        return b.Enabled == true
-    end
-
     -- THE RULE: a dirty stall is cleaned BEFORE anything else happens.
     -- We stand IN the stall (on its Center part - the thing the Clean action is
     -- adorned to) and let the GAME answer: Clean enabled = dirty. A Stain part
@@ -8396,23 +8455,46 @@ local okBuild, errBuild = pcall(function()
         --   the character already stands: the stall folder carries the game's
         --   own Filth value (milkFilth) and the stain parts are ordinary visible
         --   parts, and neither needs a visit. So only the stalls that SAY
-        --   something get one - filth above zero, a visible stain, or a dirt
-        --   reading that could not be taken at all. A visit then still confirms
-        --   with the game's own Clean action before pressing, exactly as before.
-        local todo = {}
+        --   something get one - filth above zero or a visible stain. A stall
+        --   that cannot be read is NOT a reason to visit any more (user: "why is
+        --   it still looping inside the stall? remove it bro"): this build has
+        --   no Filth value, so "unreadable" meant all twelve were visited every
+        --   pass. Those are cleaned at the stall while a cow there is milked
+        --   (milkCowInStall), where the game's own Clean offer can be read.
+        local todo, blind = {}, 0
         for i, s in ipairs(stalls) do
             local f = milkFilth(s.spot)
             local n = milkStain(s.spot)
-            if f == nil and n == 0 then
-                todo[#todo + 1] = { i = i, s = s, why = "no readable dirt" }
-            elseif (type(f) == "number" and f > 0) or n > 0 then
+            if (type(f) == "number" and f > 0) or n > 0 then
                 todo[#todo + 1] = { i = i, s = s,
                     why = (type(f) == "number" and f > 0) and ("filth " .. tostring(f)) or (n .. " stain(s)") }
+            elseif f == nil then
+                blind += 1 -- no Filth value in this build, not "dirty"
             end
         end
+        -- ▸ ONCE PER SESSION: say what a stall really holds, so a build where the
+        --   dirt lives somewhere unexpected can be named exactly from the console
+        --   instead of guessed at.
+        if blind > 0 and not milkFilthSaid then
+            milkFilthSaid = true
+            local names = {}
+            pcall(function()
+                for _, c in ipairs(stalls[1].spot:GetChildren()) do
+                    if #names < 12 then names[#names + 1] = tostring(c.Name)..(" ["..tostring(c.ClassName).."]") end
+                end
+            end)
+            log(string.format(
+                "milk: %d of %d stall(s) have no readable dirt value and are NOT visited - %s holds: %s",
+                blind, #stalls, tostring(stalls[1].spot and stalls[1].spot.Name or "stall"),
+                #names > 0 and table.concat(names, ", ") or "no children"))
+        end
         if #todo == 0 then
-            log(string.format("milk: %d stall(s) read from here - no filth anywhere, so nothing to clean and no teleports",
-                #stalls))
+            log(string.format(
+                "milk: %d stall(s) read from here - none reports dirt%s, so no teleports",
+                #stalls,
+                blind > 0
+                    and string.format(" (%d without a readable value - cleaned at the stall)", blind)
+                    or ""))
             return 0, 0, 0
         end
         log(string.format("milk: %d of %d stall(s) need a visit (%s) - the rest are clean",

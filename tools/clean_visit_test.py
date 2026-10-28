@@ -3,10 +3,12 @@
 The pass used to hop into every stall just to ask "dirty?": a dozen teleports
 and a 0.2 s settle + 0.3 s floor each, every pass, on a clean barn.
 
-The answer is readable without moving - the stall folder carries the game's own
-Filth value and the stain parts are ordinary visible parts - so this runs the
-REAL milkClean / milkCleanUp / milkFilth / milkStain / milkTrigger over a fake
-barn and counts teleports, key presses and virtual-clock seconds.
+The answer is read without moving - the game's own Filth value (direct child,
+nested, or as an attribute), or a visible stain part - so this runs the REAL
+milkClean / milkCleanUp / milkFilth / milkStain / milkTrigger over a fake barn
+and counts teleports, key presses and virtual-clock seconds. A stall that cannot
+be READ is not visited at all: it is cleaned at the stall while a cow there is
+milkened, and the console says which one and what it holds.
 
     python tools/clean_visit_test.py [path-to-luau.exe] [git-ref]
 
@@ -61,32 +63,50 @@ local GUIVIEWS = { FindFirstChild = function(_, n) if n == "HUD" then return HUD
 local PG = { GuiViews = GUIVIEWS, FindFirstChild = function() return nil end }
 LocalPlayer = { Name = "Me", FindFirstChildOfClass = function() return PG end }
 
--- ── the barn: stalls 20 studs apart, each with the game's own Filth value, its
---    Center part, a trigger, and any stain parts
+-- ── the barn: stalls 20 studs apart, each with the game's own dirt in one of
+--    the shapes a build can use, its Center part, a trigger, and any stains
 STALLS = {}
 local HERE = -1000
 local function part(name, x)
-    return { Name = name, Position = vec(x, 0, 0), Transparency = 0,
+    return { Name = name, ClassName = "Part", Position = vec(x, 0, 0), Transparency = 0,
         IsA = function(self, cls) return cls == "BasePart" end }
 end
+local function value(name, v)
+    return { Name = name, ClassName = "NumberValue", Value = v,
+        IsA = function(self, cls) return cls == "ValueBase" end }
+end
 
-local function stallSpot(i, filth, stains, noOffer)
+local function stallSpot(i, spec)
     local x = i * 20
     local centre, prox = part("Center", x), part("ProximityPart", x)
     local list = { centre, prox }
-    for _ = 1, (stains or 0) do list[#list + 1] = part("Stain", x) end
-    local filthVal
-    if filth ~= nil then
-        filthVal = { Name = "Filth", Value = filth,
-            IsA = function(self, cls) return cls == "ValueBase" end }
-    end
-    local spot = { Name = "Spot" .. i, _x = x, _centre = centre, _noOffer = noOffer,
-        _dirty = (type(filth) == "number" and filth > 0) or (stains or 0) > 0 }
-    function spot:FindFirstChild(n)
+    for _ = 1, (spec.stains or 0) do list[#list + 1] = part("Stain", x) end
+    local direct = spec.filth ~= nil and value("Filth", spec.filth) or nil
+    local nested = spec.nested ~= nil and value("Filth", spec.nested) or nil
+    local attr = (spec.attrs or {}).Filth
+    local spot = {
+        Name = "Spot" .. i, ClassName = "Folder", _x = x, _centre = centre,
+        _noOffer = spec.noOffer,
+        _dirty = (type(spec.filth) == "number" and spec.filth > 0)
+            or (type(spec.nested) == "number" and spec.nested > 0)
+            or (type(attr) == "number" and attr > 0)
+            or (spec.stains or 0) > 0,
+    }
+    function spot:FindFirstChild(n, recursive)
         if n == "Center" then return centre end
-        if n == "Filth" then return filthVal end
+        if n == "Filth" then
+            if direct then return direct end
+            if recursive then return nested end
+            return nil
+        end
         if n == "ProximityPart" then return prox end
         return nil
+    end
+    function spot:GetAttribute(name) return (spec.attrs or {})[name] end
+    function spot:GetChildren()
+        local out = { centre, prox }
+        if direct then out[#out + 1] = direct end
+        return out
     end
     function spot:GetDescendants() return list end
     return spot
@@ -130,7 +150,7 @@ POST = r"""
 local fails = 0
 local function check(name, ok, detail)
     if not ok then fails = fails + 1 end
-    print(string.format("%-56s %s%s", name, ok and "PASS" or "FAIL",
+    print(string.format("%-58s %s%s", name, ok and "PASS" or "FAIL",
         detail and ("  " .. detail) or ""))
 end
 
@@ -138,11 +158,12 @@ local function build(spec)
     STALLS = {}
     for i = 1, 12 do
         local sp = spec(i) or {}
-        local spot = stallSpot(i, sp.filth, sp.stains, sp.noOffer)
+        local spot = stallSpot(i, sp)
         spot._refuse = sp.refuse
         STALLS[i] = { spot = spot, pos = vec(i * 20, 0, 0) }
     end
     VT, TELEPORTS, PRESSES, LOG = 0, 0, 0, {}
+    milkFilthSaid = nil
     HERE = -1000
 end
 
@@ -169,15 +190,22 @@ check("one dirty stall: cleaned and counted", dirty == 1 and cleaned == 1 and un
     string.format("dirty=%d cleaned=%d unknown=%d", dirty, cleaned, unknown))
 check("one dirty stall: the key was pressed once", PRESSES == 1, PRESSES .. " press(es)")
 
--- 3. dirt that cannot be read is never taken as clean: that stall gets a visit
+-- 3. dirt that CANNOT be read is never a reason to move (user: "fix it so it
+--    does not tp anymore") - and it is never counted as clean either
 build(function(i)
-    if i == 7 then return { noOffer = true } end -- no Filth value at all
+    if i == 7 then return {} end -- no Filth value in any shape
     return { filth = 0 }
 end)
 dirty, cleaned, unknown = run()
-check("unreadable dirt: that stall is visited", TELEPORTS == 1, TELEPORTS .. " teleport(s)")
-check("unreadable dirt: counted as unknown, not clean", unknown == 1 and cleaned == 0,
+check("unreadable dirt: no teleports", TELEPORTS == 0, TELEPORTS .. " teleport(s)")
+check("unreadable dirt: nothing counted as cleaned", cleaned == 0 and unknown == 0,
     string.format("cleaned=%d unknown=%d", cleaned, unknown))
+local said = false
+for _, l in ipairs(LOG) do
+    if l:find("no readable dirt value and are NOT visited", 1, true) then said = true end
+end
+check("unreadable dirt: the console says which stall and what it holds", said,
+    LOG[1] or "no log")
 
 -- 4. a stall the game will not clean: same three attempts as before
 build(function(i) return { filth = (i == 3) and 10 or 0, refuse = (i == 3) } end)
@@ -185,6 +213,34 @@ dirty, cleaned, unknown = run()
 check("a refusing stall: three presses, not counted as cleaned",
     PRESSES == 3 and cleaned == 0 and dirty == 1,
     string.format("presses=%d cleaned=%d dirty=%d", PRESSES, cleaned, dirty))
+
+-- 5. the dirt as an ATTRIBUTE on the stall folder
+build(function(i) return { attrs = { Filth = (i == 2) and 6 or 0 } } end)
+dirty, cleaned, unknown = run()
+check("attribute dirt: that stall is visited and cleaned",
+    TELEPORTS == 1 and cleaned == 1, string.format("teleports=%d cleaned=%d", TELEPORTS, cleaned))
+
+-- 6. the dirt as a value nested inside the stall folder
+build(function(i) return { nested = (i == 4) and 9 or nil } end)
+dirty, cleaned, unknown = run()
+check("nested dirt: that stall is visited and cleaned",
+    TELEPORTS == 1 and cleaned == 1, string.format("teleports=%d cleaned=%d", TELEPORTS, cleaned))
+
+-- 7. stains only (the other readable signal)
+build(function(i) return { stains = (i == 9) and 2 or 0 } end)
+dirty, cleaned, unknown = run()
+check("visible stains: that stall is visited and cleaned",
+    TELEPORTS == 1 and cleaned == 1, string.format("teleports=%d cleaned=%d", TELEPORTS, cleaned))
+
+-- 8. an unreadable stall does not hide a readable dirty one
+build(function(i)
+    if i == 1 then return {} end
+    return { filth = (i == 11) and 3 or 0 }
+end)
+dirty, cleaned, unknown = run()
+check("one blind stall + one dirty stall: only the dirty one is visited",
+    TELEPORTS == 1 and cleaned == 1,
+    string.format("teleports=%d cleaned=%d", TELEPORTS, cleaned))
 
 print(fails == 0 and "ALL OK" or (fails .. " FAILED"))
 """

@@ -168,17 +168,29 @@ property access instead of two instance calls. The pass now prints the scan time
 used to mean **teleporting into all twelve stalls every pass** — 0.2 s for the
 teleport to settle plus a 0.3 s floor before the first read, so a barn with
 nothing to clean still cost twelve teleports and 6.00 s of standing still, every
-single pass. The answer is readable without moving: the stall folder carries the
-game's own **`Filth`** value and the stains are ordinary visible parts, so the
-pass now decides who needs a visit from where it stands. A clean barn is **0
-teleports and 0.00 s** (`milk: 12 stall(s) read from here - no filth anywhere, so
-nothing to clean and no teleports`); a stall that looks dirty — or whose filth
-*cannot be read* — gets the visit it always got, and there the game's own Clean
-billboard is still the authority, so "no answer" is still reported as unknown and
-never counted as clean. Measured with [tools/clean_visit_test.py](tools/clean_visit_test.py)
-(virtual clock, real extracted functions, a fake 12-stall barn): **12 teleports /
-6.00 s → 0 / 0.00 s** on a clean barn, **12 → 1** teleport when one stall is
-dirty, and a stall that keeps refusing Clean still gets the same three attempts.
+single pass. The answer is read without moving, and the pass only visits a stall
+that **reports** dirt. Where the dirt lives differs by build: the value is tried
+as a direct `Filth` child (the dump's shape), anywhere inside the stall folder,
+as an attribute on the stall (`Filth` / `Dirt` / `Grime`), and under any
+dirty-sounding child name — the same widening every other reader in this script
+had to do after a game update.
+
+A build that exposes **none** of those used to fall back to visiting all twelve
+(every stall "unreadable" = a visit), which is exactly the tour this was meant
+to remove — the console said `12 of 12 stall(s) need a visit (no readable dirt)`.
+That fallback is **gone**: an unreadable stall is **never** a reason to move, it
+is cleaned at the stall itself while a cow there is milked (the game only offers
+Clean while you stand in that stall anyway), and the console names the stall and
+lists what it actually holds **once per session**, so a build whose dirt lives
+somewhere unexpected can be pointed at exactly instead of guessed at. A clean
+barn is **0 teleports and 0.00 s** (`milk: 12 stall(s) read from here - none
+reports dirt, so no teleports`). Measured with
+[tools/clean_visit_test.py](tools/clean_visit_test.py) (virtual clock, real
+extracted functions, a fake 12-stall barn): **12 teleports / 6.00 s → 0 / 0.00 s**
+on a clean barn, **12 → 1** when one stall is dirty, **12 → 0** when the dirt is
+unreadable, **12 → 1** for dirt given as an attribute or as a nested value (both
+of which the old read missed entirely), and a stall that keeps refusing Clean
+still gets the same three attempts.
 
 **Letting a cow out, from where we stand.** Opening the stall gate used to
 **always** hop to `Gate.ProximityPart` and sleep a flat 0.9 s first — even though
