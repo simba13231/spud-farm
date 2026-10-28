@@ -196,6 +196,15 @@ shape falls through instead of answering "0". For builds without any of that, a
 direct `Filth` child (the old dump's shape), a nested value, an attribute (`Filth`
 / `Dirt` / `Grime`) or a dirty-named child are all still read.
 
+A clean is **not instant** — it takes about **2 s** in this game (the user's own
+number) — so both clean paths wait on the game's own signal instead of a flat
+sleep: the Clean offer switching off is the proof, read every **50 ms** so the
+pass leaves the moment it flips, and the log says how long it took
+(`OK milk: stall 3 cleaned in 1.94s (2 stain(s) -> 0)`). The per-cow clean used
+to give up after **0.96 s** and press for milk while the stall was still being
+cleaned — a press the game ignores, which is one way a cow came back unmilked —
+so it now holds until the offer clears (2.25 s ceiling).
+
 A build that exposes **none** of those used to fall back to visiting all twelve
 (every stall "unreadable" = a visit), which is exactly the tour this was meant
 to remove — the console said `12 of 12 stall(s) need a visit (no readable dirt)`.

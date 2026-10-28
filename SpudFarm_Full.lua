@@ -6,7 +6,7 @@
 
 local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/releases/latest/download/Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.21 · fluent gui"
+local VERSION    = "rebuild v1.22 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -8333,12 +8333,26 @@ local okBuild, errBuild = pcall(function()
         if milkCleanUp(spot) == true then
             log(string.format("milk: %s is dirty - cleaning it before milking",
                 tostring(spot.Name)))
+            local cleanAt = os.clock()
             pressKey(Enum.KeyCode.V)
-            for _ = 1, 8 do -- same 1.2 s ceiling the old sweep allowed
+            -- ▸ A CLEAN TAKES ~2 s IN THIS GAME (user: "it takes 2 seconds to
+            --   clean a stall"). The old ceiling here was 0.96 s, so it gave up
+            --   mid-clean and pressed for milk while the stall was still being
+            --   cleaned - a press the game ignores, which is one way a cow can
+            --   come back unmilked. Wait for the game's own Clean offer to
+            --   switch off (the proof it finished) in 50 ms steps, so it leaves
+            --   the moment it flips rather than after a fixed sleep.
+            local cleanedNow = false
+            for _ = 1, 45 do -- ≤2.25 s
                 if milkStopping() or farmTookBody() then break end
-                if milkCleanUp(spot) ~= true then break end
-                task.wait(0.12)
+                if milkCleanUp(spot) ~= true then
+                    cleanedNow = true
+                    break
+                end
+                task.wait(0.05)
             end
+            log(string.format("milk: %s %s in %.2fs", tostring(spot.Name),
+                cleanedNow and "cleaned" or "still shows dirt", os.clock() - cleanAt))
         end
         -- ▸ FRAME POLL for the stall's own menu: same 1.35 s ceiling the old
         --   0.45 s floor plus 6 x 0.15 s steps allowed, but a menu that is
@@ -8564,11 +8578,11 @@ local okBuild, errBuild = pcall(function()
                 --   the old 0.3 s floor + 8 steps allowed. The floor was pure
                 --   dead time on every stall of every pass.
                 local up
-                for _ = 1, 8 do
+                for _ = 1, 24 do -- same 0.96 s ceiling, 40 ms steps
                     if milkStopping() or farmTookBody() then break end
                     up = milkCleanUp(s.spot)
                     if up ~= nil then break end
-                    task.wait(0.12)
+                    task.wait(0.04)
                 end
                 if up == nil then
                     unknown += 1
@@ -8587,14 +8601,20 @@ local okBuild, errBuild = pcall(function()
                     log(string.format("milk: stall %d is DIRTY (%d stain(s)) - cleaning it now (the game's own V)",
                         i, stains))
                     local done = false
+                    local cleanAt = os.clock()
                     for attempt = 1, 3 do
                         if milkStopping() then break end
                         pressKey(Enum.KeyCode.V)
                         -- ▸ POLL for the game's own answer instead of a flat
                         --   1.3 s: the Clean action turning off IS the proof.
+                        --   A clean takes ~2 s here (user: "it takes 2 seconds
+                        --   to clean a stall"), so the loop keeps the 2.2 s
+                        --   ceiling but reads every 50 ms - it used to sleep
+                        --   120 ms before every read and could sit a full step
+                        --   past the answer on each of three attempts.
                         local nowClean = false
-                        for _ = 1, 18 do -- ≤2.2 s
-                            task.wait(0.12)
+                        for _ = 1, 44 do -- ≤2.2 s
+                            task.wait(0.05)
                             if milkStopping() or farmTookBody() then break end
                             if milkCleanUp(s.spot) == false then
                                 nowClean = true
@@ -8609,8 +8629,8 @@ local okBuild, errBuild = pcall(function()
                     end
                     if done then
                         cleaned += 1
-                        log(string.format("OK milk: stall %d cleaned (%d stain(s) -> %d)",
-                            i, stains, milkStain(s.spot)))
+                        log(string.format("OK milk: stall %d cleaned in %.2fs (%d stain(s) -> %d)",
+                            i, os.clock() - cleanAt, stains, milkStain(s.spot)))
                     else
                         log(string.format("milk: stall %d would not clean - next cycle tries again", i))
                     end

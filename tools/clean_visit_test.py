@@ -32,7 +32,13 @@ OPTIONAL = {"milkFilth"}
 PRE = r"""
 VT, TELEPORTS, PRESSES = 0, 0, 0
 os = { clock = function() return VT end }
-task = { wait = function(t) VT = VT + math.max(t or 0, 1 / 60) end }
+SETTLE_HOOK = nil
+-- time passing is what finishes a clean in game, so every wait re-settles
+-- the billboard the way the real server does
+task = { wait = function(t)
+    VT = VT + math.max(t or 0, 1 / 60)
+    if SETTLE_HOOK then SETTLE_HOOK() end
+end }
 LOG = {}
 log = function(s) LOG[#LOG + 1] = s end
 milkStopping = function() return false end
@@ -136,12 +142,17 @@ local function settle()
     for _, s in ipairs(STALLS) do
         local sp = s.spot
         if not sp._noOffer and math.abs(sp._x - HERE) < 6 then
+            -- a stall being cleaned stays offered until its clean finishes:
+            -- _dirtyUntil is that moment on this virtual clock
+            if sp._dirtyUntil and VT >= sp._dirtyUntil then sp._dirty = false end
             BILL.Adornee = sp._centre
             BILL.Enabled = sp._dirty
             return
         end
     end
 end
+
+SETTLE_HOOK = settle -- every task.wait lets time pass, and time finishes cleans
 
 milkTp = function(target, noWait)
     TELEPORTS = TELEPORTS + 1
@@ -156,8 +167,13 @@ pressKey = function()
     for _, s in ipairs(STALLS) do
         local sp = s.spot
         if math.abs(sp._x - HERE) < 6 and sp._dirty and not sp._refuse then
-            sp._dirty = false
-            BILL.Enabled = false -- the game's own answer: Clean is now off
+            if (sp._cleanDelay or 0) > 0 then
+                -- the game's clean runs for a while before the offer clears
+                sp._dirtyUntil = VT + sp._cleanDelay
+            else
+                sp._dirty = false
+                BILL.Enabled = false -- the game's own answer: Clean is now off
+            end
             return
         end
     end
@@ -178,6 +194,7 @@ local function build(spec)
         local sp = spec(i) or {}
         local spot = stallSpot(i, sp)
         spot._refuse = sp.refuse
+        spot._cleanDelay = sp.cleanDelay
         STALLS[i] = { spot = spot, pos = vec(i * 20, 0, 0) }
     end
     VT, TELEPORTS, PRESSES, LOG = 0, 0, 0, {}
@@ -271,6 +288,16 @@ build(function(i) return { levels = 0 } end)
 dirty, cleaned, unknown = run()
 check("drawn levels all hidden: no teleports", TELEPORTS == 0 and cleaned == 0,
     string.format("teleports=%d cleaned=%d", TELEPORTS, cleaned))
+
+-- 7c. A CLEAN IS NOT INSTANT: it takes ~2 s in this game (user: "it takes 2
+--     seconds to clean a stall"). The pass must wait for the game's own Clean
+--     offer to clear rather than call it still-dirty and press again.
+build(function(i) return i == 5 and { stains = 1, cleanDelay = 2.0 } or {} end)
+dirty, cleaned, unknown = run()
+check("a 2 s clean is waited for and counted once",
+    PRESSES == 1 and cleaned == 1, string.format("presses=%d cleaned=%d", PRESSES, cleaned))
+check("the wait is the clean itself, not a retry loop",
+    VT >= 2.0 and VT < 3.0, string.format("%.2fs", VT))
 
 -- 8. stains only (the other readable signal)
 build(function(i) return { stains = (i == 9) and 2 or 0 } end)
