@@ -284,6 +284,24 @@ near you, so run it twice: once **in town** (zoomed out) and once **at your
 farm standing among your fields/animals/barn**, then send both links back so
 guessed names in `CONFIG` can be replaced with real ones.
 
+### `SpudStallProbe.lua` — one stall folder, dumped (read-only)
+The clean pass decides "dirty?" from where the character stands, so it needs the
+stall's own dirt field. The dump's shape (`Spots.<n>.Filth`) is not what every
+build exposes — one live build answered nothing at all — so this probe dumps
+**one whole stall folder**: every descendant with its class, value and
+attributes, every part with its transparency/position, which stain parts are
+actually **visible**, every dirt-sounding instance in the stall / barn / plot
+with its full path, and the game's own `CleanAnimalContainer` billboard (what it
+is adorned to, whether it is enabled, and the key it prints). It presses nothing,
+teleports nothing and writes nothing. Stand on the farm and run:
+
+```lua
+loadstring(game:HttpGet("https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudStallProbe.lua?t=" .. os.time()))()
+```
+
+Paste everything it prints (one block, prefixed `[STALL]`); the path list at the
+end is what names the field exactly.
+
 ### `SpudRemoteProbe.lua` — what the game SENDS (read-only)
 Run it in game, then do one milk deposit **by hand** (pick up a jug, press Fill at
 the truck, milk one cow) and run `spudRemoteStop()`. It records every
