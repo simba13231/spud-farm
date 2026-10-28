@@ -7,11 +7,11 @@ The whole rule lives in one function (milkFarmSwitch) so it can be exercised
 directly, with the farm reads stubbed, against the real milkFarmOrder /
 milkFarmGoTo / milkFarmReadyCount / milkReadyToHerd / milkBatchWanted:
 
-  * a farm short of a batch hands the next pass to the first farm that can fill
-    one, in rotation order
+  * a farm short of a batch hands the next pass to the FULLEST other farm, even
+    when that one is short too (a comparison, not a demand for a whole batch)
   * a farm that can fill a batch itself never switches
   * a farm with cows PARKED in its stalls never switches (there is milk to take)
-  * no farm able to fill one -> no switch, the current farm is worked as before
+  * no other farm has more -> no switch, the current farm is worked as before
   * a farm that cannot be READ (streamed out) is never taken as empty
   * the walk is read-only until a farm is picked, and the store pick is reset
     only when the account really changes
@@ -128,9 +128,21 @@ check("a farm with parked cows is never skipped", milkFarmSwitch(5, "A", 0, 1) =
 -- this farm can fill a batch itself
 check("a farm that can fill a batch stays", milkFarmSwitch(5, "A", 5, 0) == nil)
 check("more than a batch stays too", milkFarmSwitch(5, "A", 9, 0) == nil)
--- nobody can fill one: work what there is, as before
+-- under the batch size the pass is decided by COMPARISON, not by demanding a
+-- full batch: the old "must fill one" rule never fired on a real pair of alts
+-- (the user: "it does not switch the plot/players field when it get under the
+-- heard amount"), so the fuller farm takes it even while it is short too
 FARMS = { A = { ready = 2 }, B = { ready = 3 }, C = { ready = 1 } }
-check("no farm can fill a batch: nothing switches", milkFarmSwitch(5, "A", 2, 0) == nil)
+slot, who, n = milkFarmSwitch(5, "A", 2, 0)
+check("a fuller farm wins even when it is short too",
+    slot == 2 and who == "B" and n == 3,
+    tostring(slot) .. " / " .. tostring(who) .. " / " .. tostring(n))
+-- ...but a barer one never takes the pass off a fuller one
+FARMS = { A = { ready = 4 }, B = { ready = 3 }, C = { ready = 1 } }
+check("a barer farm does not take the pass", milkFarmSwitch(5, "A", 4, 0) == nil)
+-- equal counts stay put: ">=" here would ping-pong two equal alts every pass
+FARMS = { A = { ready = 3 }, B = { ready = 3 }, C = { ready = 1 } }
+check("equal farms do not chase each other", milkFarmSwitch(5, "A", 3, 0) == nil)
 -- an unreadable farm does not block the search
 FARMS = { A = { ready = 2 }, B = { blind = true }, C = { ready = 6 } }
 slot, who, n = milkFarmSwitch(5, "A", 2, 0)
