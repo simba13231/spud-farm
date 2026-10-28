@@ -6,7 +6,7 @@
 
 local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/releases/latest/download/Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.16 · fluent gui"
+local VERSION    = "rebuild v1.17 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -6157,6 +6157,21 @@ local okBuild, errBuild = pcall(function()
         return nil
     end
 
+    -- ▸ THE FARMS IN THE ORDER THE ROTATION WOULD VISIT THEM, starting after the
+    --   one being worked. READ ONLY: nothing here moves the rotation, so a caller
+    --   can ask "who else could fill a batch?" and only hand over if the answer
+    --   is yes. Empty slots are skipped and farm 3 wraps to farm 1, exactly like
+    --   milkFarmNext.
+    function milkFarmOrder()
+        local out, slot = {}, milkTurn or 0
+        for _ = 1, 3 do
+            slot = slot % 3 + 1
+            local who = milkFarmOf(slot)
+            if who then out[#out + 1] = { slot = slot, who = who } end
+        end
+        return out
+    end
+
     -- a slot changed by hand: follow it when it is the one being worked (an
     -- emptied slot hands over to the next farm), or adopt it when nothing is
     -- picked at all
@@ -7049,9 +7064,18 @@ local okBuild, errBuild = pcall(function()
         return hit
     end
 
-    -- the building this owner is locked to, wherever it is now
+    -- the building an OWNER is locked to, wherever it is now. The stall scan is
+    -- asked about the owner it will work, and a pass can ask about a farm it is
+    -- NOT standing on (see milkFarmReadyCount), so the lock is looked up by that
+    -- name - reading the WORKING farm's barn for another farm's scan found no
+    -- stalls there and dropped the whole-map walk back into the pass.
+    function milkBarnFor(who)
+        return milkBarnLive(milkBarns and milkBarns[(who or milkUser or "?"):lower()])
+    end
+
+    -- the building the working farm is locked to
     function milkBarnPicked()
-        return milkBarnLive(milkBarns and milkBarns[(milkUser or "?"):lower()])
+        return milkBarnFor(milkUser)
     end
 
     -- keep only the stalls of ONE building: chosen once per owner (the one
@@ -7180,7 +7204,7 @@ local okBuild, errBuild = pcall(function()
         local function root(r)
             if r and not seenRoot[r] then seenRoot[r] = true; roots[#roots + 1] = r end
         end
-        root(milkBarnPicked())
+        root(milkBarnFor(wantOwner))
         if #roots == 0 then
             local objects = workspace:FindFirstChild("Objects")
             local bld = objects and objects:FindFirstChild("Buildings")
@@ -7767,6 +7791,25 @@ local okBuild, errBuild = pcall(function()
         return got
     end
 
+    -- ▸ WHAT COUNTS AS "A COW TO HERD", in ONE place (user: "if the farm does not
+    --   have the set amount of cows to herd at a time it goes to the next
+    --   farm"). The batch picker and the farm chooser must agree on this or the
+    --   loop would judge a farm by cows it would not really arm: ready = standing
+    --   out in the field, not parked in a stall, at full production.
+    --   GLOBAL: the build closure is out of local slots (see milkBarnPicked).
+    function milkReadyToHerd(c)
+        return c ~= nil and not c.inBarn and not c.stall
+            and c.state ~= "IdleLocked" and (c.percent or 0) >= 300
+    end
+
+    -- the typed "cows at a time" box, clamped to the 1-12 it promises - one
+    -- definition so the farm chooser and the herd batch cannot disagree
+    function milkBatchWanted()
+        local n = math.floor((tonumber(milkBatchSize) or 5) + 0.5)
+        if n < 1 then return 1 elseif n > 12 then return 12 end
+        return n
+    end
+
     -- ▸ ONE HERDING RUN = UP TO milkBatchSize COWS (user: "herd 5 cows per
     --   herding and milk them all then do the checks then restart", and now:
     --   "the number of cows i want to milk at a time from 1-12"): arm them all
@@ -7786,8 +7829,7 @@ local okBuild, errBuild = pcall(function()
             end
         end
         -- the user's number, clamped to the 1-12 the box promises
-        local want = math.floor((tonumber(milkBatchSize) or 5) + 0.5)
-        if want < 1 then want = 1 elseif want > 12 then want = 12 end
+        local want = milkBatchWanted()
         if parked >= want or #free == 0 then return 0, 0, parked, {} end
 
         -- ▸ NEAREST FIRST (user: "i want it to start with the cows that are in
@@ -7800,10 +7842,7 @@ local okBuild, errBuild = pcall(function()
         --   whatever order the world happens to list them in.
         local ready = {}
         for _, c in ipairs(cows or {}) do
-            if not c.inBarn and not c.stall and c.state ~= "IdleLocked"
-                and (c.percent or 0) >= 300 then
-                ready[#ready + 1] = c
-            end
+            if milkReadyToHerd(c) then ready[#ready + 1] = c end
         end
         local anchor
         do
@@ -9612,6 +9651,59 @@ local okBuild, errBuild = pcall(function()
             tostring(final or "?"), tostring(fcap or cap or "?")), full
     end
 
+    -- ▸ HOW MANY COWS THIS FARM COULD HERD RIGHT NOW, read without moving.
+    --   nil means the farm could not be read at all (streamed out, gone, not
+    --   built yet) - the caller never treats that as "empty". GLOBAL for the
+    --   same slot-budget reason as milkBarnPicked.
+    function milkFarmReadyCount(who)
+        if not who then return nil end
+        local ok, n = pcall(function()
+            local plot = milkPlotOf(who)
+            if not plot then return nil end
+            local cf, size = plot:GetBoundingBox()
+            if not cf then return nil end
+            local stalls = milkStalls(who, cf, size)
+            local count = 0
+            for _, c in ipairs(milkCows(who, cf, size, stalls)) do
+                if milkReadyToHerd(c) then count += 1 end
+            end
+            return count
+        end)
+        if not ok then return nil end
+        return n
+    end
+
+    -- ▸ WHO TAKES THE NEXT PASS? (user: "if the farm does not have the set amount
+    --   of cows to herd at a time it goes to the next farm"). The whole rule in
+    --   one place, so the cycle and the tests cannot drift: a farm that has cows
+    --   PARKED is never skipped (there is milk to take), a farm that can fill a
+    --   whole batch is never skipped, and otherwise the rotation is asked in
+    --   order and the first farm that can fill one wins. No farm able to fill
+    --   one returns nothing at all - the caller then works what it has, so a
+    --   farm under the amount can never stall the loop. READ ONLY: the hand-over
+    --   is milkFarmGoTo, and the caller does it only when this picks a farm.
+    function milkFarmSwitch(want, owner, readyHere, parkedHere)
+        if (tonumber(parkedHere) or 0) > 0 then return nil end
+        if (tonumber(readyHere) or 0) >= want then return nil end
+        for _, cand in ipairs(milkFarmOrder()) do
+            if milkStopping() or farmTookBody() then return nil end
+            local n = milkFarmReadyCount(cand.who)
+            -- nil = that farm could not be read: never counted as empty
+            if n and n >= want and cand.who ~= owner then
+                return cand.slot, cand.who, n
+            end
+        end
+        return nil
+    end
+
+    -- hand the rotation to a farm the chooser picked, with EXACTLY the hand-over
+    -- milkFarmNext does: the store pick names one account's carrier, so it is
+    -- reset only when the account really changes
+    function milkFarmGoTo(slot, who)
+        if milkUser ~= who then milkStorePick, milkStoreScanAt = nil, nil end
+        milkTurn, milkUser = slot, who
+    end
+
     local function milkCycle()
         -- ▸ SHARE THE BODY (user: "when the milk loop is on the farm loop can
         --   still run"). They move the SAME character, so they can never work
@@ -9714,6 +9806,34 @@ local okBuild, errBuild = pcall(function()
         local cows = milkCows(owner, cf, size, stalls)
         milkCowScan(cows)
 
+        -- ▸ 2a. IS THIS FARM WORTH THE PASS? (user: "if the farm does not have
+        --   the set amount of cows to herd at a time it goes to the next farm")
+        --   Cleaning above has already run, so a dirty stall here is never
+        --   skipped, and a farm with cows parked in its stalls is never skipped
+        --   either - there is milk to take. Otherwise the rotation is asked IN
+        --   ORDER and the first farm that can fill a whole batch takes the next
+        --   pass. If NO farm can fill one, this farm is worked exactly as
+        --   before, so a small farm can never stall the loop.
+        local want = milkBatchWanted()
+        local readyHere, parkedHere = 0, 0
+        for _, c in ipairs(cows) do
+            if milkReadyToHerd(c) then readyHere += 1 end
+            if c.inBarn or c.stall then parkedHere += 1 end
+        end
+        do
+            local nextSlot, nextWho, nextN = milkFarmSwitch(want, owner, readyHere, parkedHere)
+            if nextSlot then
+                milkFarmGoTo(nextSlot, nextWho)
+                log(string.format(
+                    "milk: %s has %d ready cow(s) - under the %d per herd, so %s (%d ready) takes the next pass",
+                    tostring(owner), readyHere, want, tostring(nextWho), nextN))
+                milkSetStatus(string.format(
+                    "%s: %d ready cow(s), under the %d per herd\nnext pass works %s (%d ready)",
+                    tostring(owner), readyHere, want, tostring(nextWho), nextN))
+                return true, dirty, unknown, false, "skip"
+            end
+        end
+
         -- ▸ 2b0. MILK WHO IS ALREADY IN A STALL, BEFORE HERDING (user: "make it
         --   start milking the cow that is in the stall first and only when they
         --   are in stalls"). A barn holding one ready cow used to wait for four
@@ -9792,10 +9912,7 @@ local okBuild, errBuild = pcall(function()
         cows = milkCows(owner, cf, size, stalls)
         local leftLine, left = nil, 0
         for _, c in ipairs(cows) do
-            if (c.percent or 0) >= 300 and not c.inBarn and not c.stall
-                and c.state ~= "IdleLocked" then
-                left += 1
-            end
+            if milkReadyToHerd(c) then left += 1 end
         end
         if left > 0 then
             leftLine = string.format("herd: %d ready cow(s) LEFT in the field - the next cycle takes them", left)
@@ -9870,6 +9987,10 @@ local okBuild, errBuild = pcall(function()
             local busy = ((tonumber(dirty) or 0) + (tonumber(unknown) or 0)) > 0
             local idle = 60
             if deferred == "defer" then idle = 5
+            -- ▸ A SKIPPED PASS IS NOT AN IDLE (user: "if the farm does not have
+            --   the set amount of cows to herd at a time it goes to the next
+            --   farm"): the farm that took over is worked at once.
+            elseif deferred == "skip" then idle = 0
             -- ▸ THE NEXT ROUND STARTS THE INSTANT THE LAST ONE ENDS (user: "i
             --   also want the next round of milking to start right when the
             --   last round finished"). A productive pass no longer sleeps at
@@ -9879,9 +10000,10 @@ local okBuild, errBuild = pcall(function()
             elseif herded == true then idle = 0
             elseif busy then idle = 6 end
             if deferred ~= "defer" then
-                log(string.format("milk: %s - %s",
-                    busy and "issues found"
-                        or (herded and "one barn job done" or "no dirty stall seen"),
+                local what = deferred == "skip" and "farm was short of one herd batch - moved on"
+                    or (busy and "issues found"
+                        or (herded and "one barn job done" or "no dirty stall seen"))
+                log(string.format("milk: %s - %s", what,
                     idle == 0 and "next round at once"
                         or string.format("next barn check in %d s", idle)))
             end

@@ -35,9 +35,10 @@ SRC = ROOT / "SpudFarm_Full.lua"
 
 # order matters: each is a local in the generated chunk
 WANTED = [
-    "milkInBox", "milkTrigger", "milkBarnKey", "milkBarnLive", "milkBarnPicked", "milkBarnKeep",
+    "milkInBox", "milkTrigger", "milkBarnKey", "milkBarnLive", "milkBarnFor", "milkBarnPicked",
+    "milkBarnKeep",
     "milkBarnStalls", "milkStallOccupant", "milkStalls", "milkHerdTargets",
-    "milkHerdSend", "milkHerdBatch",
+    "milkHerdSend", "milkHerdBatch", "milkReadyToHerd", "milkBatchWanted",
 ]
 OPTIONAL = {"milkBarnStalls", "milkStallOccupant", "milkBarnLive"}
 

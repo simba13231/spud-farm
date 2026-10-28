@@ -41,7 +41,19 @@ Everything merged into one paste-and-run file:
   5 wool each → sell); LOOP toggle, STOP button
 - **Milk tab** — **three Farm pickers worked in a rotation** (farm 1 → 2 → 3;
   a slot left on "(none)" is skipped, farm 3 wraps back to farm 1, and a farm
-  takes over as soon as the current one has nothing left to milk), the **herd
+  takes over as soon as the current one has nothing left to milk). A farm that
+  **cannot fill one herd batch** is skipped too: a pass on a farm with fewer
+  ready cows than the typed amount hands the next pass to the first farm in the
+  rotation that can fill one, so the batch is never run short while another
+  farm has the cows. Cleaning still happens first — a dirty stall is never
+  skipped — and a farm with cows **already parked in its stalls** is never
+  skipped either, because there is milk to take. When **no** farm can fill a
+  batch the current one is worked exactly as before, so a small farm cannot
+  stall the loop. The check reads the other farms without moving the character
+  (see `milkFarmReadyCount`) and never treats a farm it cannot read — streamed
+  out, not built yet — as empty. The whole rule lives in one function
+  ([tools/farm_batch_test.py](tools/farm_batch_test.py) exercises the real one:
+  30 checks). The **herd
   batch size typed in a box
   (1–12)**, **Store milk in** (live list of the picked account's trailers/silos;
   only free-range jugs are loaded there), **Deliver all milk** switch, **Refill

@@ -135,11 +135,16 @@ for i = 1, 90000 do node("Part", plots) end
 milkUser = "Simba"
 milkBarns = {}
 log = function() end
-milkBarnPicked = function()
+-- the real milkStalls asks for the building of the OWNER it is scanning
+-- (milkBarnFor), so the stub has to answer that name; milkBarnPicked still
+-- answers for the farm being worked, which is what the HEAD revision calls
+local function barnForLock()
     local rec = milkBarns["simba"]
     if rec and rec.inst and rec.inst.Parent then return rec.inst end
     return nil
 end
+milkBarnFor = function() return barnForLock() end
+milkBarnPicked = function() return barnForLock() end
 milkOwnerOf = function(inst)
     call()
     return rawget(inst, "_ownerTag")

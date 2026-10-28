@@ -178,7 +178,8 @@ def extract_occupant(text: str) -> str:
 
 
 def extract(text: str) -> str:
-    m1 = re.search(r"^    function milkHerdBatch\(", text, re.M)
+    # starts at the ready-cow helpers so the batch's own filter runs, not a copy
+    m1 = re.search(r"^    function milkReadyToHerd\(", text, re.M)
     m2 = re.search(r"^    -- ▸ THE MILK STEP", text, re.M)
     if not m1 or not m2 or m2.start() < m1.start():
         raise SystemExit("milkHerdBatch not found in SpudFarm_Full.lua")
