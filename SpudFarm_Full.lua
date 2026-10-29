@@ -4,9 +4,15 @@
 -- Features come back ONE AT A TIME, tested in-game before the next one lands.
 -- This build only: window + tabs + console + 🔄 reload. Touches NOTHING in-game.
 
-local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/releases/latest/download/Fluent.luau"
+-- ▸ PIN THE LIBRARY FOR A SMALLER BLAST RADIUS. "latest" follows whatever the
+--   upstream release points at; set FLUENT_TAG to a release tag (e.g. "v1.4.1")
+--   to freeze it. The reload button always fetches THIS repo's main branch.
+local FLUENT_TAG = "latest"
+local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/releases/"
+    .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
+    .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.23 · fluent gui"
+local VERSION    = "rebuild v1.26 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -29,6 +35,753 @@ local function plainNotify(title, text) -- used before/outside the library
         StarterGui:SetCore("SendNotification", { Title = title, Text = text, Duration = 6 })
     end)
 end
+
+-- >>> SPUD PATH MODULE
+-- ▸ WHY THIS IS TOP-LEVEL AND NOT INSIDE THE BUILD CLOSURE: that closure is
+--   one register away from Luau's 200-local wall (tools/local_budget.py).
+--   Everything here is reached as SpudPath.*, so it costs the closure ZERO
+--   locals. tools/path_test.py slices this exact block out and runs it under
+--   the real Luau interpreter; tools/name_audit.py only scans 4-space lines,
+--   so this block cannot silently clobber a build-closure global.
+--
+--   What it is, in one line: a binary-heap A* (Lazy Theta*, any-angle) on the
+--   same ix*100000+iz grid, exact grid traversal instead of sampled lines,
+--   a clearance field that keeps routes off the gear, and corner arcs that
+--   are only kept while their own samples stay clear and under a curvature
+--   limit. Research: Red Blob Games (heap, duplicate handling), Harabor &
+--   Grastien (JPS, why uniform-cost grids differ), Daniel et al. (Theta*),
+--   Botea et al. (HPA*), Koenig & Likhachev (D* Lite).
+SpudPath = SpudPath or {}
+
+local function pkey(ix, iz) return ix * 100000 + iz end
+local function punkey(k) return math.floor(k / 100000), k % 100000 end
+local PDIRS = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 },
+                { 1, 1 }, { 1, -1 }, { -1, 1 }, { -1, -1 } }
+local SQRT2 = 1.41421356
+
+SpudPath.key = pkey
+SpudPath.unkey = punkey
+
+-- ▸ HEAP. The old open list was a linear min-scan plus table.remove (an array
+--   shift) on EVERY pop: O(frontier) twice, which is why a 30k-cell plan could
+--   take a second in Luau. Duplicates are allowed (no decrease-key); a popped
+--   entry is skipped when a shorter g is already known.
+local function better(a, b)
+    if a.f ~= b.f then return a.f < b.f end
+    local ah, bh = a.h or 0, b.h or 0
+    if ah ~= bh then return ah < bh end
+    return (a.k or 0) < (b.k or 0)
+end
+
+function SpudPath.heapPush(h, e)
+    h[#h + 1] = e
+    local i = #h
+    while i > 1 do
+        local p = math.floor(i / 2)
+        if better(h[i], h[p]) then
+            h[i], h[p] = h[p], h[i]
+            i = p
+        else
+            break
+        end
+    end
+end
+
+function SpudPath.heapPop(h)
+    local count = #h
+    if count == 0 then return nil end
+    local top = h[1]
+    h[1] = h[count]
+    h[count] = nil
+    local n = count - 1
+    local i = 1
+    while true do
+        local l, r = i * 2, i * 2 + 1
+        if l > n then break end
+        local c = l
+        if r <= n and better(h[r], h[l]) then c = r end
+        if better(h[c], h[i]) then
+            h[i], h[c] = h[c], h[i]
+            i = c
+        else
+            break
+        end
+    end
+    return top
+end
+
+-- ▸ CLEARANCE: distance (capped at 5 cells) to the nearest blocked cell, by
+--   multi-source BFS. The hug penalty and the arc margin read it.
+function SpudPath.clearance(nx, nz, blocked)
+    local dist, bucket = {}, {}
+    for ix = 0, nx - 1 do
+        for iz = 0, nz - 1 do
+            local k = pkey(ix, iz)
+            if blocked[k] then
+                dist[k] = 0
+                bucket[0] = bucket[0] or {}
+                bucket[0][#bucket[0] + 1] = k
+            else
+                dist[k] = 5
+            end
+        end
+    end
+    for d = 0, 4 do
+        local b = bucket[d]
+        if b then
+            for i = 1, #b do
+                local ix, iz = punkey(b[i])
+                for _, dir in ipairs(PDIRS) do
+                    local jx, jz = ix + dir[1], iz + dir[2]
+                    if jx >= 0 and jz >= 0 and jx < nx and jz < nz then
+                        local jk = pkey(jx, jz)
+                        if dist[jk] and dist[jk] > d + 1 then
+                            dist[jk] = d + 1
+                            bucket[d + 1] = bucket[d + 1] or {}
+                            bucket[d + 1][#bucket[d + 1] + 1] = jk
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return dist
+end
+
+-- trip length -> cell size. The old long-haul grid went to 24 studs, which
+-- erases a gate or a gap between two parked tools; 16 is the new coarse cap
+-- and the heap makes the extra cells affordable.
+function SpudPath.cellSize(trip) return math.clamp(trip / 70, 6, 16) end
+
+local function hugMul(c)
+    if c >= 4 then return 1 end
+    if c == 3 then return 1.5 end
+    if c == 2 then return 2.5 end
+    return 4.5
+end
+
+local function octile(ax, az, bx, bz)
+    local dx, dz = math.abs(ax - bx), math.abs(az - bz)
+    return (dx + dz) + (2 - math.sqrt(2)) * math.min(dx, dz)
+end
+
+-- ▸ EXACT LINE TRAVERSAL (voxel walk). The old lineClear sampled every half
+--   cell: a thin fence post between two samples was invisible and the
+--   string-pull cut through it. This walks every cell the segment really
+--   enters, refuses a corner crossing unless BOTH side cells are free (a
+--   towed tool has width), and can demand a minimum clearance on interior
+--   cells. Endpoints are exempt, exactly like the old rule: the ride may be
+--   parked beside a tool.
+function SpudPath.los(g, ax, az, bx, bz, needClear)
+    local cell, x0, z0 = g.cell, g.x0, g.z0
+    local nx, nz, blocked = g.nx, g.nz, g.blocked
+    local fx1, fz1 = (ax - x0) / cell, (az - z0) / cell
+    local fx2, fz2 = (bx - x0) / cell, (bz - z0) / cell
+    local ix, iz = math.floor(fx1), math.floor(fz1)
+    local tx, tz = math.floor(fx2), math.floor(fz2)
+    if ix < 0 or iz < 0 or ix >= nx or iz >= nz
+        or tx < 0 or tz < 0 or tx >= nx or tz >= nz then return false end
+    local startK, goalK = pkey(ix, iz), pkey(tx, tz)
+    if blocked[startK] or blocked[goalK] then return false end
+    local clear = g.clear or {}
+    local need = needClear or 0
+    local minC = clear[startK] or 5
+    local dx, dz = fx2 - fx1, fz2 - fz1
+    local stepX = dx > 0 and 1 or -1
+    local stepZ = dz > 0 and 1 or -1
+    local tDeltaX = dx ~= 0 and math.abs(1 / dx) or math.huge
+    local tDeltaZ = dz ~= 0 and math.abs(1 / dz) or math.huge
+    local tMaxX, tMaxZ
+    if dx > 0 then tMaxX = ((ix + 1) - fx1) / dx
+    elseif dx < 0 then tMaxX = (ix - fx1) / dx
+    else tMaxX = math.huge end
+    if dz > 0 then tMaxZ = ((iz + 1) - fz1) / dz
+    elseif dz < 0 then tMaxZ = (iz - fz1) / dz
+    else tMaxZ = math.huge end
+    local guard = math.abs(tx - ix) + math.abs(tz - iz) + 2
+    while ix ~= tx or iz ~= tz do
+        guard -= 1
+        if guard < 0 then return false end
+        if tMaxX < tMaxZ then
+            ix += stepX
+            tMaxX += tDeltaX
+        elseif tMaxZ < tMaxX then
+            iz += stepZ
+            tMaxZ += tDeltaZ
+        else
+            local sx, sz = ix + stepX, iz + stepZ
+            local s1x, s1z = sx, iz
+            local s2x, s2z = ix, sz
+            if s1x < 0 or s1z < 0 or s1x >= nx or s1z >= nz
+                or s2x < 0 or s2z < 0 or s2x >= nx or s2z >= nz then return false end
+            if blocked[pkey(s1x, s1z)] or blocked[pkey(s2x, s2z)] then return false end
+            ix, iz = sx, sz
+            tMaxX += tDeltaX
+            tMaxZ += tDeltaZ
+        end
+        if ix < 0 or iz < 0 or ix >= nx or iz >= nz then return false end
+        local k = pkey(ix, iz)
+        if blocked[k] then return false end
+        if k ~= goalK then
+            local c = clear[k] or 5
+            if c < minC then minC = c end
+            if need > 0 and c < need then return false end
+        end
+    end
+    return true, minC
+end
+
+local function reconstruct(parent, goalK)
+    local list = {}
+    local k, guard = goalK, 0
+    while k do
+        local ix, iz = punkey(k)
+        list[#list + 1] = { ix, iz }
+        k = parent[k]
+        guard += 1
+        if guard > 200000 then break end
+    end
+    local n = #list
+    for i = 1, math.floor(n / 2) do
+        list[i], list[n - i + 1] = list[n - i + 1], list[i]
+    end
+    return list
+end
+
+-- classic 8-connected A* with the hug penalty. Used as the Theta* fallback
+-- when the any-angle search exhausts its pop budget, and by the benchmark.
+function SpudPath.astar(o)
+    local nx, nz = o.nx, o.nz
+    local blocked, clear = o.blocked, o.clear or {}
+    local sx, sz, gx, gz = o.sx, o.sz, o.gx, o.gz
+    local maxPops = o.maxPops or math.max(20000, nx * nz)
+    local startK, goalK = pkey(sx, sz), pkey(gx, gz)
+    local open, came, gsc, closed = {}, {}, {}, {}
+    local h0 = octile(sx, sz, gx, gz)
+    gsc[startK] = 0
+    SpudPath.heapPush(open, { k = startK, ix = sx, iz = sz, g = 0, f = h0, h = h0 })
+    local pops, pushed = 0, 1
+    local t0 = os.clock()
+    while #open > 0 do
+        local cur = SpudPath.heapPop(open)
+        if cur and not closed[cur.k] and cur.g <= (gsc[cur.k] or math.huge) then
+            closed[cur.k] = true
+            pops += 1
+            if cur.k == goalK then
+                return reconstruct(came, goalK),
+                    { pops = pops, pushed = pushed, ms = (os.clock() - t0) * 1000, mode = "a*" }
+            end
+            if pops >= maxPops then break end
+            local ix, iz = cur.ix, cur.iz
+            for _, d in ipairs(PDIRS) do
+                local ix2, iz2 = ix + d[1], iz + d[2]
+                if ix2 >= 0 and iz2 >= 0 and ix2 < nx and iz2 < nz then
+                    local kk = pkey(ix2, iz2)
+                    if not blocked[kk] then
+                        local diag = d[1] ~= 0 and d[2] ~= 0
+                        if not diag or (not blocked[pkey(ix + d[1], iz)]
+                            and not blocked[pkey(ix, iz + d[2])]) then
+                            local base = diag and SQRT2 or 1
+                            local ng = gsc[cur.k] + base * hugMul(clear[kk] or 5)
+                            if not gsc[kk] or ng < gsc[kk] then
+                                gsc[kk] = ng
+                                came[kk] = cur.k
+                                local hh = octile(ix2, iz2, gx, gz)
+                                pushed += 1
+                                SpudPath.heapPush(open,
+                                    { k = kk, ix = ix2, iz = iz2, g = ng, f = ng + hh, h = hh })
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return nil, { pops = pops, pushed = pushed, ms = (os.clock() - t0) * 1000, mode = "a*" }
+end
+
+-- ▸ LAZY THETA*: A* where a node's parent may be ANY visible node, not just a
+--   neighbour, so the result is a straight line instead of an 8-way staircase.
+--   The parent edge is validated only when the node is expanded (Lazy), which
+--   is what keeps the visibility checks affordable. JPS was considered and
+--   rejected: it needs a uniform-cost grid, and the clearance hug penalty is
+--   exactly what stops the route skimming your equipment.
+function SpudPath.thetastar(o)
+    local nx, nz = o.nx, o.nz
+    local blocked, clear = o.blocked, o.clear or {}
+    local sx, sz, gx, gz = o.sx, o.sz, o.gx, o.gz
+    local maxPops = o.maxPops or math.max(20000, nx * nz)
+    local losClear = o.losClear or 2
+    local grid = { nx = nx, nz = nz, blocked = blocked, clear = clear,
+        cell = o.cell or 1, x0 = o.x0 or 0, z0 = o.z0 or 0 }
+    local cell = grid.cell
+    local startK, goalK = pkey(sx, sz), pkey(gx, gz)
+    local open, g, par, closed = {}, {}, {}, {}
+    local h0 = octile(sx, sz, gx, gz)
+    g[startK] = 0
+    SpudPath.heapPush(open, { k = startK, ix = sx, iz = sz, g = 0, f = h0, h = h0 })
+    local pops, pushed = 0, 1
+    local t0 = os.clock()
+    local function worldOf(ix, iz)
+        return grid.x0 + ix * cell + cell / 2, grid.z0 + iz * cell + cell / 2
+    end
+    while #open > 0 do
+        local cur = SpudPath.heapPop(open)
+        if cur and not closed[cur.k] and cur.g <= (g[cur.k] or math.huge) then
+            closed[cur.k] = true
+            local pk = par[cur.k]
+            if pk then
+                local px, pz = punkey(pk)
+                local ax, az = worldOf(px, pz)
+                local bx, bz = worldOf(cur.ix, cur.iz)
+                if not SpudPath.los(grid, ax, az, bx, bz, losClear) then
+                    local bestK, bestG
+                    for _, d in ipairs(PDIRS) do
+                        local ix2, iz2 = cur.ix + d[1], cur.iz + d[2]
+                        if ix2 >= 0 and iz2 >= 0 and ix2 < nx and iz2 < nz then
+                            local nk = pkey(ix2, iz2)
+                            local ng = g[nk]
+                            -- never adopt a child as the parent (2-cycle)
+                            if ng and not blocked[nk] and par[nk] ~= cur.k then
+                                local ngg = ng + math.sqrt(d[1] * d[1] + d[2] * d[2])
+                                    * hugMul(clear[cur.k] or 5)
+                                if not bestG or ngg < bestG then bestK, bestG = nk, ngg end
+                            end
+                        end
+                    end
+                    if bestK then
+                        par[cur.k] = bestK
+                        g[cur.k] = bestG
+                    end
+                end
+            end
+            pops += 1
+            if cur.k == goalK then
+                return reconstruct(par, goalK),
+                    { pops = pops, pushed = pushed, ms = (os.clock() - t0) * 1000, mode = "theta*" }
+            end
+            if pops >= maxPops then break end
+            local ix, iz = cur.ix, cur.iz
+            -- ▸ THE ANY-ANGLE RELAXATION: a neighbour may inherit the parent
+            --   of the node being expanded, not just the node itself. The
+            --   visibility of that LONG edge is checked when the neighbour is
+            --   expanded (Lazy Theta*), which is what turns the 8-way
+            --   staircase into straight lines without paying a line trace on
+            --   every relaxation.
+            local fromK = par[cur.k] or cur.k
+            local fx, fz = punkey(fromK)
+            local gparent = g[fromK] or g[cur.k]
+            for _, d in ipairs(PDIRS) do
+                local ix2, iz2 = ix + d[1], iz + d[2]
+                if ix2 >= 0 and iz2 >= 0 and ix2 < nx and iz2 < nz then
+                    local kk = pkey(ix2, iz2)
+                    if not blocked[kk] then
+                        local diag = d[1] ~= 0 and d[2] ~= 0
+                        if not diag or (not blocked[pkey(ix + d[1], iz)]
+                            and not blocked[pkey(ix, iz + d[2])]) then
+                            local ddx, ddz = ix2 - fx, iz2 - fz
+                            local nd = math.sqrt(ddx * ddx + ddz * ddz)
+                            local ng = gparent + nd * hugMul(clear[kk] or 5)
+                            if not g[kk] or ng < g[kk] then
+                                g[kk] = ng
+                                par[kk] = fromK
+                                local hh = octile(ix2, iz2, gx, gz)
+                                pushed += 1
+                                SpudPath.heapPush(open,
+                                    { k = kk, ix = ix2, iz = iz2, g = ng, f = ng + hh, h = hh })
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return nil, { pops = pops, pushed = pushed, ms = (os.clock() - t0) * 1000, mode = "theta*" }
+end
+
+function SpudPath.search(o)
+    local path, st = SpudPath.thetastar(o)
+    local maxPops = o.maxPops or math.max(20000, o.nx * o.nz)
+    if not path and st.pops >= maxPops then
+        local fallback, st2 = SpudPath.astar(o)
+        st2.fallback = true
+        return fallback, st2
+    end
+    return path, st
+end
+
+local function worldClear(ctx, x, z)
+    local ix = math.floor((x - ctx.x0) / ctx.cell)
+    local iz = math.floor((z - ctx.z0) / ctx.cell)
+    if ix < 0 or iz < 0 or ix >= ctx.nx or iz >= ctx.nz then return -1 end
+    local k = pkey(ix, iz)
+    if ctx.blocked[k] then return -1 end
+    return (ctx.clear and ctx.clear[k]) or 0
+end
+
+local function curv3(a, b, c)
+    local ux, uz = b[1] - a[1], b[2] - a[2]
+    local vx, vz = c[1] - b[1], c[2] - b[2]
+    local lu = math.sqrt(ux * ux + uz * uz)
+    local lv = math.sqrt(vx * vx + vz * vz)
+    if lu < 1e-6 or lv < 1e-6 then return 0 end
+    local cosang = math.clamp((ux * vx + uz * vz) / (lu * lv), -1, 1)
+    return math.acos(cosang) / ((lu + lv) / 2)
+end
+
+-- ▸ SMOOTHING. Each sharp vertex becomes a quintic Bézier (curvature zero at
+--   both ends, so the nose does not jerk). The radius is only accepted while
+--   every interior sample is free AND keeps `arcMargin` cells of clearance -
+--   that is what stops a wide arc from swinging the towed tool into gear.
+--   A radius whose implied curvature exceeds `maxCurv` is refused; if none
+--   fit, the vertex stays sharp and the speed profile slows for it.
+function SpudPath.smooth(pts, ctx)
+    local path = {}
+    for _, p in ipairs(pts) do
+        local q = path[#path]
+        local dx, dz = p[1] - (q and q[1] or 0), p[2] - (q and q[2] or 0)
+        if not q or dx * dx + dz * dz >= 4 then path[#path + 1] = { p[1], p[2] } end
+    end
+    if #path < 3 then
+        local mc = 5
+        for _, p in ipairs(path) do
+            local c = worldClear(ctx, p[1], p[2])
+            if c < mc then mc = c end
+        end
+        return path, mc
+    end
+    local arcMargin = ctx.arcMargin or 2
+    local maxCurv = ctx.maxCurv or 0.08
+    local out = { path[1] }
+    for i = 2, #path - 1 do
+        local p, q, r = path[i - 1], path[i], path[i + 1]
+        local d1x, d1z = q[1] - p[1], q[2] - p[2]
+        local d2x, d2z = r[1] - q[1], r[2] - q[2]
+        local l1 = math.sqrt(d1x * d1x + d1z * d1z)
+        local l2 = math.sqrt(d2x * d2x + d2z * d2z)
+        local curved = false
+        if l1 > 6 and l2 > 6 then
+            local cosang = (d1x * d2x + d1z * d2z) / (l1 * l2)
+            if cosang < 0.94 then
+                local u1x, u1z = d1x / l1, d1z / l1
+                local u2x, u2z = d2x / l2, d2z / l2
+                local turn = math.acos(math.clamp(cosang, -1, 1))
+                local tanHalf = math.max(math.tan(turn / 2), 1e-3)
+                for _, want in ipairs({ 22, 14, 8 }) do
+                    local d = math.min(want, l1 * 0.45, l2 * 0.45)
+                    local radius = d / tanHalf
+                    if radius * maxCurv >= 1 then
+                        local p0x, p0z = q[1] - u1x * d, q[2] - u1z * d
+                        local p5x, p5z = q[1] + u2x * d, q[2] + u2z * d
+                        -- ▸ 0.55 OVERSHOT THE CORNER: 2a > d put the middle
+                        --   control points past the vertex, so the "22-stud
+                        --   radius" measured ~4 studs and the nose still
+                        --   snapped. At 0.30 the sampled radius is ~0.86·d,
+                        --   and P2=2P1-P0 / P3=2P4-P5 still hold, so the
+                        --   curvature is still zero at both ends (G2).
+                        local a = 0.30 * d
+                        local p1x, p1z = p0x + u1x * a, p0z + u1z * a
+                        local p2x, p2z = p0x + u1x * 2 * a, p0z + u1z * 2 * a
+                        local p4x, p4z = p5x - u2x * a, p5z - u2z * a
+                        local p3x, p3z = p5x - u2x * 2 * a, p5z - u2z * 2 * a
+                        local n = math.max(6, math.ceil(d / 1.4))
+                        local samples = {}
+                        local okArc = worldClear(ctx, p0x, p0z) >= 0
+                            and worldClear(ctx, p5x, p5z) >= 0
+                        for k = 1, n - 1 do
+                            local t = k / n
+                            local u = 1 - t
+                            local b0 = u ^ 5
+                            local b1 = 5 * u ^ 4 * t
+                            local b2 = 10 * u ^ 3 * t * t
+                            local b3 = 10 * u * u * t ^ 3
+                            local b4 = 5 * u * t ^ 4
+                            local b5 = t ^ 5
+                            local sx = b0 * p0x + b1 * p1x + b2 * p2x
+                                + b3 * p3x + b4 * p4x + b5 * p5x
+                            local sz = b0 * p0z + b1 * p1z + b2 * p2z
+                                + b3 * p3z + b4 * p4z + b5 * p5z
+                            samples[k] = { sx, sz }
+                            if okArc then
+                                local c = worldClear(ctx, sx, sz)
+                                if c < 0 or c < arcMargin then okArc = false end
+                            end
+                        end
+                        if okArc then
+                            -- the implied radius estimate is optimistic: a
+                            -- quintic peaks tighter than d/tan(turn/2). Judge
+                            -- the ACTUAL samples so "under maxCurv" is true of
+                            -- the line the driver will follow.
+                            local prev, worst = { p0x, p0z }, 0
+                            for k = 1, #samples do
+                                local nxt = samples[k + 1] or { p5x, p5z }
+                                worst = math.max(worst, curv3(prev, samples[k], nxt))
+                                prev = samples[k]
+                            end
+                            if worst <= maxCurv then
+                                out[#out + 1] = { p0x, p0z }
+                                for _, sp in ipairs(samples) do out[#out + 1] = sp end
+                                out[#out + 1] = { p5x, p5z }
+                                curved = true
+                                break
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        if not curved then out[#out + 1] = q end
+    end
+    out[#out + 1] = path[#path]
+    local final = { out[1] }
+    for i = 2, #out - 1 do
+        local px, pz = final[#final][1], final[#final][2]
+        local dx, dz = out[i][1] - px, out[i][2] - pz
+        -- keep the arc dense (1 stud): the old 3-stud thinning chorded the
+        -- curve, which raised the curvature the driver actually follows
+        if dx * dx + dz * dz >= 1 then final[#final + 1] = out[i] end
+    end
+    local last = out[#out]
+    if final[#final][1] ~= last[1] or final[#final][2] ~= last[2] then
+        final[#final + 1] = last
+    end
+    local minC = 5
+    for _, p in ipairs(final) do
+        local c = worldClear(ctx, p[1], p[2])
+        if c < minC then minC = c end
+    end
+    return final, minC
+end
+
+-- ▸ OBSTACLE MARKING. Each CanCollide part contributes its ROTATED ground
+--   footprint (axes projected onto X/Z), padded by 6 + hull. The vertical
+--   check is new: a roof, an overhead pipe or a raised platform edge above
+--   the ride no longer turns the ground under it into a phantom wall.
+function SpudPath.markParts(parts, x0, z0, x1, z1, cell, blocked,
+    ignore1, ignore2, hull, bandLo, bandHi)
+    local pad = 6 + (hull or 0)
+    local marked = 0
+    for _, e in ipairs(parts or {}) do
+        local p, owner = e.part, e.owner
+        if p ~= ignore1 and p ~= ignore2 and owner ~= ignore1 and owner ~= ignore2 then
+            local cf, sz = p.CFrame, p.Size
+            local rx, uy, rz = cf.RightVector, cf.UpVector, cf.LookVector
+            local ex = math.abs(rx.X) * sz.X + math.abs(uy.X) * sz.Y + math.abs(rz.X) * sz.Z
+            local ez = math.abs(rx.Z) * sz.X + math.abs(uy.Z) * sz.Y + math.abs(rz.Z) * sz.Z
+            local ey = math.abs(rx.Y) * sz.X + math.abs(uy.Y) * sz.Y + math.abs(rz.Y) * sz.Z
+            local y = cf.Position.Y
+            if y - ey / 2 <= bandHi and y + ey / 2 >= bandLo then
+                local minX, maxX = cf.Position.X - ex / 2 - pad, cf.Position.X + ex / 2 + pad
+                local minZ, maxZ = cf.Position.Z - ez / 2 - pad, cf.Position.Z + ez / 2 + pad
+                if not (maxX < x0 or minX > x1 or maxZ < z0 or minZ > z1) then
+                    local ixA = math.max(0, math.floor((minX - x0) / cell))
+                    local ixB = math.min(math.floor((x1 - x0) / cell),
+                        math.floor((maxX - x0) / cell))
+                    local izA = math.max(0, math.floor((minZ - z0) / cell))
+                    local izB = math.min(math.floor((z1 - z0) / cell),
+                        math.floor((maxZ - z0) / cell))
+                    for ix = ixA, ixB do
+                        for iz = izA, izB do blocked[pkey(ix, iz)] = true end
+                    end
+                    marked += 1
+                end
+            end
+        end
+    end
+    return marked
+end
+
+-- ▸ THE PART CACHE. Re-walking Equipment/Buildings/Draggables/Fences/
+--   Animals/Stores/foliage for every plan (once a second) was the other big
+--   cost. The walk now happens at most once a second (static gear) or twice a
+--   second (things that move); CFrame is read live from the instance, so a
+--   tool that moved inside the TTL still marks its new spot.
+SpudPath.cache = SpudPath.cache or { slowAt = -1e9, fastAt = -1e9, slow = {}, fast = {} }
+
+local function scanInto(root, out)
+    if not root then return end
+    for _, child in ipairs(root:GetChildren()) do
+        local function walk(node)
+            if node:IsA("BasePart") then
+                if node.CanCollide then out[#out + 1] = { part = node, owner = child } end
+            elseif node:IsA("Model") or node:IsA("Folder") then
+                for _, d in ipairs(node:GetChildren()) do walk(d) end
+            end
+        end
+        walk(child)
+    end
+end
+
+function SpudPath.worldParts(now)
+    now = now or os.clock()
+    local c = SpudPath.cache
+    local objects = workspace:FindFirstChild("Objects")
+    local stores = workspace:FindFirstChild("Stores")
+    local plots = workspace:FindFirstChild("Plots")
+    if now - c.slowAt > 1.0 then
+        local out = {}
+        scanInto(objects and objects:FindFirstChild("Equipment"), out)
+        scanInto(objects and objects:FindFirstChild("Buildings"), out)
+        scanInto(objects and objects:FindFirstChild("Fences"), out)
+        scanInto(stores and stores:FindFirstChild("Buildings"), out)
+        for _, plot in ipairs(plots and plots:GetChildren() or {}) do
+            if plot:IsA("Model") then scanInto(plot:FindFirstChild("Foliage"), out) end
+        end
+        c.slow, c.slowAt = out, now
+    end
+    if now - c.fastAt > 0.5 then
+        local out = {}
+        scanInto(objects and objects:FindFirstChild("DraggableObjects"), out)
+        scanInto(objects and objects:FindFirstChild("Animals"), out)
+        c.fast, c.fastAt = out, now
+    end
+    return c.slow, c.fast
+end
+-- <<< SPUD PATH MODULE
+
+-- >>> SPUD FARM MODULE
+-- ▸ WORKING WIDTH + FIELD OWNERSHIP. Top-level for the same reason as
+--   SpudPath: the build closure is at Luau's 200-local wall. Pure maths here
+--   is tested by tools/farm_width_test.py.
+SpudFarm = SpudFarm or {}
+
+-- The field grid is 10-stud tiles (FieldHelper.GetCells: cols×rows over the
+-- plate), so a tool's physical width across the row axis is width/10 tiles.
+-- Rounding (not floor) is deliberate: a 25–34-stud tool touches three rows.
+function SpudFarm.widthTiles(widthStuds)
+    local w = tonumber(widthStuds) or 0
+    if w <= 0 then return 1 end
+    return math.clamp(math.floor(w / 10 + 0.5), 1, 12)
+end
+
+-- Union ground width of oriented boxes along `step` (world X/Z). Each box
+-- carries its centre, size and its own right/up/look axes, so a rotated tool
+-- measures the ground it really covers — not its longest dimension.
+function SpudFarm.widthFromParts(parts, step)
+    local sx = (step and (step.X or step.x)) or 0
+    local sz = (step and (step.Z or step.z)) or 0
+    local lo, hi
+    for _, p in ipairs(parts or {}) do
+        local ex = math.abs(p.r[1] * sx + p.r[3] * sz) * p.sx
+            + math.abs(p.u[1] * sx + p.u[3] * sz) * p.sy
+            + math.abs(p.l[1] * sx + p.l[3] * sz) * p.sz
+        local c = p.x * sx + p.z * sz
+        local a, b = c - ex / 2, c + ex / 2
+        if not lo or a < lo then lo = a end
+        if not hi or b > hi then hi = b end
+    end
+    if not lo then return 0 end
+    return hi - lo
+end
+
+-- Rows for a field that is `rowSpan` studs across: the headland lap runs half
+-- a swath inside each edge, then the interior lines are spaced by the tool
+-- width. The interval union covers the field with no gap (the test proves it).
+function SpudFarm.rowPlan(rowSpan, workTiles)
+    local tiles = math.clamp(tonumber(workTiles) or 1, 1, 12)
+    local width = tiles * 10
+    local rowStep = width
+    local rowHalf = math.max(rowSpan / 2 - width / 2, 2)
+    local headBand = math.max(10, rowStep)
+    local inner = math.max(rowHalf - headBand, 0)
+    local lines = {}
+    if inner <= 1 then
+        lines[1] = 0
+    else
+        local n = math.max(math.floor(inner * 2 / rowStep + 0.5), 1)
+        for i = 0, n do lines[#lines + 1] = inner - i * (2 * inner / n) end
+    end
+    return { tiles = tiles, width = width, rowStep = rowStep,
+             rowHalf = rowHalf, headBand = headBand, inner = inner, lines = lines }
+end
+
+-- Which fields the farm pass works: mine, or the picked owner's. An
+-- unreadable owner never matches, so a streamed-out field is not "mine".
+function SpudFarm.ownerWanted(ownerName, mineName, pick)
+    if not ownerName or ownerName == "" then return false end
+    if ownerName == mineName then return true end
+    return pick ~= nil and pick ~= "" and ownerName == pick
+end
+
+local function partBox(p)
+    local cf, sz = p.CFrame, p.Size
+    local r, u, l = cf.RightVector, cf.UpVector, cf.LookVector
+    return { x = cf.Position.X, z = cf.Position.Z,
+        sx = sz.X, sy = sz.Y, sz = sz.Z,
+        r = { r.X, r.Y, r.Z }, u = { u.X, u.Y, u.Z }, l = { l.X, l.Y, l.Z } }
+end
+
+function SpudFarm.partBoxes(model)
+    local out = {}
+    if not model then return out end
+    local ok, list = pcall(function() return model:GetDescendants() end)
+    if not ok then return out end
+    for _, d in ipairs(list) do
+        if d:IsA("BasePart") then
+            local okp, box = pcall(partBox, d)
+            if okp and box then out[#out + 1] = box end
+        end
+    end
+    return out
+end
+
+-- A declared width is reported alongside the measurement; the measurement
+-- wins, because the stage marking follows the physical tool, not a label.
+function SpudFarm.declaredWidth(model)
+    if not model then return nil end
+    local wanted = { workingwidth = true, workwidth = true, swathwidth = true,
+                     toolwidth = true, width = true, swath = true }
+    local function check(inst)
+        if not inst then return nil end
+        local ok, at = pcall(function() return inst:GetAttributes() end)
+        if ok and at then
+            for k, v in pairs(at) do
+                local kn = tostring(k):lower():gsub("[%s_%-]", "")
+                if wanted[kn] and type(v) == "number" and v > 0 then
+                    return v, "attribute " .. tostring(k)
+                end
+            end
+        end
+        local cfg = inst:FindFirstChild("Configurations")
+        if cfg then
+            for _, ch in ipairs(cfg:GetDescendants()) do
+                if ch:IsA("ValueBase") then
+                    local kn = ch.Name:lower():gsub("[%s_%-]", "")
+                    if wanted[kn] and type(ch.Value) == "number" and ch.Value > 0 then
+                        return ch.Value, "config " .. ch.Name
+                    end
+                end
+            end
+        end
+    end
+    return check(model) or check(model.Parent)
+end
+
+-- ▸ WHAT THE SWEEP USES. Measure the implement's whole ground union across
+--   the step axis (a plow blade or harvester header spans the working width;
+--   the hitch behind it does not widen it). If no parts are readable, fall
+--   back to a declared width. Always at least 1 tile.
+function SpudFarm.workTiles(job, impl, step)
+    local declared, declaredHow = SpudFarm.declaredWidth(impl)
+    local boxes = SpudFarm.partBoxes(impl)
+    local width = SpudFarm.widthFromParts(boxes, step)
+    local how
+    if width > 0 then
+        how = string.format("model, %d part(s)", #boxes)
+        if declared then
+            how = how .. ", declared " .. tostring(declared)
+                .. " (" .. tostring(declaredHow) .. ")"
+        end
+    elseif declared then
+        width = declared <= 12 and declared * 10 or declared
+        how = tostring(declaredHow) .. " (no parts readable)"
+    else
+        width = 0
+        how = "unreadable — assuming 1 tile"
+    end
+    return SpudFarm.widthTiles(width), how, width
+end
+-- <<< SPUD FARM MODULE
 
 ------------------------------------------------------------
 -- load the GUI library
@@ -154,10 +907,18 @@ local okBuild, errBuild = pcall(function()
         local batch, size = {}, 0
         while #hookQueue > 0 do
             local line = hookQueue[1]
-            if size + #line + 1 > 1700 then break end
-            table.remove(hookQueue, 1)
-            size += #line + 1
-            batch[#batch + 1] = line
+            -- ▸ one oversized line used to wedge the queue forever: it never
+            --   fit in a 1700-char batch, so the loop broke before removing
+            --   it and nothing behind it was ever posted. Drop and count it.
+            if #line > 1700 then
+                table.remove(hookQueue, 1)
+                hookDropped += 1
+            else
+                if size + #line + 1 > 1700 then break end
+                table.remove(hookQueue, 1)
+                size += #line + 1
+                batch[#batch + 1] = line
+            end
         end
         if #batch == 0 then return end
         local body = table.concat(batch, "\n")
@@ -189,6 +950,9 @@ local okBuild, errBuild = pcall(function()
     end
     local function hookPush(line)
         if hookURL == "" then return end
+        line = tostring(line)
+        -- a single huge line (a dump, a table) would poison the batch forever
+        if #line > 1500 then line = line:sub(1, 1500) .. " …" end
         hookQueue[#hookQueue + 1] = line
         if #hookQueue > 300 then
             table.remove(hookQueue, 1)
@@ -197,18 +961,51 @@ local okBuild, errBuild = pcall(function()
     end
     local function setHookURL(u)
         u = tostring(u or ""):gsub("%s+", "")
-        if u ~= "" and not u:lower():find("discord") then
-            return false, "that doesn't look like a Discord webhook url"
+        if u ~= "" then
+            -- ▸ a webhook URL is a live credential: require Discord's own host
+            --   and path, not "contains the word discord" (any URL could say
+            --   that, and this box mirrors the whole console into it).
+            local low = u:lower()
+            local host, path = low:match("^https://([^/]+)(/.*)$")
+            local realHost = host == "discord.com" or host == "discordapp.com"
+                or (host and (host:match("%.discord%.com$") or host:match("%.discordapp%.com$")))
+            if not (realHost and path and path:sub(1, 14) == "/api/webhooks/") then
+                return false, "that is not a Discord webhook url (https://discord.com/api/webhooks/…)"
+            end
         end
         hookURL, hookFails, hookHealthy = u, 0, true
         hookQueue = {}
         if u ~= "" then hookSaveURL(u) end
         return true
     end
-    hookURL = hookLoadURL()
+    -- ▸ SESSION TOKEN (Unload / Reload). Every long-lived thread asks
+    --   spudAlive() and stops when the menu that started it is gone. Bumping
+    --   the global counter is how destroyUI stops ALL of them at once; each
+    --   build captured its own myGen, so a newer build can never revive an
+    --   old loop. Before this, Unload left the milk loop, the delivery loop,
+    --   the webhook pump, the 15-min field scan and the FPS meter running with
+    --   no UI, and every reload added another copy of each.
+    spudGen = (spudGen or 0) + 1
+    local myGen = spudGen
+    -- LOCAL on purpose: a reload overwrites the global namespace, and an old
+    -- loop that looked the function up by name would find the NEW build's
+    -- version (whose token matches) and never stop. Captured lexically, the
+    -- old loop keeps its own check, and the bumped global is what ends it.
+    local function spudAlive() return spudGen == myGen end
+
+    do -- a remembered URL must pass the same check as a pasted one (another
+       -- script could have written the file; the console is mirrored to it)
+        local saved = hookLoadURL()
+        if saved ~= "" then
+            local okSaved, whySaved = setHookURL(saved)
+            if not okSaved then
+                print("[spud] webhook: saved url ignored — " .. tostring(whySaved))
+            end
+        end
+    end
     -- the pump runs for the whole session; it is a no-op until a URL is set
     task.spawn(function()
-        while true do
+        while spudAlive() do
             task.wait(2.5) -- 24 posts/min max, under Discord's 30/min
             pcall(hookFlush)
         end
@@ -320,6 +1117,9 @@ local okBuild, errBuild = pcall(function()
     -- ▸ AUTO-FARM STEP 1 (and nothing more): mount the tractor
     local VIM = game:GetService("VirtualInputManager")
     pressKey = function(key)
+        -- a few ms of jitter: every press used to arrive on the exact same
+        -- frame offset, which is a pattern no human has
+        if math.random() > 0.5 then task.wait(0.01 + math.random() * 0.04) end
         VIM:SendKeyEvent(true, key, false, game)
         task.wait(0.08)
         VIM:SendKeyEvent(false, key, false, game)
@@ -435,7 +1235,7 @@ local okBuild, errBuild = pcall(function()
     -- ▸ AUTO-FARM STEP 2: movement (Tween = fly-over ARC — up, across at
     --   altitude, down onto the target; the player carries nothing so
     --   nothing smashes. VFly = legacy BodyVelocity steps.)
-    Move = { Mode = "Tween", Speed = 200 }
+    Move = { Mode = (spudSavedMove == "VFly") and "VFly" or "Tween", Speed = 200 }
     local arcTween -- assigned after glideTractor (below)
 
     local function moveTo(target)
@@ -1680,9 +2480,15 @@ local okBuild, errBuild = pcall(function()
     -- has 2 kinds of farm land — crop "Field" is one). v2 (user: "does
     -- not detect new fields"): ALSO scan every model under MY PLOTS —
     -- newly placed fields can sit on the plot instead of Objects.Fields.
-    -- Returns ALL my fields, EVERY type, sorted nearest-first (the tour
-    -- below groups them by type); every candidate is logged so a wrong
-    -- pick is visible.
+    -- Returns ALL fields of the SELECTED owner, EVERY type, sorted
+    -- nearest-first (the tour below groups them by type); every candidate is
+    -- logged so a wrong pick is visible.
+    -- ▸ WHOSE FIELDS (user: "make the farming be able to work on someone
+    --   elses farm"): nil = mine; the Farm tab's "Farm owner" picker sets the
+    --   name. Equipment is NOT filtered by owner — findTractor/findImplement
+    --   already scan every machine in Equipment, so the nearest tractor/tool
+    --   is used, including the other farm's.
+    farmOwnerPick = nil
     findMyFields = function(nearPos)
         local seen, mine = {}, {}
         local function consider(d)
@@ -1695,8 +2501,9 @@ local okBuild, errBuild = pcall(function()
                 local dist = (d:GetPivot().Position - nearPos).Magnitude
                 seen[#seen + 1] = string.format("%s (type=%s owner=%s, %.0f studs)",
                     d.Name, typeName, ownerName, dist)
-                if owner and owner.Value == LocalPlayer then
-                    mine[#mine + 1] = { d = d, typeName = typeName, dist = dist }
+                if SpudFarm.ownerWanted(ownerName, LocalPlayer.Name, farmOwnerPick) then
+                    mine[#mine + 1] = { d = d, typeName = typeName, dist = dist,
+                        ownerName = ownerName }
                 end
             end
         end
@@ -1710,13 +2517,48 @@ local okBuild, errBuild = pcall(function()
             end
         end
         if #seen > 0 then
-            log("fields here: " .. table.concat(seen, "; "))
+            log("fields here (working " .. (farmOwnerPick or "mine") .. "): "
+                .. table.concat(seen, "; "))
         end
         table.sort(mine, function(a, b) return a.dist < b.dist end)
         return mine
     end
 
-    -- ▸ THE TOUR (user request): every field of mine grouped by land TYPE
+    -- ▸ THE OWNER LIST for the Farm tab's "Farm owner" picker. Read-only:
+    --   every field model streamed near you, including fields sitting on
+    --   plots. "(mine)" is always first; an account can appear once.
+    function spudOwnerChoices()
+        local seen, out = {}, { "(mine)" }
+        local function add(name)
+            if name and name ~= "" and name ~= LocalPlayer.Name and not seen[name] then
+                seen[name] = true
+                out[#out + 1] = name
+            end
+        end
+        local function fromModel(d)
+            if not (d and d:IsA("Model")) then return end
+            local cfg = d:FindFirstChild("Configurations")
+            local owner = cfg and cfg:FindFirstChild("Owner")
+            if owner and owner.Value then add(owner.Value.Name) end
+        end
+        local objects = workspace:FindFirstChild("Objects")
+        local fields = objects and objects:FindFirstChild("Fields")
+        for _, d in ipairs(fields and fields:GetChildren() or {}) do fromModel(d) end
+        local plots = workspace:FindFirstChild("Plots")
+        for _, plot in ipairs(plots and plots:GetChildren() or {}) do
+            if plot:IsA("Model") then
+                for _, d in ipairs(plot:GetChildren()) do fromModel(d) end
+            end
+        end
+        table.sort(out, function(a, b)
+            if a == "(mine)" then return true end
+            if b == "(mine)" then return false end
+            return a < b
+        end)
+        return out
+    end
+
+    -- ▸ THE TOUR (user request): every field of the selected owner grouped by land TYPE
     --   (the game has 2 kinds of farm land — crop "Field" is one),
     --   nearest-first inside each group. Each pass walks the whole tour:
     --   a field that still needs the job gets WORKED, one that doesn't is
@@ -1792,70 +2634,22 @@ local okBuild, errBuild = pcall(function()
     --   than the nose, and swings wide on turns — the old planner only
     --   ever saw the ride's pivot, which is how a plow clipped what the
     --   tractor had just steered around).
-    local function obstacleCells(x0, z0, x1, z1, cell, blocked, ignore1, ignore2, counter, hull)
-        local pad = 6 + (hull or 0)
-        local function mark(minX, maxX, minZ, maxZ)
-            if maxX < x0 or minX > x1 or maxZ < z0 or minZ > z1 then return end
-            -- clamp to the grid: a big part must not mark cells outside it
-            -- (the old loop walked the part's whole extent, so one oversized
-            -- baseplate cost thousands of dead writes per plan)
-            local ixA = math.max(0, math.floor((minX - x0) / cell))
-            local ixB = math.min(math.floor((x1 - x0) / cell),
-                math.floor((maxX - x0) / cell))
-            local izA = math.max(0, math.floor((minZ - z0) / cell))
-            local izB = math.min(math.floor((z1 - z0) / cell),
-                math.floor((maxZ - z0) / cell))
-            for ix = ixA, ixB do
-                for iz = izA, izB do
-                    blocked[ix * 100000 + iz] = true
-                end
-            end
-        end
-        -- ground extent of a ROTATED box: project its three axes onto world
-        -- X/Z, so only the ground it really covers gets marked
-        local function markPart(p)
-            local cf, sz = p.CFrame, p.Size
-            local rx, uy, rz = cf.RightVector, cf.UpVector, cf.LookVector
-            local ex = math.abs(rx.X) * sz.X + math.abs(uy.X) * sz.Y
-                + math.abs(rz.X) * sz.Z
-            local ez = math.abs(rx.Z) * sz.X + math.abs(uy.Z) * sz.Y
-                + math.abs(rz.Z) * sz.Z
-            mark(cf.Position.X - ex / 2 - pad, cf.Position.X + ex / 2 + pad,
-                 cf.Position.Z - ez / 2 - pad, cf.Position.Z + ez / 2 + pad)
-        end
-        local function scan(container)
-            if not container then return end
-            for _, m in ipairs(container:GetChildren()) do
-                if m ~= ignore1 and m ~= ignore2 then
-                    if m:IsA("BasePart") then
-                        if m.CanCollide then -- a sign can't stop a wheel
-                            counter.n += 1
-                            markPart(m)
-                        end
-                    elseif m:IsA("Model") or m:IsA("Folder") then
-                        -- ▸ ALL THE WAY DOWN, not two levels (regression: the
-                        --   depth cap stopped at Model/Folder, and a tractor's
-                        --   parts sit at Equipment.ZM80.Body.SkinGroups.Other
-                        --   — three deep — so almost nothing solid got marked
-                        --   and the route cut straight through parked gear and
-                        --   buildings. A barn is not a child-level Model.)
-                        scan(m)
-                    end
-                end
-            end
-        end
-        local objects = workspace:FindFirstChild("Objects")
-        scan(objects and objects:FindFirstChild("Equipment"))
-        scan(objects and objects:FindFirstChild("Buildings"))
-        scan(objects and objects:FindFirstChild("DraggableObjects"))
-        scan(objects and objects:FindFirstChild("Fences"))   -- dump: Objects.Fences
-        scan(objects and objects:FindFirstChild("Animals"))  -- a cow is solid
-        local stores = workspace:FindFirstChild("Stores")
-        scan(stores and stores:FindFirstChild("Buildings"))  -- dump: Stores.Buildings
-        local plots = workspace:FindFirstChild("Plots")
-        for _, plot in ipairs(plots and plots:GetChildren() or {}) do
-            if plot:IsA("Model") then scan(plot:FindFirstChild("Foliage")) end
-        end
+    -- ▸ OBSTACLES COME FROM A SHORT-LIVED CACHE (SpudPath.worldParts).
+    --   Re-walking every part in seven folders once a second was the other
+    --   big per-plan cost. Static gear is re-read at most once a second,
+    --   draggables/animals twice a second; CFrame is still read live from the
+    --   instance, so a tool that moved inside the TTL marks its new spot.
+    --   The ride and its tool are skipped by OWNER (the top-level child of the
+    --   scanned folder), and SpudPath.markParts drops parts whose vertical
+    --   span misses the ride's band, so a roof, an overhead pipe or a raised
+    --   pad edge no longer blocks the ground under it.
+    local function obstacleCells(x0, z0, x1, z1, cell, blocked, ignore1, ignore2, counter, hull, bandLo, bandHi)
+        local slow, fast = SpudPath.worldParts()
+        local n = SpudPath.markParts(slow, x0, z0, x1, z1, cell, blocked,
+            ignore1, ignore2, hull, bandLo, bandHi)
+        n += SpudPath.markParts(fast, x0, z0, x1, z1, cell, blocked,
+            ignore1, ignore2, hull, bandLo, bandHi)
+        counter.n += n
     end
 
     -- clearance field: for every free cell, the (capped) distance to the
@@ -1864,126 +2658,20 @@ local okBuild, errBuild = pcall(function()
     -- instead of skimming equipment (user: "pathfinding is getting very
     -- close to my equipment").
     local function clearanceField(nx, nz, blocked)
-        local dist, bucket = {}, {}
-        local dirs = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 },
-                       { 1, 1 }, { 1, -1 }, { -1, 1 }, { -1, -1 } }
-        for ix = 0, nx - 1 do
-            for iz = 0, nz - 1 do
-                local k = ix * 100000 + iz
-                if blocked[k] then
-                    dist[k] = 0
-                    bucket[0] = bucket[0] or {}
-                    table.insert(bucket[0], k)
-                else
-                    dist[k] = 5 -- "far" (at/over the cap)
-                end
-            end
-        end
-        for d = 0, 4 do
-            local b = bucket[d]
-            if b then
-                for i = 1, #b do
-                    local k = b[i]
-                    local ix, iz = math.floor(k / 100000), k % 100000
-                    for _, dir in ipairs(dirs) do
-                        local jx, jz = ix + dir[1], iz + dir[2]
-                        if jx >= 0 and jz >= 0 and jx < nx and jz < nz then
-                            local jk = jx * 100000 + jz
-                            if dist[jk] and dist[jk] > d + 1 then
-                                dist[jk] = d + 1
-                                bucket[d + 1] = bucket[d + 1] or {}
-                                table.insert(bucket[d + 1], jk)
-                            end
-                        end
-                    end
-                end
-            end
-        end
-        return dist
+        return SpudPath.clearance(nx, nz, blocked)
     end
 
-    -- classic A* over the grid: 8-connected, sqrt(2) diagonal cost, no
-    -- corner cutting, octile heuristic — plus a HUG PENALTY: steps near
-    -- an obstacle cost extra (×4.5 at 1 cell, ×2.5, ×1.5) so the route
-    -- takes open space whenever any exists (penalties only ADD cost, so
-    -- the heuristic stays admissible — still the quickest path). Returns
-    -- the waypoint cell list (start -> goal) or nil when boxed in.
-    local function astarPath(cell, nx, nz, blocked, clearDist, sx, sz, gx, gz)
-        local function key(ix, iz) return ix * 100000 + iz end
-        local function h(ix, iz)
-            local dx, dz = math.abs(ix - gx), math.abs(iz - gz)
-            return (dx + dz) + (2 - math.sqrt(2)) * math.min(dx, dz)
-        end
-        local open, came, gsc = {}, {}, {}
-        local startK, goalK = key(sx, sz), key(gx, gz)
-        gsc[startK] = 0
-        open[1] = { k = startK, ix = sx, iz = sz, f = h(sx, sz) }
-        local dirs = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 },
-                       { 1, 1 }, { 1, -1 }, { -1, 1 }, { -1, -1 } }
-        local guard = 0
-        local maxPops = math.max(4000, nx * nz) -- scale with the grid, not a flat cap
-        while #open > 0 do
-            guard += 1
-            if guard > maxPops then return nil end
-            local bi = 1
-            for i = 2, #open do
-                if open[i].f < open[bi].f then bi = i end
-            end
-            local cur = table.remove(open, bi)
-            if cur.k == goalK then
-                local path = { { cur.ix, cur.iz } }
-                local k = cur.k
-                while came[k] do
-                    k = came[k]
-                    path[#path + 1] = { math.floor(k / 100000), k % 100000 }
-                end
-                -- ▸ GOAL → START becomes START → GOAL. The walk above starts
-                --   at the goal and follows `came` backwards, but every
-                --   consumer (nodeWorld, the string-pull) indexes grid[1]
-                --   as where we stand. Returning it unreversed made the
-                --   string-pull build its route from the wrong end: it
-                --   produced loops that came back to the START and then
-                --   drove straight at the goal through whatever was in the
-                --   way.
-                local n = #path
-                for i = 1, math.floor(n / 2) do
-                    path[i], path[n - i + 1] = path[n - i + 1], path[i]
-                end
-                return path
-            end
-            for _, d in ipairs(dirs) do
-                local ix2, iz2 = cur.ix + d[1], cur.iz + d[2]
-                if ix2 >= 0 and iz2 >= 0 and ix2 < nx and iz2 < nz then
-                    local kk = key(ix2, iz2)
-                    if not blocked[kk] then
-                        local diag = d[1] ~= 0 and d[2] ~= 0
-                        if not diag or (not blocked[key(cur.ix + d[1], cur.iz)]
-                            and not blocked[key(cur.ix, cur.iz + d[2])]) then
-                            local base = diag and 1.4142 or 1
-                            local cd = clearDist[kk] or 5
-                            local mul = cd >= 4 and 1 or (cd == 3 and 1.5
-                                or (cd == 2 and 2.5 or 4.5))
-                            local ng = gsc[cur.k] + base * mul
-                            if not gsc[kk] or ng < gsc[kk] then
-                                gsc[kk] = ng
-                                came[kk] = cur.k
-                                open[#open + 1] = { k = kk, ix = ix2, iz = iz2,
-                                    f = ng + h(ix2, iz2) }
-                            end
-                        end
-                    end
-                end
-            end
-        end
-        return nil -- no path
-    end
+    -- ▸ THE SEARCH ITSELF LIVES IN SpudPath (heap A* / Lazy Theta*), so the
+    --   build closure does not grow a local for it. SpudPath.search falls back
+    --   to 8-connected A* only when the any-angle search runs out of pops.
 
-    -- plan a route around everything: trip bbox + 50 studs margin, A* on a
-    -- grid whose RESOLUTION follows the trip, then string-pulled (only
-    -- direction changes survive) and corner-rounded. The first point is
-    -- where we stand, the last is the exact goal. Returns world waypoints
-    -- { {x,z}, ... } + obstacle count, or nil + reason + whether the
-    -- straight line is at least clear of mapped obstacles.
+    -- plan a route around everything: trip bbox + 50 studs margin, Lazy
+    -- Theta* on a grid whose resolution follows the trip, then
+    -- SpudPath.smooth (quintic arcs gated on clearance and curvature). The
+    -- first point is where we stand, the last is the exact goal. Returns
+    -- world waypoints { {x,z}, ... }, obstacles mapped, and search stats
+    -- { mode, pops, ms, minClear }; on failure nil + reason + direct (+ the
+    -- last map's stats).
     local function pathfindAround(startPos, goalPos, ignore1, ignore2, hull)
         local margin = 50
         local x0 = math.min(startPos.X, goalPos.X) - margin
@@ -1992,27 +2680,33 @@ local okBuild, errBuild = pcall(function()
         local z1 = math.max(startPos.Z, goalPos.Z) + margin
         local trip = (Vector3.new(goalPos.X - startPos.X, 0,
             goalPos.Z - startPos.Z)).Magnitude
-        -- ▸ RESOLUTION FOLLOWS DISTANCE: the fixed 6-stud grid made the
-        --   search area grow with the square of the trip and then bail
-        --   ("area too big") on anything past ~600 studs — the long hauls
-        --   (sell pad, town) fell back to a straight line through the farm.
-        --   A 900-stud trip now plans on a ~16-stud grid, and the ~1 s
-        --   replan tightens it automatically as the ride closes in.
-        local baseCell = math.clamp(trip / 55, 6, 24)
+        -- ▸ RESOLUTION FOLLOWS DISTANCE, BUT NEVER COARSER THAN 16 STUDS.
+        --   The old 24-stud long-haul grid erased gates and gaps between
+        --   parked tools; the heap makes the extra cells affordable. When a
+        --   plan fails, the next attempt is FINER first (a narrow gap is more
+        --   likely to be found on a finer grid), then coarser as a last
+        --   resort — the old order coarsened immediately, which is how a
+        --   boxed-in plan lost the very gap it was looking for.
+        local baseCell = SpudPath.cellSize(trip)
         local tries = {
-            { c = baseCell,       hull = hull or 0 },
-            { c = baseCell * 1.5, hull = (hull or 0) * 0.5 }, -- boxed in
-            { c = baseCell * 2.2, hull = 0 },                 -- last resort
+            { c = baseCell,                     hull = hull or 0 },
+            { c = math.max(4, baseCell * 0.75), hull = hull or 0 },
+            { c = baseCell * 1.5,               hull = (hull or 0) * 0.5 },
+            { c = baseCell * 2.2,               hull = 0 },
         }
+        -- the ride's vertical band: parts entirely above it (roofs, overhead
+        -- pipes, a raised pad edge) are not walls in front of the wheels
+        local bandLo = math.min(startPos.Y, goalPos.Y) - 2
+        local bandHi = math.max(startPos.Y, goalPos.Y) + 10
 
-        -- one plan on one grid; a table without .grid = A* found no path
+        -- one plan on one grid; a table without .grid = no route found
         local function planAt(cell, hullNow)
             local nx = math.floor((x1 - x0) / cell) + 1
             local nz = math.floor((z1 - z0) / cell) + 1
-            if nx * nz > 30000 then return nil, "area too big" end
+            if nx * nz > 90000 then return nil, "area too big" end
             local blocked, counter = {}, { n = 0 }
             obstacleCells(x0, z0, x1, z1, cell, blocked, ignore1, ignore2,
-                counter, hullNow)
+                counter, hullNow, bandLo, bandHi)
             local function cellOf(v, o) return math.floor((v - o) / cell) end
             local function k(ix, iz) return ix * 100000 + iz end
             local sx, sz = cellOf(startPos.X, x0), cellOf(startPos.Z, z0)
@@ -2026,7 +2720,8 @@ local okBuild, errBuild = pcall(function()
             --   blocked cell open — forcing it planned a route into the wall.
             if blocked[k(gx, gz)] then
                 local found
-                for r = 1, 4 do
+                local reach = math.max(4, math.ceil(12 / cell))
+                for r = 1, reach do
                     for dx = -r, r do
                         for dz = -r, r do
                             local ix, iz = gx + dx, gz + dz
@@ -2043,11 +2738,17 @@ local okBuild, errBuild = pcall(function()
                 if not found then return nil, "goal boxed in" end
                 gx, gz = found[1], found[2]
             end
+            m.gx, m.gz = gx, gz
             local clearDist = clearanceField(nx, nz, blocked) -- AFTER the clears
-            local grid = astarPath(cell, nx, nz, blocked, clearDist, sx, sz, gx, gz)
+            local grid, stats = SpudPath.search({
+                nx = nx, nz = nz, blocked = blocked, clear = clearDist,
+                cell = cell, x0 = x0, z0 = z0,
+                sx = sx, sz = sz, gx = gx, gz = gz,
+                maxPops = math.max(12000, nx * nz),
+            })
             m.clearDist = clearDist
             m.grid = grid
-            if not grid then return m end -- keep the map for the straight-line check
+            m.stats = stats
             return m
         end
 
@@ -2065,165 +2766,58 @@ local okBuild, errBuild = pcall(function()
             --   the goal no matter what was in the way.
             local direct = false
             if lastMap then
-                direct = true
-                local steps = math.ceil(math.max(math.abs(goalPos.X - startPos.X),
-                    math.abs(goalPos.Z - startPos.Z)) / (lastMap.cell * 0.5))
-                for i = 0, steps do
-                    local t = i / math.max(steps, 1)
-                    local ix = lastMap.cellOf(startPos.X + (goalPos.X - startPos.X) * t, x0)
-                    local iz = lastMap.cellOf(startPos.Z + (goalPos.Z - startPos.Z) * t, z0)
-                    if ix >= 0 and iz >= 0 and ix < lastMap.nx and iz < lastMap.nz
-                        and lastMap.blocked[ix * 100000 + iz] then
-                        direct = false
-                        break
-                    end
-                end
+                direct = SpudPath.los({
+                    nx = lastMap.nx, nz = lastMap.nz,
+                    blocked = lastMap.blocked, clear = lastMap.clearDist,
+                    cell = lastMap.cell, x0 = x0, z0 = z0,
+                }, startPos.X, startPos.Z, goalPos.X, goalPos.Z, 0) and true or false
             end
-            return nil, why or "no path", direct
+            return nil, why or "no path", direct,
+                lastMap and lastMap.stats or nil
         end
 
         local cell, nx, nz = map.cell, map.nx, map.nz
-        local blocked, clearDist, grid = map.blocked, map.clearDist, map.grid
-        local cellOf = map.cellOf
-        local function nodeWorld(i)
-            if i == 1 then return startPos.X, startPos.Z end
-            return x0 + grid[i][1] * cell + cell / 2, z0 + grid[i][2] * cell + cell / 2
-        end
-        local function lineClear(ax, az, bx, bz)
-            local steps = math.ceil(math.max(math.abs(bx - ax), math.abs(bz - az)) / (cell * 0.5))
-            for i = 0, steps do
-                local t = i / math.max(steps, 1)
-                local ix = cellOf(ax + (bx - ax) * t, x0)
-                local iz = cellOf(az + (bz - az) * t, z0)
-                if ix < 0 or iz < 0 or ix >= nx or iz >= nz then return false end
-                local k = ix * 100000 + iz
-                if blocked[k] then return false end
-                -- long shortcuts keep a real margin: never cut closer than
-                -- 2 clear cells to anything the mapper marked. The two ENDS
-                -- are exempt — we are already standing on the start cell and
-                -- the goal is the target, so demanding clearance there made
-                -- lineClear fail on every hop whenever the ride was parked
-                -- beside a tool, and the route collapsed into 6-stud steps.
-                if i > 0 and i < steps and (clearDist[k] or 0) < 2 then return false end
+        local grid = map.grid
+        -- Theta* points are cell centres. Keep the exact start and goal, and
+        -- include the start cell's centre when we stand away from it, so the
+        -- first hop follows the edge whose visibility the search checked.
+        local pts = {}
+        local function pushPoint(x, z)
+            local q = pts[#pts]
+            if not q or (x - q[1]) * (x - q[1]) + (z - q[2]) * (z - q[2]) >= 1 then
+                pts[#pts + 1] = { x, z }
             end
-            return true
         end
-        -- string-pull: from the last kept point keep the furthest node
-        -- still reachable in one straight clear line
-        local pts = { { startPos.X, startPos.Z } }
-        local a = 1
-        while a < #grid do
-            local last = a + 1
-            local ax, az = nodeWorld(a)
-            for b = a + 2, #grid do
-                local bx, bz = nodeWorld(b)
-                if not lineClear(ax, az, bx, bz) then break end
-                last = b
-            end
-            local px, pz = nodeWorld(last)
-            pts[#pts + 1] = { px, pz }
-            a = last
+        pushPoint(startPos.X, startPos.Z)
+        local scx, scz = x0 + grid[1][1] * cell + cell / 2,
+            z0 + grid[1][2] * cell + cell / 2
+        if (scx - startPos.X) ^ 2 + (scz - startPos.Z) ^ 2 > 4 then
+            pushPoint(scx, scz)
         end
-        -- land on the exact goal — if that straight hop fails the margin
-        -- check, step through the last grid node first instead of cutting it
-        local ax, az = pts[#pts][1], pts[#pts][2]
-        local bx, bz = nodeWorld(#grid)
-        if not lineClear(ax, az, goalPos.X, goalPos.Z)
-            and (math.abs(bx - ax) > 0.5 or math.abs(bz - az) > 0.5) then
-            pts[#pts + 1] = { bx, bz }
+        for i = 2, #grid do
+            pushPoint(x0 + grid[i][1] * cell + cell / 2,
+                z0 + grid[i][2] * cell + cell / 2)
         end
-        pts[#pts + 1] = { goalPos.X, goalPos.Z }
-
-        -- ▸ CURVES, NOT SQUARES (user: "use curves not squares"). A chamfer
-        --   cut at most 10 studs off a corner — a ~45° kink that the nose has
-        --   to swing in one go, with the towed tool swinging wider still. Each
-        --   sharp vertex is now a QUINTIC BEZIER blend (q1 → q → q2) sampled
-        --   every ~1.4 studs, and the radius is grown until the blend's own
-        --   samples are all free: try 22 studs, then 14, then 8, else keep the
-        --   vertex sharp. Long straights stay single segments, so the tween
-        --   driver still works leg by leg.
-        --   ▸ WHY QUINTIC AND NOT THE OLD QUADRATIC: a circular/quadratic arc
-        --     is only G1 — the curvature jumps from 0 to 1/R the instant the
-        --     nose enters it, which is the visible "swings wide then jerks".
-        --     A degree-5 blend with its curvature forced to ZERO at both ends
-        --     (B''(0)=B''(1)=0 → P2 = 2P1 − P0, P4 = (P3+P5)/2) is G2: the
-        --     steering rate is continuous, so it can be driven faster without
-        --     the wheels snapping (Brezak 2011 measured up to 25% higher
-        --     trackable speed and a fraction of the cross-track error vs arcs).
-        local function freeAt(x, z)
-            local ix, iz = cellOf(x, x0), cellOf(z, z0)
-            if ix < 0 or iz < 0 or ix >= nx or iz >= nz then return false end
-            return not blocked[ix * 100000 + iz]
-        end
-        local out = { pts[1] }
-        for i = 2, #pts - 1 do
-            local p, q, r = pts[i - 1], pts[i], pts[i + 1]
-            local d1x, d1z = q[1] - p[1], q[2] - p[2]
-            local d2x, d2z = r[1] - q[1], r[2] - q[2]
-            local l1 = math.sqrt(d1x * d1x + d1z * d1z)
-            local l2 = math.sqrt(d2x * d2x + d2z * d2z)
-            local curved = false
-            if l1 > 6 and l2 > 6 then
-                local cosang = (d1x * d2x + d1z * d2z) / (l1 * l2)
-                if cosang < 0.94 then -- anything past ~20° of turn
-                    local u1x, u1z = d1x / l1, d1z / l1 -- incoming direction
-                    local u2x, u2z = d2x / l2, d2z / l2 -- outgoing direction
-                    for _, want in ipairs({ 22, 14, 8 }) do
-                        local d = math.min(want, l1 * 0.45, l2 * 0.45)
-                        -- quintic control points: enter at q0, leave at q5,
-                        -- curvature zero at both ends, so it joins the straight
-                        -- legs with no steering-rate step
-                        local p0x, p0z = q[1] - u1x * d, q[2] - u1z * d
-                        local p5x, p5z = q[1] + u2x * d, q[2] + u2z * d
-                        local a = 0.55 * d
-                        local p1x, p1z = p0x + u1x * a, p0z + u1z * a
-                        local p2x, p2z = p0x + u1x * 2 * a, p0z + u1z * 2 * a
-                        local p4x, p4z = p5x - u2x * a, p5z - u2z * a
-                        local p3x, p3z = p5x - u2x * 2 * a, p5z - u2z * 2 * a
-                        local n = math.max(6, math.ceil(d / 1.4))
-                        local okArc = freeAt(p0x, p0z) and freeAt(p5x, p5z)
-                        local samples = {}
-                        for k = 1, n - 1 do
-                            local t = k / n
-                            local u = 1 - t
-                            local b0 = u ^ 5
-                            local b1 = 5 * u ^ 4 * t
-                            local b2 = 10 * u ^ 3 * t * t
-                            local b3 = 10 * u * u * t ^ 3
-                            local b4 = 5 * u * t ^ 4
-                            local b5 = t ^ 5
-                            local sx = b0 * p0x + b1 * p1x + b2 * p2x
-                                + b3 * p3x + b4 * p4x + b5 * p5x
-                            local sz = b0 * p0z + b1 * p1z + b2 * p2z
-                                + b3 * p3z + b4 * p4z + b5 * p5z
-                            samples[k] = { sx, sz }
-                            if okArc and not freeAt(sx, sz) then okArc = false end
-                        end
-                        if okArc then
-                            out[#out + 1] = { p0x, p0z }
-                            for _, sp in ipairs(samples) do out[#out + 1] = sp end
-                            out[#out + 1] = { p5x, p5z }
-                            curved = true
-                            break
-                        end
-                    end
-                end
-            end
-            if not curved then out[#out + 1] = q end
-        end
-        out[#out + 1] = pts[#pts]
-        local final = { out[1] }
-        for i = 2, #out do
-            local px, pz = final[#final][1], final[#final][2]
-            local ddx, ddz = out[i][1] - px, out[i][2] - pz
-            if ddx * ddx + ddz * ddz >= 9 then final[#final + 1] = out[i] end
-        end
+        pushPoint(goalPos.X, goalPos.Z)
+        -- ▸ CURVES, NOT SQUARES - now in SpudPath.smooth: a quintic blend at
+        --   every vertex, SAMPLED and only kept while the samples are free,
+        --   keep 2 cells of clearance (the towed tool swings wide) and stay
+        --   under maxCurv. The old blend checked only "not blocked" and its
+        --   0.55 control factor actually produced a ~4-stud corner out of a
+        --   "22-stud radius".
+        local final, minC = SpudPath.smooth(pts, {
+            cell = cell, x0 = x0, z0 = z0, nx = nx, nz = nz,
+            blocked = map.blocked, clear = map.clearDist,
+            arcMargin = 2, maxCurv = 0.08,
+        })
         -- the exact goal is never dropped by the merge
         local lx, lz = final[#final][1], final[#final][2]
         if lx ~= goalPos.X or lz ~= goalPos.Z then
             final[#final + 1] = { goalPos.X, goalPos.Z }
         end
-        return final, map.count
+        local stats = map.stats or {}
+        stats.minClear = minC
+        return final, map.count, stats
     end
 
     -- ▸ ALIGN DRIVER (user: "is there not a away we can force it to follow the
@@ -2482,7 +3076,7 @@ local okBuild, errBuild = pcall(function()
     local function driveRoute(tr, seat, goal, impl)
         local startPos = tr:GetPivot().Position
         local hull = towMargin(tr, impl)
-        local legs, info, direct = pathfindAround(startPos, goal, tr, impl, hull)
+        local legs, info, direct, pstats = pathfindAround(startPos, goal, tr, impl, hull)
         if not legs then
             if direct then
                 -- no plan, but nothing mapped stands on the straight line:
@@ -2500,8 +3094,11 @@ local okBuild, errBuild = pcall(function()
                 return false, "no safe route (" .. tostring(info) .. ")"
             end
         else
-            log(string.format("path: %d point(s) (corners are arcs), %d obstacle part(s) mapped (tool margin %d)",
-                #legs, info, hull))
+            local st = pstats or {}
+            log(string.format(
+                "path: %d point(s) (corners are arcs), %d part(s), %s %d pops / %.0f ms, min clear %s (tool margin %d)",
+                #legs, info, tostring(st.mode or "?"), st.pops or 0, st.ms or 0,
+                st.minClear ~= nil and tostring(st.minClear) or "?", hull))
         end
         -- draw the route we are about to follow (studs on the real path)
         dbgRoute(legs, startPos.Y + 0.9)
@@ -2662,14 +3259,16 @@ local okBuild, errBuild = pcall(function()
                 end
             end
             -- re-plan ~once a second: parked tools shift around, and the
-            -- fresh A* always re-picks the quickest current route
+            -- fresh Theta* always re-picks the quickest current route
             if os.clock() - lastPlan > 1 then
                 lastPlan = os.clock()
-                local newLegs, n = pathfindAround(p, goal, tr, impl, hull)
+                local newLegs, n, nstats = pathfindAround(p, goal, tr, impl, hull)
                 if stopping() then alignDriveStop(ah) dbgRouteClear() return nil end
                 if newLegs then
                     if info ~= n then
-                        log(string.format("re-routed: %d point(s), %d obstacle part(s) mapped", #newLegs, n))
+                        local st = nstats or {}
+                        log(string.format("re-routed: %d point(s), %d part(s), %s %d pops / %.0f ms",
+                            #newLegs, n, tostring(st.mode or "?"), st.pops or 0, st.ms or 0))
                     end
                     legs, info = newLegs, n
                     remeasure()
@@ -2948,7 +3547,13 @@ local okBuild, errBuild = pcall(function()
     -- count read never disqualifies a field (unknown = work to try).
     local function probeWork(nearPos)
         local crops = findMyFields(nearPos)
-        if #crops == 0 then return false, false, false, false end
+        if #crops == 0 then
+            if farmOwnerPick then
+                log("no fields owned by " .. farmOwnerPick
+                    .. " are streamed here — drive/teleport to that farm and start again")
+            end
+            return false, false, false, false
+        end
         local needPlow, needCult, needSeed, needHarv =
             false, false, false, false
         for _, m in ipairs(crops) do
@@ -4710,7 +5315,7 @@ local okBuild, errBuild = pcall(function()
         return true, sold
     end
 
-    local function sweepField(tr, field, seat, job)
+    local function sweepField(tr, field, seat, job, impl)
         local baseCF, baseSize = fieldFrame(field)
         if not baseCF then return false, "no bounds" end
         local c = baseCF.Position
@@ -4747,20 +5352,16 @@ local okBuild, errBuild = pcall(function()
         --   fence when driveHalf < 14, and build two identical rows when the
         --   field was too narrow to hold a headland band (inner = 0). Both are
         --   clamped to the field now.
-        local rowHalf = math.max(rowSpan / 2 - 5, 2) -- step half-extent of the headland lap
-        local HEAD_BAND = 10             -- one perimeter lap before the rows
+        -- ▸ HOW WIDE IS THIS TOOL? The field grid is 10-stud tiles, so the
+        --   implement's ground union across the step axis is the working
+        --   width. Rows are spaced by that width instead of the old fixed 10
+        --   studs; a 3-wide tool used to overlap three times.
+        local workTiles, widthHow, widthStuds = SpudFarm.workTiles(job, impl, stepDir)
+        local plan = SpudFarm.rowPlan(rowSpan, workTiles)
+        local rowHalf = plan.rowHalf -- step half-extent of the headland lap
         local axRow = math.min(math.max(driveHalf - 12, 8), math.max(driveHalf - 6, 4))
         local lane = math.min(math.max(driveHalf - 4, 10), math.max(driveHalf - 2, 3))
-        local inner = math.max(rowHalf - HEAD_BAND, 0)
-        local lines = {}
-        do
-            if inner <= 1 then
-                lines[1] = 0 -- too narrow for rows: one centre pass, not two
-            else
-                local n = math.max(math.floor(inner * 2 / 10 + 0.5), 1)
-                for i = 0, n do lines[#lines + 1] = inner - i * (2 * inner / n) end
-            end
-        end
+        local lines = plan.lines
         local function pt(along, step) -- field-local (along, step) → world
             return c + driveDir * along + stepDir * step
         end
@@ -4769,6 +5370,9 @@ local okBuild, errBuild = pcall(function()
         log(string.format("%s: 1 headland lap + %d skip-row pass(es)  (%s)", job.verb, #lines,
             st0 and string.format("%d/%d cells still need %s", need0, st0.total, job.prog)
                 or "cell read unavailable"))
+        log(string.format("%s: tool %s — %d-wide (%s, %.0f studs); rows every %.0f, headland band %.0f",
+            job.verb, impl and impl.Name or "?", workTiles, widthHow, widthStuds,
+            plan.rowStep, plan.headBand))
         local realDrive -- nil = not probed yet; true = seat driving; false = glide
         -- ▸ THE TANK, BEFORE AND AFTER THIS FIELD (diagnostic): "the harvester is
         --   still not harvesting" needs ONE fact — does the game count the
@@ -4936,6 +5540,25 @@ local okBuild, errBuild = pcall(function()
         if missed == nil then
             log("touch-up: cell read unavailable — can't locate missed cubes")
         elseif #missed > 0 then
+            -- ▸ A WIDE TOOL COVERS SEVERAL MISSED CUBES IN ONE PASS: group the
+            --   missed cells by row so a 3-wide tool is not driven to every
+            --   cube it already covers.
+            if workTiles > 1 then
+                local seen, keep = {}, {}
+                for _, cube in ipairs(missed) do
+                    local rel = Vector3.new(cube.X - c.X, 0, cube.Z - c.Z)
+                    local band = math.floor(rel:Dot(stepDir) / plan.rowStep + 0.5)
+                    if not seen[band] then
+                        seen[band] = true
+                        keep[#keep + 1] = cube
+                    end
+                end
+                if #keep < #missed then
+                    log(string.format("touch-up: %d cube(s) grouped into %d row(s) for the %d-wide tool",
+                        #missed, #keep, workTiles))
+                    missed = keep
+                end
+            end
             log(string.format("touch-up: %d cube(s) missed by the spiral — going to each", #missed))
             local function flat(p) return Vector3.new(p.X, 0, p.Z) end
             local route, pool, cur = {}, table.clone(missed), at
@@ -4998,6 +5621,9 @@ local okBuild, errBuild = pcall(function()
             harvestSellIfFull(tr, seat, field, "end of the sweep")
         end
         local st1 = countStages(field)
+        local fieldCfg = field:FindFirstChild("Configurations")
+        local fieldOwner = fieldCfg and fieldCfg:FindFirstChild("Owner")
+        local fieldOwnerName = fieldOwner and fieldOwner.Value and fieldOwner.Value.Name or nil
         if st1 then
             local need1 = whichNeed(job, st1) or 0
             log(string.format("sweep done: %d/%d cells still need %s", need1, st1.total, job.prog))
@@ -5006,8 +5632,14 @@ local okBuild, errBuild = pcall(function()
             elseif need0 and need1 >= need0 then
                 log(string.format("cell count did NOT change — drive-over isn't %s (dump: %s would be next)",
                     job.prog, job.remote))
+                if fieldOwnerName and fieldOwnerName ~= LocalPlayer.Name then
+                    log("⚠ this field belongs to " .. fieldOwnerName
+                        .. " — the game did not apply " .. job.verb
+                        .. " (check worker permissions)")
+                end
             else
-                log("some cells left — run the loop again (tool may be narrower than one cell)")
+                log(string.format("some cells left — run the loop again (%d-wide tool; touch-up may need a second pass)",
+                    workTiles))
             end
         else
             log("sweep done — cell read unavailable, check the field visually")
@@ -5103,6 +5735,9 @@ local okBuild, errBuild = pcall(function()
     -- kills the loop at its next step instead of letting it run on.
     local function runFarmingBody()
         setStage("starting the run")
+        if farmOwnerPick then
+            log("farm owner: working " .. farmOwnerPick .. "'s fields")
+        end
         seedShopTried = false -- each run gets at most one seed-shop trip
         local char = LocalPlayer.Character
         local hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -5355,7 +5990,7 @@ local okBuild, errBuild = pcall(function()
                         end
                         -- the spiral sweep — the game stages cells over as
                         -- the tool passes over them (same for every job)
-                        local swept, why = sweepField(ride, m.d, rideSeat, job)
+                        local swept, why = sweepField(ride, m.d, rideSeat, job, impl)
                         if stopping() then return false end
                         if not swept then
                             log(job.verb .. " pass aborted (" .. tostring(why) .. ")")
@@ -5690,6 +6325,11 @@ local okBuild, errBuild = pcall(function()
     --   the end of the body, so EVERY exit of the body — a finished run or
     --   an honest stop — gets the cleanup.
     local function runFarmingLoop()
+        -- ▸ a crashed growth-wait used to leave farmResting = true, so a
+        --   restarted farm loop looked "resting" to the milk loop and both
+        --   drove the body until the next growth wait. Clear it on entry;
+        --   the crash cleanup clears it again.
+        farmResting = false
         -- ▸ HEARTBEAT — the run can no longer go quiet without saying where
         --   it is. NOTE: stopping() is false only on the loop thread itself,
         --   so the watcher uses its own flag.
@@ -5726,7 +6366,16 @@ local okBuild, errBuild = pcall(function()
             log("run ended — the last stage it reached was: " .. runStage)
             storeUnusedTools()
             if stopping() then break end
-            if not waitForGrowth() then break end
+            -- ▸ the growth wait can throw (a field read, a streaming hitch).
+            --   Unprotected, that killed the loop, left farmResting = true and
+            --   let the milk loop drive the body alongside a restarted farm.
+            local okGrow, growRes = pcall(waitForGrowth)
+            if not okGrow then
+                farmResting = false
+                log("⚠ growth wait failed: " .. tostring(growRes))
+                break
+            end
+            if not growRes then break end
         end
         beat = false
     end
@@ -5778,18 +6427,24 @@ local okBuild, errBuild = pcall(function()
                 if not bestId or id2 < bestId then bestName, bestId = name2, id2 end
             end
             local defaultName = bestName or list[1]
-            seedChoice = defaultName
-            log("seed default: " .. defaultName
-                .. " (the game's first crop) — change it in the Farm tab's Seed dropdown")
+            -- a pick from the last build wins, but only if the game still
+            -- offers it (event seeds come and go)
+            local savedSeed = spudSavedSeed
+            if not (savedSeed and seedIdOf[savedSeed]) then savedSeed = nil end
+            seedChoice = savedSeed or defaultName
+            log("seed default: " .. seedChoice
+                .. (savedSeed and " (remembered from the last build)" or " (the game's first crop)")
+                .. " — change it in the Farm tab's Seed dropdown")
             log("seed list: " .. #list .. " seed(s) read from the game — "
                 .. table.concat(list, ", "))
             Tabs.Farm:CreateDropdown("seedChoice", {
                 Title = "Seed",
                 Values = list,
                 Multi = false,
-                Default = defaultName,
+                Default = seedChoice,
                 Callback = function(v)
                     seedChoice = v
+                    spudSavedSeed = v -- survives a reload
                     log("seed: " .. tostring(v))
                 end,
             })
@@ -5797,6 +6452,39 @@ local okBuild, errBuild = pcall(function()
             log("seed list: FieldHelper.SEED_TYPE unreadable (" .. tostring(names)
                 .. ") — no seed picker this session")
         end
+    end
+
+    -- ▸ WHOSE FIELDS THE FARM PASS WORKS (user: "make the farming be able to
+    --   work on someone elses farm"). "(mine)" is the old behaviour; picking
+    --   another owner makes the tour, the growth wait and the missed-cell
+    --   read all use THAT owner's fields. The list is read from the fields
+    --   streamed near you; "Refresh farm list" rescans after you walk over.
+    do
+        local owners = spudOwnerChoices()
+        spudFarmOwnerDrop = Tabs.Farm:CreateDropdown("farmOwnerChoice", {
+            Title = "Farm owner",
+            Values = owners,
+            Multi = false,
+            Default = "(mine)",
+            Callback = function(v)
+                farmOwnerPick = (v == "(mine)") and nil or v
+                log("farm owner: " .. (farmOwnerPick or "mine"))
+            end,
+        })
+        Tabs.Farm:CreateButton({
+            Title = "Refresh farm list",
+            Callback = function()
+                local list = spudOwnerChoices()
+                if spudFarmOwnerDrop then
+                    local ok = pcall(function() spudFarmOwnerDrop:SetValues(list) end)
+                    if not ok then
+                        pcall(function() spudFarmOwnerDrop:Refresh(list) end)
+                    end
+                end
+                log("farm owner list: " .. table.concat(list, ", "))
+            end,
+        })
+        log("farm owner list: " .. table.concat(owners, ", "))
     end
 
     -- ▸🩺 DOCTOR REPORT (read-only). After a run of patches where each fix
@@ -5873,6 +6561,19 @@ local okBuild, errBuild = pcall(function()
         add("🩺 DOCTOR — " .. VERSION)
         add(string.format("loop: %s · stage: %s",
             loopThread and "RUNNING" or "idle", tostring(runStage)))
+        -- ▸ the MILK side in one glance: which thread is alive, whose farm the
+        --   rotation is on, the learned dirt line, the batch, the carrier, and
+        --   how long the last pass took (slow vs stuck is a number, not a guess)
+        add(string.format("milk: %s · farm %s · dirt line %s%% · batch %s · delivery %s",
+            milkThread and "RUNNING" or "idle",
+            tostring(milkFarmOf and milkFarmOf() or "?"),
+            tostring(milkDirtLine or 24),
+            tostring(milkBatchWanted and milkBatchWanted() or "?"),
+            milkStoreAuto and "on" or "off"))
+        add("last milk pass: " .. tostring(milkTiming or "not run yet"))
+        add(string.format("webhook: %s · session %s · teleports %s",
+            hookURL ~= "" and "on" or "off",
+            tostring(spudGen or 0), tostring(spudTeleports or 0)))
         add(string.format("you: %s at (%.0f, %.0f, %.0f)%s", LocalPlayer.Name,
             here.X, here.Y, here.Z, char and "" or " — NO CHARACTER"))
         if not char then problem("no character — every distance below is measured from 0,0,0") end
@@ -6037,6 +6738,7 @@ local okBuild, errBuild = pcall(function()
                     --   handler refuses to start a new loop while it is set).
                     local okRun, errRun = pcall(runFarmingLoop)
                     if not okRun then
+                        farmResting = false -- never leave the body "resting" after a crash
                         log("⚠ farming loop crashed during cleanup: " .. tostring(errRun))
                     end
                     if loopThread == coroutine.running() then
@@ -6073,6 +6775,20 @@ local okBuild, errBuild = pcall(function()
        --   block, which keeps the executor's 200-locals-per-function budget
        --   healthy (see REGISTER BUDGET above).
     local milkUser -- the picked player's name (nil = nothing picked)
+    -- ▸ LEARNED STATE IS PER BUILD, NOT PER EXECUTOR. Globals survive Reload
+    --   (the new chunk runs in the same environment), so anything this script
+    --   LEARNS has to be cleared here or a reload inherits a bad answer: the
+    --   dirt line a stall taught, the one-jug-vs-two probe, and the
+    --   once-per-session diagnostic flags.
+    milkDirtLine = 24
+    milkStoreDoubleKnown, milkStoreDoubleFails = nil, nil
+    milkStoreFullAt, milkStoreQuietAt = nil, nil
+    milkFarmStayNote = nil
+    milkGuiSaid, milkFilthSaid = nil, nil
+    -- weak keys: a stall folder that streams out must not keep its backoff
+    -- record (and the dead instance) alive forever
+    milkCleanBackoff = setmetatable({}, { __mode = "k" })
+    milkTiming = nil
     -- own thread id + own stop test: stopping() belongs to the FARMING loop,
     -- and a milk thread would read it as "stopped" on its very first tick.
     milkThread = nil
@@ -6112,12 +6828,16 @@ local okBuild, errBuild = pcall(function()
     --   GLOBAL state on purpose - a local here costs a register in the build
     --   closure, and its 200-local budget is one local from trouble.
     ------------------------------------------------------------
-    milkPicks = { "(none)", "(none)", "(none)" }
-    if milkChoices0[1] and milkChoices0[1]:sub(1, 1) ~= "(" then
+    -- ▸ CHOICES SURVIVE A RELOAD (user: "it forgets my farms every time").
+    --   Globals are shared by the reload chunk, so keeping the table itself is
+    --   enough; a stale player name is dropped by the refresh below.
+    milkPicks = spudSavedPicks or { "(none)", "(none)", "(none)" }
+    spudSavedPicks = milkPicks
+    if milkPicks[1] == "(none)" and milkChoices0[1] and milkChoices0[1]:sub(1, 1) ~= "(" then
         milkPicks[1] = milkChoices0[1] -- start where the single picker did
     end
     milkTurn = 0
-    milkDrops = {}
+    milkFarmDrops = {}
 
     -- a slot only counts when it names a real player: "(none)" and the
     -- "(nobody else is here)" placeholder do not
@@ -6193,12 +6913,17 @@ local okBuild, errBuild = pcall(function()
     -- ▸ HOW MANY COWS AT A TIME (user: "a type section that i can put the number
     --   of cows i want to milk at a time from 1-12"). One number drives the
     --   herding batch AND how many arrivals the milk step waits for. GLOBAL on
-    --   purpose: a local here costs a register in the build closure.
-    milkBatchSize = 5
+    --   purpose: a local here costs a register in the build closure, and the
+    --   last value survives a reload (spudSavedBatch).
+    milkBatchSize = tonumber(spudSavedBatch) or 5
+    if milkBatchSize < 1 or milkBatchSize > 12 or milkBatchSize % 1 ~= 0 then
+        milkBatchSize = 5
+    end
+    spudSavedBatch = milkBatchSize
 
-    -- the three pickers, built one by one; their objects live in milkDrops so
+    -- the three pickers, built one by one; their objects live in milkFarmDrops so
     -- the refresh below can refill all three when players join or leave
-    milkDrops[1] = Tabs.Milk:CreateDropdown("milkFarm1", {
+    milkFarmDrops[1] = Tabs.Milk:CreateDropdown("milkFarm1", {
         Title = "Farm 1",
         Values = milkFarmOptions(),
         Multi = false,
@@ -6214,7 +6939,7 @@ local okBuild, errBuild = pcall(function()
             end
         end,
     })
-    milkDrops[2] = Tabs.Milk:CreateDropdown("milkFarm2", {
+    milkFarmDrops[2] = Tabs.Milk:CreateDropdown("milkFarm2", {
         Title = "Farm 2",
         Values = milkFarmOptions(),
         Multi = false,
@@ -6228,7 +6953,7 @@ local okBuild, errBuild = pcall(function()
             end
         end,
     })
-    milkDrops[3] = Tabs.Milk:CreateDropdown("milkFarm3", {
+    milkFarmDrops[3] = Tabs.Milk:CreateDropdown("milkFarm3", {
         Title = "Farm 3",
         Values = milkFarmOptions(),
         Multi = false,
@@ -6263,6 +6988,7 @@ local okBuild, errBuild = pcall(function()
             if n < 1 then n = 1 elseif n > 12 then n = 12 end
             if n == milkBatchSize then return end
             milkBatchSize = n
+            spudSavedBatch = n -- survives a reload
             log("milk: " .. n .. " cow(s) at a time (per herd batch and milk run)")
         end,
     })
@@ -6621,7 +7347,7 @@ local okBuild, errBuild = pcall(function()
         end
         for _ = 1, 20 do -- ~40 s of streaming, one look every 2 s
             task.wait(2)
-            if gone() then return end
+            if gone() or not spudAlive() then return end
             pcall(milkStoreRefresh, true)
             if milkStoreTarget and milkStorePick
                 and milkStorePick:sub(1, 1) ~= "(" then
@@ -6629,7 +7355,7 @@ local okBuild, errBuild = pcall(function()
                 break
             end
         end
-        while true do
+        while spudAlive() do
             task.wait(15)
             if gone() then return end
             pcall(milkStoreRefresh, true)
@@ -6646,7 +7372,7 @@ local okBuild, errBuild = pcall(function()
     milkStoreTask = function()
         log("store: automatic delivery on — taking milk to " .. tostring(milkStorePick))
         local saidNoPlot = false
-        while milkStoreAuto do
+        while milkStoreAuto and spudAlive() do
             local idle = 12
             local busy = (milkThread ~= nil)
                 or (loopThread ~= nil and farmResting ~= true)
@@ -6744,7 +7470,7 @@ local okBuild, errBuild = pcall(function()
         local list = milkFarmOptions()
         local okAll = true
         for slot = 1, 3 do
-            local drop = milkDrops[slot]
+            local drop = milkFarmDrops[slot]
             local ok = pcall(function() drop:SetValues(list) end)
             if not ok then ok = pcall(function() drop:Refresh(list) end) end
             if not ok then okAll = false end
@@ -6769,7 +7495,7 @@ local okBuild, errBuild = pcall(function()
             for _, n in ipairs(list) do
                 if n ~= "(none)" then
                     milkPicks[1] = n
-                    pcall(function() milkDrops[1]:SetValue(n) end)
+                    pcall(function() milkFarmDrops[1]:SetValue(n) end)
                     log("milk: farm 1 = " .. n)
                     break
                 end
@@ -7099,7 +7825,8 @@ local okBuild, errBuild = pcall(function()
     --   The line only ever moves UP, and only when the game itself says a stall
     --   it pointed at is clean - so a build with a different baseline costs one
     --   look and then settles, instead of touring twelve stalls every pass.
-    milkDirtLine = milkDirtLine or 24
+    -- the line itself is reset to 24 in the Milk tab's per-build state block
+    -- ("LEARNED STATE IS PER BUILD") - it is only READ from here on.
 
     function milkFilthPct(spot)
         if not spot then return nil end
@@ -7472,6 +8199,7 @@ local okBuild, errBuild = pcall(function()
         local hum = ch:FindFirstChildOfClass("Humanoid")
         if hum and hum.SeatPart then return false end
         if (target - root.Position).Magnitude > 4 then
+            spudTeleports = (spudTeleports or 0) + 1
             root.CFrame = CFrame.new(target) * (root.CFrame - root.CFrame.Position)
             -- ▸ the old 0.2 s settle was 12 wasted frames: the CFrame is already
             --   applied locally, and everything that needs the move to reach the
@@ -7958,14 +8686,26 @@ local okBuild, errBuild = pcall(function()
                 end
             end
         end
-        if dirtyFree > 0 then
+        -- the user's number, clamped to the 1-12 the box promises
+        local want = milkBatchWanted()
+        -- ▸ IS THE DIRT ACTUALLY COSTING A COW? Only then is it worth a line and
+        --   the status message. The old version said "no cow sent into them"
+        --   even when the barn was already at the batch size or no cow was
+        --   ready anyway, which read as a bug in the barn.
+        local ready = {}
+        for _, c in ipairs(cows or {}) do
+            if milkReadyToHerd(c) then ready[#ready + 1] = c end
+        end
+        local blocked = #ready > 0 and dirtyFree > 0
+            and #free < math.min(#ready, want - parked) or false
+        if blocked then
             log(string.format(
                 "herd: %d free stall(s) still over the dirt line (%s) - no cow sent into them",
                 dirtyFree, tostring(dirtWhy)))
         end
-        -- the user's number, clamped to the 1-12 the box promises
-        local want = milkBatchWanted()
-        if parked >= want or #free == 0 then return 0, 0, parked, {}, dirtyFree end
+        if parked >= want or #free == 0 then
+            return 0, 0, parked, {}, dirtyFree, blocked
+        end
 
         -- ▸ NEAREST FIRST (user: "i want it to start with the cows that are in
         --   stall so it is much faster"). The walk-in is the slow part of a
@@ -7975,10 +8715,6 @@ local okBuild, errBuild = pcall(function()
         --   closest are armed first - the batch starts arriving immediately
         --   while the far ones are still walking, instead of the pick being
         --   whatever order the world happens to list them in.
-        local ready = {}
-        for _, c in ipairs(cows or {}) do
-            if milkReadyToHerd(c) then ready[#ready + 1] = c end
-        end
         local anchor
         do
             local barn = milkBarnPicked() or workspace:FindFirstChild("AutoWoodenBarn", true)
@@ -8024,7 +8760,7 @@ local okBuild, errBuild = pcall(function()
             milkHerdOff()
             task.wait(1.5) -- and before the next cycle opens its own herd
         end
-        return done, tried, parked + done, picks, dirtyFree
+        return done, tried, parked + done, picks, dirtyFree, blocked
     end
 
     -- ▸ THE MILK STEP (wiki: "go inside the barn to the stall the cow is in and
@@ -8033,7 +8769,9 @@ local okBuild, errBuild = pcall(function()
     --   buttons) and then takes the best shot: a visible milk-ish button, then
     --   the stall's own milk prompt key. Only a real change counts as done -
     --   Production dropping or a MilkContainer appearing.
-    local function milkNearPrompts(spot)
+    -- GLOBAL: the build closure is at its local ceiling (see spudAlive), and
+    -- this name is not used for anything else.
+    function milkNearPrompts(spot)
         local set, list = {}, {}
         local roots = {}
         if spot then
@@ -8288,7 +9026,11 @@ local okBuild, errBuild = pcall(function()
                 local still = (o and o:IsA("ObjectValue") and cow and cow.model
                     and o.Value == cow.model) and true or false
                 local st = cow and cow.model and milkStateOf(cow.model)
-                if not still or st ~= "IdleLocked" then
+                -- ▸ "out" needs the game to SAY so: the occupant is gone, or
+                --   the cow reports Wander. An unreadable state is not proof
+                --   (it used to pass as "not IdleLocked" and report a cow out
+                --   while it was still standing in the stall).
+                if not still or st == "Wander" then
                     log(string.format("OK milk: %s gate open - cow %d is out (%s)",
                         name, cow and cow.index or 0, st or "no state"))
                     return true
@@ -8303,13 +9045,31 @@ local okBuild, errBuild = pcall(function()
         return false
     end
 
-    local function milkDrops()
+    -- ▸ ONLY THIS PLOT'S JUGS COUNT. DraggableObjects is world-wide, so in a
+    --   public server another player's jug appearing during the 10 s milk wait
+    --   read as "this cow gave milk" and the gate opened on an unmilked cow.
+    --   With a position only drops near the stall count; without one the old
+    --   world-wide count is kept.
+    --   LOCAL: only the milking step uses it. (The three farm dropdowns used
+    --   to share this name as a global table - that collision is why they are
+    --   now milkFarmDrops; tools/name_audit.py guards against a repeat.)
+    local function milkDrops(near, radius)
         local objs = workspace:FindFirstChild("Objects")
         local box = objs and objs:FindFirstChild("DraggableObjects")
         local n = 0
         if box then
             for _, ch in ipairs(box:GetChildren()) do
-                if ch.Name:lower():find("milk", 1, true) then n += 1 end
+                if ch.Name:lower():find("milk", 1, true) then
+                    if not near then
+                        n += 1
+                    else
+                        local at
+                        pcall(function()
+                            at = ch:IsA("Model") and ch:GetPivot().Position or ch.Position
+                        end)
+                        if at and (at - near).Magnitude <= (radius or 250) then n += 1 end
+                    end
+                end
             end
         end
         return n
@@ -8383,7 +9143,21 @@ local okBuild, errBuild = pcall(function()
         --   you stand in the stall, and this is the moment we stand there for a
         --   milking anyway, so the offer is read here: true = the game wants
         --   this one cleaned, and V is the game's own key for it.
-        if milkCleanUp(spot) == true then
+        -- ▸ the teleport above is applied WITHOUT a settle (noWait): the HUD
+        --   needs a frame or two before its Clean action points at this stall,
+        --   and a single read could come back nil ("not this stall yet") and
+        --   skip the clean altogether. Poll while it is unread, then decide.
+        local cleanUp = milkCleanUp(spot)
+        if cleanUp == nil then
+            local cleanBy = os.clock() + 0.5
+            while os.clock() < cleanBy do
+                if milkStopping() or farmTookBody() then break end
+                task.wait(0.05)
+                cleanUp = milkCleanUp(spot)
+                if cleanUp ~= nil then break end
+            end
+        end
+        if cleanUp == true then
             log(string.format("milk: %s is dirty - cleaning it before milking",
                 tostring(spot.Name)))
             local cleanAt = os.clock()
@@ -8419,13 +9193,20 @@ local okBuild, errBuild = pcall(function()
         end
 
         local label = string.format("cow %d", cow.index or 0)
-        local before, dropsBefore = milkPercentOf(model), milkDrops()
-        for _, p in ipairs(milkNearPrompts(spot)) do
-            local okKey, key = pcall(function() return p.KeyboardKeyCode.Name end)
-            log(string.format("milk: %s prompt %s '%s' key=%s on=%s", spot.Name, p.Name,
-                tostring(p.ActionText), tostring(okKey and key or "?"), tostring(p.Enabled)))
+        local before, dropsBefore = milkPercentOf(model), milkDrops(stand, 250)
+        -- ▸ the prompt/button dumps are diagnostics, not work. milkLogButtons
+        --   walks the WHOLE PlayerGui, and doing that for every cow of every
+        --   pass was a measurable FPS cost, so the walk happens once a session
+        --   (the one-line results that matter are still logged every cow).
+        if spudVerbose or not milkGuiSaid then
+            milkGuiSaid = true
+            for _, p in ipairs(milkNearPrompts(spot)) do
+                local okKey, key = pcall(function() return p.KeyboardKeyCode.Name end)
+                log(string.format("milk: %s prompt %s '%s' key=%s on=%s", spot.Name, p.Name,
+                    tostring(p.ActionText), tostring(okKey and key or "?"), tostring(p.Enabled)))
+            end
+            milkLogButtons("milking " .. spot.Name)
         end
-        milkLogButtons("milking " .. spot.Name)
 
         -- the game's own action list at this stall: an enabled milk/collect
         -- action here is the real thing, and it prints its own key
@@ -8515,10 +9296,15 @@ local okBuild, errBuild = pcall(function()
 
         local milked = false
         local milkBy = os.clock() + 10 -- 10 s for the game to answer, as before
+        local nextDrops = 0 -- below: milkDrops walks a world folder; 4 reads/s is plenty
         while os.clock() < milkBy do
             if milkStopping() or farmTookBody() then return false end
             local now = milkPercentOf(model)
-            local drops = milkDrops()
+            local drops = dropsBefore
+            if os.clock() >= nextDrops then
+                drops = milkDrops(stand, 250)
+                nextDrops = os.clock() + 0.25
+            end
             if (before and now and now < before) or drops > dropsBefore then
                 milked = true
                 log(string.format("OK milk: %s milked (%s%% -> %s%%, %d new drop(s) in the world)",
@@ -8542,7 +9328,9 @@ local okBuild, errBuild = pcall(function()
     -- ▸ OLD: visit every cow to let the shared menu fill in. The production
     --   number is on the cow itself now, so this is just the honest summary of
     --   what the game currently holds (no teleports, no waiting, no guesses).
-    local function milkCowScan(cows)
+    --   GLOBAL: the build closure is at its 200-local ceiling and the session
+    --   token (spudAlive) needed the slot.
+    function milkCowScan(cows)
         for _, c in ipairs(cows) do
             if c.percent == nil then
                 c.label = "no Production value"
@@ -8628,6 +9416,13 @@ local okBuild, errBuild = pcall(function()
             if job.meterOnly and type(job.pct) == "number" and job.pct <= milkDirtLine then
                 continue
             end
+            -- ▸ BACK OFF FROM A STALL THAT KEEPS REFUSING. It used to be
+            --   re-visited (and re-teleported to) every 6 s forever. The wait
+            --   doubles per failure up to a minute, and any success clears it.
+            local back = milkCleanBackoff[s.spot]
+            if back and os.clock() < (back.ready or 0) then
+                continue
+            end
             if milkStopping() then break end
             if farmTookBody() then
                 log("milk: the farm loop took the body back - cleaning stops mid-way")
@@ -8665,13 +9460,22 @@ local okBuild, errBuild = pcall(function()
                     --   meter, where the game offers no Clean, proves that
                     --   reading is not dirt here - move the line above it so
                     --   the rest of the barn is not hopped into for nothing.
-                    if job.meterOnly then
+                    --   `stains == 0` re-checks the FRESH read: a stain that
+                    --   appeared since the scan is dirt whatever the meter says,
+                    --   so it must not teach the line that dirt is clean.
+                    if job.meterOnly and stains == 0 then
                         local pctNow = milkFilthPct(s.spot)
-                        if type(pctNow) == "number" and pctNow > milkDirtLine then
-                            milkDirtLine = pctNow
+                        -- learn the reading that TRIGGERED the visit too: a lower
+                        -- re-read must not leave the rest of the barn above the
+                        -- new line (that is the same tour, in miniature)
+                        local target = math.max(tonumber(job.pct) or 0, tonumber(pctNow) or 0)
+                        -- 100 is a sanity ceiling: a value past a percentage is
+                        -- not this build's dirt meter, so it teaches nothing
+                        if target > milkDirtLine and target <= 100 then
+                            milkDirtLine = target
                             log(string.format(
                                 "milk: stall %d reads %.0f%% but the game offers no Clean there - the dirty line moves to %.0f%%",
-                                i, pctNow, milkDirtLine))
+                                i, target, milkDirtLine))
                         end
                     end
                     if stains > 0 then
@@ -8712,10 +9516,17 @@ local okBuild, errBuild = pcall(function()
                     end
                     if done then
                         cleaned += 1
+                        milkCleanBackoff[s.spot] = nil
                         log(string.format("OK milk: stall %d cleaned in %.2fs (%d stain(s) -> %d)",
                             i, os.clock() - cleanAt, stains, milkStain(s.spot)))
                     else
-                        log(string.format("milk: stall %d would not clean - next cycle tries again", i))
+                        local rec = milkCleanBackoff[s.spot] or { fails = 0 }
+                        rec.fails += 1
+                        rec.ready = os.clock() + math.min(60, 6 * 2 ^ (rec.fails - 1))
+                        milkCleanBackoff[s.spot] = rec
+                        log(string.format(
+                            "milk: stall %d would not clean (fail %d) - leaving it for %d s",
+                            i, rec.fails, math.floor(rec.ready - os.clock())))
                     end
                 end
             end
@@ -10008,6 +10819,8 @@ local okBuild, errBuild = pcall(function()
             log("milk: no user picked - the dropdown above names whose plot to work on")
             return false
         end
+        -- per-pass stopwatch: "is it slow or stuck?" answered by the status line
+        local tPass, tp0 = os.clock(), tonumber(spudTeleports) or 0
         -- trailers/silos stream in and out: keep the store picker true without
         -- fighting a pick (the list is only rewritten when it changed)
         if not milkStoreScanAt or os.clock() - milkStoreScanAt > 20 then
@@ -10080,6 +10893,7 @@ local okBuild, errBuild = pcall(function()
             log(string.format("milk: no stall found for %s in %.0f ms (%d skipped)",
                 tostring(owner), stallMs, skipped))
         end
+        local tClean = os.clock()
 
         -- ▸ 2. cows + their production number (field ones AND the ones parked
         --   in a barn stall, which the game has moved out of Objects.Animals)
@@ -10146,14 +10960,16 @@ local okBuild, errBuild = pcall(function()
         --   the typed box). One run fills the barn instead of one cow per cycle.
         local herdLine, herded, sent = nil, false, 0
         do
-            local done, tried, parkedNow, picks, dirtyFree = milkHerdBatch(stalls, cows)
-            -- ▸ how many cows this herd actually sent in: the arrival-milk step
-            --   waits for exactly that many, so it never waits for cows that
-            --   never left the field (a lasso that took nobody gets sent = 0).
+            local done, tried, parkedNow, picks, dirtyFree, blocked = milkHerdBatch(stalls, cows)
+            -- ▸ how many cows this herd ARMED: the arrival-milk step wants to
+            --   keep milking until that many have landed (each one is taken the
+            --   moment it is in), so this is the batch size, not the first-arrival
+            --   count milkHerdSend returns. A lasso that took nobody leaves
+            --   sent = 0, which is what stops the wait from running at all.
             if done > 0 then sent = #(picks or {}) end
             herded = done > 0
             if tried == 0 then
-                herdLine = (dirtyFree or 0) > 0
+                herdLine = blocked
                     and string.format("herd: %d stall(s) still dirty - no cow put in one (the clean pass goes first)", dirtyFree)
                     or string.format("herd: %d cow(s) already in the barn - no ready cow left to herd", parkedNow)
             else
@@ -10161,6 +10977,7 @@ local okBuild, errBuild = pcall(function()
                     done, tried, parkedNow)
             end
         end
+        local tHerd = os.clock()
 
         -- ▸ 2c. MILK EACH COW AS IT WALKS IN (user: "i want the actual milking
         --   the cows to start when the first cow is in the actual barn ready to
@@ -10184,6 +11001,7 @@ local okBuild, errBuild = pcall(function()
             milkLine = milkTried == 0 and "milk: no ready cow standing in a stall yet"
                 or string.format("milk: %d of %d cow(s) milked", milkDone, milkTried)
         end
+        local tMilk = os.clock()
 
         -- ▸ 2c2. FEED TOP-UP, NOW A SWITCH (user: "i want the thing that re puts
         --   seeds in the feeder, make it a switch in the milk section"). ON it
@@ -10201,6 +11019,7 @@ local okBuild, errBuild = pcall(function()
             log("store: step failed — " .. tostring(storeLine))
             storeLine = nil
         end
+        local tStore = os.clock()
 
         -- ▸ 2d. LEFTOVER CHECK (user: "check to see if there are any left over
         --   cows"): a cow that never walked in still stands in the field, so
@@ -10219,6 +11038,10 @@ local okBuild, errBuild = pcall(function()
 
         -- ▸ 3. show it
         local lines = {}
+        milkTiming = string.format("scan %.0f ms · clean %.1fs · herd %.1fs · milk %.1fs · store %.1fs · %d tp",
+            stallMs,
+            tClean - stallAt, tHerd - tClean, tMilk - tHerd, tStore - tMilk,
+            (tonumber(spudTeleports) or 0) - tp0)
         local parked = 0
         for _, c in ipairs(cows) do if c.inBarn then parked += 1 end end
         lines[#lines + 1] = string.format("working farm %d/3: %s - plot %s - %d stall(s) - %d cow(s), %d in a barn",
@@ -10249,6 +11072,7 @@ local okBuild, errBuild = pcall(function()
         if feedLine then lines[#lines + 1] = feedLine end
         if storeLine then lines[#lines + 1] = storeLine end
         if leftLine then lines[#lines + 1] = leftLine end
+        lines[#lines + 1] = "pass: " .. milkTiming
         -- ▸ ROTATE WHEN THIS FARM IS DONE (user: "farm1>farm2>farm3 ... make it
         --   run in a loop"). "Done" is narrow and honest: the pass herded
         --   nothing, milked nothing and left no ready cow in the field, so
@@ -10274,7 +11098,7 @@ local okBuild, errBuild = pcall(function()
     -- body stops the instant the toggle goes off.
     local function runMilkLoop()
         log("milk loop: on - user " .. tostring(milkUser))
-        while not milkStopping() do
+        while not milkStopping() and spudAlive() do
             local okCycle, ran, dirty, unknown, herded, deferred = pcall(milkCycle)
             if not okCycle then
                 log("milk cycle failed: " .. tostring(ran))
@@ -10364,6 +11188,21 @@ local okBuild, errBuild = pcall(function()
 
     -- Settings: reload + unload
     local function destroyUI()
+        -- ▸ kill the THREADS, not just the window. Unload used to leave the
+        --   milk loop, the delivery loop, the webhook pump, the field scan and
+        --   the FPS meter alive with no UI, and every reload stacked another
+        --   copy of each (the FPS that kept getting worse). Bumping the
+        --   session generation stops every loop this build started.
+        spudGen = (spudGen or 0) + 1
+        milkThread = nil
+        milkStoreAuto = false
+        milkStoreThread = nil
+        loopThread = nil
+        farmResting = false
+        if spudFpsConn then
+            pcall(function() spudFpsConn:Disconnect() end)
+            spudFpsConn = nil
+        end
         pcall(function() Fluent:Destroy() end)
         pcall(function() -- fallback: Fluent's own ScreenGui, in case Destroy doesn't exist
             local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
@@ -10379,10 +11218,50 @@ local okBuild, errBuild = pcall(function()
         Title = "Movement",
         Values = { "VFly", "Tween" },
         Multi = false,
-        Default = "Tween",
+        Default = spudSavedMove or "Tween",
         Callback = function(v)
             Move.Mode = v
+            spudSavedMove = v -- survives a reload
             log("movement mode: " .. tostring(v))
+        end,
+    })
+
+    -- ▸ the per-cow prompt/button dumps are diagnostics, not work: once per
+    --   session normally, every cow when this is on. Survives a reload.
+    Tabs.Settings:CreateToggle("verboseLogs", {
+        Title = "verbose logs",
+        Default = spudVerbose == true,
+        Callback = function(on)
+            spudVerbose = on == true
+            milkGuiSaid = nil -- let the next cow dump again
+            log("verbose logs: " .. (spudVerbose and "on" or "off"))
+        end,
+    })
+
+    -- ▸ ONE CLICK FOR THE WHOLE RUN. Each toggle still owns its own loop; this
+    --   only flips them in an order that works with the shared body (farm
+    --   first, then milk, then delivery - the last one needs a carrier pick
+    --   and turns itself back off if there is none).
+    Tabs.Settings:CreateButton({
+        Title = "▶ Start everything",
+        Callback = function()
+            log("start all: farming + milk + delivery")
+            for _, name in ipairs({ "farmingLoop", "milkLoop", "milkStoreAuto" }) do
+                local opt = Fluent.Options and Fluent.Options[name]
+                if opt then pcall(function() opt:SetValue(true) end) end
+            end
+        end,
+    })
+
+    Tabs.Settings:CreateButton({
+        Title = "■ Stop everything",
+        Callback = function()
+            for _, name in ipairs({ "milkStoreAuto", "milkLoop", "farmingLoop" }) do
+                local opt = Fluent.Options and Fluent.Options[name]
+                if opt then pcall(function() opt:SetValue(false) end) end
+            end
+            milkStoreAuto = false
+            log("stop all: loops off")
         end,
     })
 
@@ -10427,7 +11306,10 @@ local okBuild, errBuild = pcall(function()
             local bust = string.format("%s?t=%d&r=%d", SCRIPT_URL,
                 math.floor(os.time()), math.random(1, 999999))
             local ok, src = pcall(function() return game:HttpGet(bust, true) end)
-            if not ok or type(src) ~= "string" or #src < 100 then
+            -- ▸ a CDN error page is a string too. Only a real build carries the
+            --   build marker, so a 404/HTML body can never be loadstring'd.
+            if not ok or type(src) ~= "string" or #src < 100
+                or not src:find("local okBuild, errBuild = pcall", 1, true) then
                 log("ERROR fetch failed — staying on current version")
                 Fluent:Notify({ Title = "SPUD FARM", Content = "Update fetch failed — keeping current version", Duration = 5 })
                 return
@@ -10460,7 +11342,7 @@ local okBuild, errBuild = pcall(function()
     --   seconds after load and written into BOTH the Doctor panel and the
     --   Console tab — no click needed to see the state of the farm.
     task.delay(3, function()
-        pcall(function() runDoctor(true) end)
+        if spudAlive() then pcall(function() runDoctor(true) end) end
     end)
 
     -- start
@@ -10492,7 +11374,7 @@ local okBuild, errBuild = pcall(function()
     end
     scanFieldsReport()
     task.spawn(function()
-        while task.wait(900) do
+        while spudAlive() and task.wait(900) do
             log("field re-scan (every 15 min)")
             scanFieldsReport()
         end
@@ -10508,11 +11390,12 @@ local okBuild, errBuild = pcall(function()
         local runService = game:GetService("RunService")
         local frames, mark = 0, os.clock()
         pcall(function()
-            runService.RenderStepped:Connect(function() frames += 1 end)
+            spudFpsConn = runService.RenderStepped:Connect(function() frames += 1 end)
         end)
         task.spawn(function()
-            while true do
+            while spudAlive() do
                 task.wait(30)
+                if not spudAlive() then break end
                 local now = os.clock()
                 local span = now - mark
                 local fps = span > 0 and (frames / span) or 0

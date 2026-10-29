@@ -1,9 +1,13 @@
 # 🥔 SPUD FARM — Farming and Friends scripts
 
-> **Status: clean rebuild in progress.** The current build is a *skeleton* — GUI
-> shell + console + 🔄 reload only, no game features. Features are being re-added
-> one at a time and tested in-game. The full previous version is preserved in the
-> git history.
+> **Status: active build (see `VERSION` at the top of `SpudFarm_Full.lua`).**
+> Farm, Presets, Milk, Player, Stealth and the Doctor report are implemented;
+> this README describes the current behaviour. Harness-green is not
+> in-game-green — the pending in-game checks are tracked in [AGENTS.md](AGENTS.md).
+
+**Working on this repo, or handing it to an AI agent?** [AGENTS.md](AGENTS.md) is
+the single-file brief: the owner's rules, the game facts we actually verified,
+the session history, and the exact compile/test loop. Read it before editing.
 
 ## UI RULES (non-negotiable, per project owner)
 1. **No text under anything.** Elements get a title and nothing else: no window
@@ -33,6 +37,31 @@ Everything merged into one paste-and-run file:
   requirements · price-rotation tip), auto seed-loading during PLANT, Auto-Sell,
   Grow time slider, Skip Stage / Reset buttons, live status line,
   **live sell-price readout** (reads the in-game SellValueBoards every 3s)
+- **Pathfinding** — a top-level `SpudPath` engine (outside the 200-local build
+  closure): binary-heap A* with a closed set, **Lazy Theta\*** any-angle routes,
+  exact voxel line-of-sight, a cached and **height-aware** obstacle map, and
+  corner arcs kept only while their samples stay clear of gear and under a
+  curvature cap. On synthetic 1-stud grids ([tools/path_bench.py](tools/path_bench.py))
+  the old planner returned **no path** on the cluttered and walled maps at its
+  own pop cap; the new A* solves them **≈3× faster**, and Theta* cuts the
+  clutter route from **167 to 61 waypoints** and the walled route from
+  **139 to 14**. The console now prints the cost of each plan:
+  `theta* 1,204 pops / 11 ms, min clear 3`
+- **Working width** — the sweep measures the tool's ground width across the
+  row axis (every BasePart's oriented box, unioned) and plans rows at
+  `width / 10` **tiles** instead of the old fixed one tile, so a **3-wide**
+  plow/cultivator/seeder/combine covers three rows per pass. The headland band
+  and the missed-cell touch-up adapt too (missed cubes are grouped by row, not
+  visited one by one). A width declared in an attribute/Configurations is
+  logged next to the measurement but only used when no part is readable.
+  Console: `plow: tool KQF3000 — 3-wide (model, 42 part(s), declared 3);
+  rows every 30, headland band 30`.
+- **Someone else's farm** — Farm tab → **Farm owner** (mine + every owner seen
+  in streamed fields; **Refresh farm list** rescans after you walk over). The
+  tour, growth wait and missed-cell read all use that owner's fields.
+  Equipment is **not** filtered by owner, so the nearest tractor/tool —
+  including theirs — is used. If the game refuses an action, the sweep says
+  so (`field belongs to <name> — check worker permissions`).
 - **Presets tab** — **Barn Care** (walks every stall near your plot and cleans it —
   uses the game's own CleanAnimalContainer = V context), Chocolate Milk
   (clean stalls → milk cows → deposit → cocoa → levers → collect → sell),
@@ -86,6 +115,31 @@ Everything merged into one paste-and-run file:
   so the cows were herded and sent to the wrong barn (or nowhere). The bug, its
   reproduction and the fix are in
   [tools/herd_send_test.py](tools/herd_send_test.py)
+- **Run controls (Settings tab)** — **▶ Start everything** / **■ Stop everything** flip the three
+  loops in a safe order (farm → milk → delivery; delivery turns itself back off
+  when no trailer/silo is picked), and **verbose logs** puts the per-cow
+  prompt/button dump back on for every cow (off, it runs once per session — the
+  walk covers the whole PlayerGui and was a measurable FPS cost). Every
+  **Reload** keeps the three farm picks, the typed batch size, the seed choice
+  and the movement mode, and — more importantly — **stops every loop the old
+  build started**. Before that, Unload
+  only hid the window: the milk loop, delivery loop, webhook pump, 15-min field
+  scan and FPS meter kept running, and each reload added another copy of each.
+  The guard is a generation counter each build captures
+  ([tools/lifecycle_test.py](tools/lifecycle_test.py) runs the real one and
+  proves an old loop stops, including after Unload-then-Reload).
+- **Per-pass timing** — the status paragraph ends with
+  `pass: scan 0 ms · clean 1.9s · herd 3.1s · milk 4.0s · store 0.2s · 7 tp`, and
+  the Doctor shows the same line plus the live dirt line, batch, delivery state,
+  session and teleport count. "Slow or stuck?" is a number now.
+- **A stall that will not clean is backed off** — six seconds, doubling to a
+  minute, cleared by any success. It used to be re-teleported to every 6 s
+  forever ([tools/clean_visit_test.py](tools/clean_visit_test.py), "backed off
+  on the next pass").
+- **Reload is validated** — the fetched text must carry the build marker before
+  `loadstring`, so a GitHub error page can never be executed. The Fluent library
+  URL is built from `FLUENT_TAG` (top of the file) so it can be pinned to a
+  release tag instead of following `latest`.
 - **Player tab** — walkspeed, jump power, infinite jump, noclip, anti-AFK, FPS boost
 - **Teleport tab** — Ctrl+Click teleport + FarmCo / AnimalCo / TractorCo / LumberCo /
   Bulk Store / Warehouse / **My Farm** (resolves your plot by its "Your Farm"
@@ -98,7 +152,10 @@ Everything merged into one paste-and-run file:
 - **Webhook window** (📡 button in the title bar) — its own UI with URL box, enable
   toggle, test button, **live feed** (every farm round, preset cycle and stealth
   break appears instantly, even with logging off) and a queue status line.
-  Sends to your own Discord webhook, rate-limited (≈1 msg / 6.5s) with coin-gain notes
+  Sends to your own Discord webhook, rate-limited (≈1 msg / 6.5s) with coin-gain notes.
+  The URL must be a real `discord.com` / `discordapp.com` `/api/webhooks/` URL —
+  "contains the word discord" is rejected, because this box mirrors the whole
+  console (account and plot names included) into whatever it is given
 - **🥔 potato button** (left edge of the screen, its own overlay) — press it to hide
   **every** window at once (main + webhook), press again to bring them all back. It
   stays visible while everything else is hidden, and you can drag it anywhere

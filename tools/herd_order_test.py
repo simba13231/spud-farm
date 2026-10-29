@@ -163,12 +163,21 @@ check("refusal falls through to the next cow", armedList() == "5,20,55,70", "arm
 check("only accepted cows go to the lasso", SENT ~= nil and #SENT == 3 and SENT[2].cow.dist == 55,
     SENT and (#SENT .. " pick(s)") or "no lasso")
 
--- 5. the barn is already at the batch size: nothing is herded
+-- 5. the barn is already at the batch size: nothing is herded, and a dirty
+--    free stall is NOT blamed for it (it was not what stopped the herd)
 reset()
 milkBatchSize = 3
-local done, tried, parked, picks = milkHerdBatch(stalls(12, 3), { cow(1, 10), cow(2, 20) })
+local fullBarn = stalls(12, 3, { [4] = true })
+local done, tried, parked, picks, dirtyFree, blocked =
+    milkHerdBatch(fullBarn, { cow(1, 10), cow(2, 20) })
+local blamed = false
+for _, l in ipairs(LOG) do
+    if tostring(l):find("still over the dirt line", 1, true) then blamed = true end
+end
 check("full barn is not herded into", #ARMED == 0 and parked == 3 and done == 0,
     string.format("armed=%d parked=%d", #ARMED, parked))
+check("a full barn is not blamed on a dirty stall", blocked == false and not blamed,
+    string.format("blocked=%s blamed=%s", tostring(blocked), tostring(blamed)))
 
 -- 6. NO COW GOES INTO A DIRTY STALL (user: "before it brings the cows inside
 --    make it check for over 20/24 dirtyness"): one free stall over the line
@@ -185,11 +194,17 @@ check("a dirty free stall is skipped, the clean one is used",
 reset()
 local allDirty = {}
 for i = 1, 12 do allDirty[i] = true end
-local d3, t3, p3, picks3, dirtyFree3 = milkHerdBatch(stalls(12, 0, allDirty),
+local d3, t3, p3, picks3, dirtyFree3, blocked3 = milkHerdBatch(stalls(12, 0, allDirty),
     { cow(1, 10), cow(2, 20) })
+local said3 = false
+for _, l in ipairs(LOG) do
+    if tostring(l):find("still over the dirt line", 1, true) then said3 = true end
+end
 check("every stall dirty: nobody is armed and the count is said",
     #ARMED == 0 and d3 == 0 and dirtyFree3 == 12,
     string.format("armed=%d done=%d dirtyFree=%s", #ARMED, d3, tostring(dirtyFree3)))
+check("every stall dirty: the herd line says why", blocked3 == true and said3,
+    string.format("blocked=%s said=%s", tostring(blocked3), tostring(said3)))
 
 print(fails == 0 and "ALL OK" or (fails .. " FAILED"))
 """

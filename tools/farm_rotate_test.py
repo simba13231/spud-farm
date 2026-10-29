@@ -110,7 +110,7 @@ print(fails == 0 and "ALL OK" or (fails .. " FAILED"))
 
 def extract(text: str) -> str:
     m1 = re.search(r"^    function milkFarmOf\(", text, re.M)
-    m2 = re.search(r"^    milkDrops\[1\] = Tabs\.Milk:CreateDropdown\(", text, re.M)
+    m2 = re.search(r"^    milk(?:Farm)?Drops\[1\] = Tabs\.Milk:CreateDropdown\(", text, re.M)
     if not m1 or not m2 or m2.start() < m1.start():
         raise SystemExit("the farm-rotation helpers were not found in SpudFarm_Full.lua")
     block = text[m1.start():m2.start()]

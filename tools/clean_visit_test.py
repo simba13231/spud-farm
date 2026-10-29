@@ -202,6 +202,7 @@ local function build(spec)
     VT, TELEPORTS, PRESSES, LOG = 0, 0, 0, {}
     milkFilthSaid = nil
     milkDirtLine = 24 -- the probe's clean reading; see milkFilthPct in the build
+    milkCleanBackoff = {} -- a stall that refuses Clean is skipped for a while
     HERE = -1000
 end
 
@@ -251,6 +252,13 @@ dirty, cleaned, unknown = run()
 check("a refusing stall: three presses, not counted as cleaned",
     PRESSES == 3 and cleaned == 0 and dirty == 1,
     string.format("presses=%d cleaned=%d dirty=%d", PRESSES, cleaned, dirty))
+
+-- 4b. ...and the NEXT pass leaves it alone instead of teleporting again at once
+TELEPORTS, PRESSES, LOG = 0, 0, {}
+dirty, cleaned, unknown = run()
+check("a refusing stall is backed off on the next pass",
+    TELEPORTS == 0 and PRESSES == 0 and cleaned == 0,
+    string.format("teleports=%d presses=%d cleaned=%d", TELEPORTS, PRESSES, cleaned))
 
 -- 5. the dirt as an ATTRIBUTE on the stall folder
 build(function(i) return { attrs = { Filth = (i == 2) and 6 or 0 } } end)
