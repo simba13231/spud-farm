@@ -12,7 +12,7 @@ local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/release
     .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
     .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.33 · fluent gui"
+local VERSION    = "rebuild v1.34 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -1898,6 +1898,15 @@ local okBuild, errBuild = pcall(function()
         return nil
     end
 
+    -- ▸ WHOSE EQUIPMENT MAY BE SPAWNED (user: "when it's on someone elses plot
+    --   make it not try to respawn things bro"). Spawning/respawning drives the
+    --   game's Equipment Manager — that is the owner's call, not ours. On a
+    --   picked farm the run names the machine that is stored/far away and skips
+    --   the pass; it never brings another account's equipment out.
+    function spudMayRespawn()
+        return farmOwnerPick == nil or farmOwnerPick == ""
+    end
+
     -- ▸ SAFETY FOR EVERY TOOL (user: "make it do that for every tool
     --   now"): the exact rule the tractor gate uses, applied to each
     --   implement — farther than RESPAWN_RANGE (or sitting IN STORAGE,
@@ -1919,6 +1928,14 @@ local okBuild, errBuild = pcall(function()
         local stored = impl:GetAttribute("InStorage")
         if not stored and (not dist or dist <= RESPAWN_RANGE) then
             return impl, dist, basis -- close enough — nothing to do
+        end
+        if not spudMayRespawn() then
+            log(string.format("%s (the %s) is %s — not respawning it on %s's farm (use (mine) to spawn it from the Equipment Manager)",
+                impl.Name, verb,
+                stored and "IN STORAGE"
+                    or string.format("%.0f studs away (>%d)", dist, RESPAWN_RANGE),
+                farmOwnerPick))
+            return nil
         end
         log(string.format("%s (the %s) is %s — respawning it via the Equipment Manager",
             impl.Name, verb,
@@ -5977,6 +5994,13 @@ local okBuild, errBuild = pcall(function()
         end
         local tr, dist, seat, stashedTractor = findTractor()
         if not tr and stashedTractor then
+            if not spudMayRespawn() then
+                -- someone else's machine stays where its owner left it
+                log(string.format(
+                    "%s is in storage — not spawning it on %s's farm (use (mine) to bring it out from the Equipment Manager)",
+                    stashedTractor.Name, farmOwnerPick))
+                return
+            end
             -- ▸ AUTO-SPAWN (user: "Auto-spawn it from the Equipment Manager"):
             --   a parked tractor has no seat, so this used to stop the whole run
             --   even though the game brings it out in three clicks. The menu
@@ -6014,6 +6038,12 @@ local okBuild, errBuild = pcall(function()
         --   honestly rather than walking the whole map (a player far
         --   from their farm gets an honest stop, never a respawn loop).
         if dist and dist > RESPAWN_RANGE then
+            if not spudMayRespawn() then
+                log(string.format(
+                    "tractor is %.0f studs away (>%d) — not respawning it on %s's farm; work it or pick (mine)",
+                    dist, RESPAWN_RANGE, farmOwnerPick))
+                return
+            end
             log(string.format("tractor is %.0f studs away (>%d) — respawning it via the Equipment Manager",
                 dist, RESPAWN_RANGE))
             setStage("Equipment Manager: respawning " .. tr.Name)

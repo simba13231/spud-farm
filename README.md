@@ -80,7 +80,10 @@ Everything merged into one paste-and-run file:
   owner's fields are worked **alone** — your own fields are left out while a
   pick is active, so the machinery and the soil always belong together. The
   tractor/tool follows the same picker: **that farm's machines first, then
-  yours, then one with no readable owner** — another player's is never taken.
+  yours, then one with no readable owner** — another player's is never taken,
+  and **nothing is ever spawned or respawned on that plot**: a stored or
+  far-away machine is named in the console (and the pass skips) instead of
+  driving the Equipment Manager for someone else's equipment.
   The tour log names each field's owner, so a wrong pick is visible. If the
   game refuses an action, the sweep says so
   (`field belongs to <name> — check worker permissions`).
