@@ -58,10 +58,12 @@ Everything merged into one paste-and-run file:
   rows every 30, headland band 30`.
 - **Someone else's farm** — Farm tab → **Farm owner** (mine + every owner seen
   in streamed fields; **Refresh farm list** rescans after you walk over). The
-  tour, growth wait and missed-cell read all use that owner's fields.
-  Equipment is **not** filtered by owner, so the nearest tractor/tool —
-  including theirs — is used. If the game refuses an action, the sweep says
-  so (`field belongs to <name> — check worker permissions`).
+  tour, growth wait and missed-cell read all use that owner's fields, and the
+  tractor/tool follows the same picker: **that farm's machines first, then
+  yours, then one with no readable owner** — another player's is never taken.
+  The equipment log prints each machine's owner, so a wrong pick is visible. If
+  the game refuses an action, the sweep says so
+  (`field belongs to <name> — check worker permissions`).
 - **Presets tab** — **Barn Care** (walks every stall near your plot and cleans it —
   uses the game's own CleanAnimalContainer = V context), Chocolate Milk
   (clean stalls → milk cows → deposit → cocoa → levers → collect → sell),

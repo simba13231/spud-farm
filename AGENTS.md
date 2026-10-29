@@ -8,13 +8,13 @@ asked and fixed, and the exact loop to prove a change works.
 description — it is the long-form manual and it is kept in sync with behaviour.
 
 - Main script: [SpudFarm_Full.lua](SpudFarm_Full.lua) — one paste-and-run Luau
-  file for the Roblox game *Farming and Friends*, currently `rebuild v1.26 ·
+  file for the Roblox game *Farming and Friends*, currently `rebuild v1.27 ·
   fluent gui` (`VERSION`, line 9). ≈11.4k lines.
 - Target: Windows + Git Bash. Luau toolchain lives in
   `%LOCALAPPDATA%\Temp\opencode\luau\` (`luau.exe`, `luau-compile.exe`,
   `luau-analyze.exe`).
 - Nothing here is a library or a build system. There is no bundler, no package
-  manager, no CI. Validation is a compile check plus seventeen harness scripts in
+  manager, no CI. Validation is a compile check plus eighteen harness scripts in
   `tools/` (`python tools/run_all.py` runs the whole gate).
 
 ---
@@ -72,7 +72,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 ### 1.4 Script limits (these have broken the build before)
 
 13. **Luau's 200-local limit is real and we are 2 away from the practical
-    ceiling.** Run `python tools/local_budget.py`. As of v1.26:
+    ceiling.** Run `python tools/local_budget.py`. As of v1.27:
     `4-space locals before milkCycle: 183 (practical ceiling 185)`,
     whole body `190 / 200`, **headroom 2**. Do **not** add a `local` inside the
     main build closure. Reuse an existing local, convert the feature to a
@@ -105,23 +105,10 @@ description — it is the long-form manual and it is kept in sync with behaviour
 
 ### 1.6 Working tree state (read before editing)
 
-`HEAD` is `e58935e` ("Keep cows out of dirty stalls…"), `main` tracks
-`origin/main`. The working tree is **not** clean and that is deliberate:
-
-- `SpudFarm_Full.lua` has uncommitted refinements (a generation guard so an old
-  build's loops die after a reload, scoped jug counting, near-stall prompt
-  handling, clean handling, per-stall clean backoff, per-pass timing,
-  reload-safe choices, verbose/start-stop controls).
-- `tools/farm_rotate_test.py`, `tools/herd_order_test.py` and
-  `tools/clean_visit_test.py` are modified.
-- `tools/drop_scope_test.py`, `tools/name_audit.py`, `tools/lifecycle_test.py`,
-  `tools/cow_in_stall_test.py`, `tools/webhook_test.py` and `tools/run_all.py`
-  are untracked.
-- `README.md` and `AGENTS.md` carry the same round's documentation.
-
-**Do not revert, stash, or bulk-stage any of it.** `git add -A` is banned here;
-stage only the files this change touches. If ownership of a hunk is unclear,
-leave it uncommitted and say so. Do not commit or push unless asked.
+`HEAD` is the latest committed build (v1.27, owner-first equipment), `main`
+tracks `origin/main`, and the tree is clean. Keep it that way: make the change,
+run the gates, and commit only the files the change touches. `git add -A` is
+banned here. Do not commit or push unless asked.
 
 ---
 
@@ -144,17 +131,17 @@ done
 PYTHONIOENCODING=utf-8 python tools/test_doctor.py
 ```
 
-All of these must exit 0 (17 `*_test.py` harnesses + `test_doctor.py`, which
+All of these must exit 0 (18 `*_test.py` harnesses + `test_doctor.py`, which
 does not match `*_test.py`). A plain `for` loop is **not** enough on its own:
 most harnesses print `FAIL` but still exit 0, so the output has to be read.
 The one command that runs everything — compile, budget, name audit and every
 harness, checking both the exit code and the text — is:
 
 ```bash
-python tools/run_all.py        # 21/21 checks on v1.26
+python tools/run_all.py        # 22/22 checks on v1.27
 ```
 
-Last full run (v1.26): **21/21 checks passed** (18 harnesses + 3 gates).
+Last full run (v1.27): **22/22 checks passed** (19 harnesses + 3 gates).
 
 | Script | What it actually proves |
 |---|---|
@@ -174,6 +161,7 @@ Last full run (v1.26): **21/21 checks passed** (18 harnesses + 3 gates).
 | `milk_arrivals_test.py` | The arrival wait watches stall `Occupant` values and scans a handful of times, not five times a second. |
 | `path_test.py` | The path engine: heap order, A* gap/corner rules, exact LOS through a single blocked cell, clearance refusal, Theta* straight-line and shorter-than-8-way paths, arcs refused near a wall, curvature cap, height-banded marking, cell sizing. |
 | `farm_width_test.py` | Working width and row plan: studs→tiles rounding, oriented-box union width, rotated bars, 1/2/3-wide plans (step, headland, row half-extent) and an interval-coverage proof on 100/200-stud and narrow fields; owner match rules. |
+| `equip_owner_test.py` | Whose tractor/tool is picked: the farm being worked first, mine next, an unreadable owner after that, a stranger's never; stored machines are reported for spawning; the implement distance/basis stay honest. |
 | `stall_probe_test.py` | The stall probe's report shape (it must name every dirt candidate and count visible stains). |
 | `test_doctor.py` | The in-script 🩺 DOCTOR report runs on stubbed world objects and reports, not crashes. |
 
@@ -383,6 +371,24 @@ It cannot know about a gate that closes after planning, a moving vehicle, or
 geometry thinner than the current cell; a part that moves inside the cache TTL
 marks its old spot for that second.
 
+### 3.7 Whose tractor and tool
+
+A farming pass used to take the **nearest** machine in `Objects.Equipment`,
+whoever owned it — on a foreign field that borrowed a stranger's ZM80 whenever
+one was closer. The probe proved every machine carries
+`Configurations.Owner` (`ZM80`/`SRC6` = `oksimba_1`, `LH150`/`MTS`/`UH` =
+`Miou2251`), so `equipOwnerRank(m)` now ranks each machine.
+
+With a **foreign farm picked** the order is: that farm's machines (rank 0), my
+own machines (1), a machine with no readable owner (2), and another account's
+**never**. With **`(mine)`** it is: mine (0), no readable owner (1), another
+account's never. `findTractor` and `findImplement` scan the ranks low-first
+and, inside a rank, keep the old nearest-wins rule (implement still prefers the
+model name over the `EquipmentType` attribute). A stored machine of the chosen
+rank is reported for the Equipment Manager instead of taking a spawned machine
+from a lower rank. `logEquipment` prints each machine's owner, and the "not
+found" lines name the farm the pass was looking for.
+
 ---
 
 ## 4. Code map (names, not line numbers — they move)
@@ -392,6 +398,7 @@ marks its old spot for that second.
 | Build identity | `VERSION` at the top of the file (`rebuild vX.YY · fluent gui`) |
 | Pathfinding | top-level `SpudPath` (`heapPush`/`heapPop`, `astar`, `thetastar`, `search`, `los`, `clearance`, `smooth`, `markParts`, `worldParts`), then `pathfindAround`, `driveRoute`, `driveToField`, `driveWatchTick` |
 | Farm width / owner | top-level `SpudFarm` (`widthTiles`, `widthFromParts`, `rowPlan`, `ownerWanted`, `workTiles`, `partBoxes`, `declaredWidth`), `spudOwnerChoices`, global `farmOwnerPick`, `spudFarmOwnerDrop`; `sweepField` plans rows from `rowPlan` |
+| Whose machine | global `equipOwnerRank(m)` (farm being worked → mine → no readable owner → never another account), used by `findTractor` / `findImplement`; owner tag read by `milkStoreOwnerOf` |
 | Dirt line | global `milkDirtLine = 24`; `milkDirtHigh(spot)` (the single "is this dirty?" answer) |
 | Clean pass | pre-pass offer watch (0.96 s) → clean watch (2.2 s); per-cow clean `≤2.25 s` |
 | Herd | `milkHerdBatch(stalls, cows)`, `milkHerdTargets`, `milkHerdSend`, ordering nearest-barn-first, `milkHerdArm` |
@@ -509,16 +516,30 @@ attribute/Config width is logged next to the measurement but only used when no
 part is readable. The Farm tab also has a **Farm owner** picker (mine + owners
 seen in streamed fields, plus **Refresh farm list**): `findMyFields` now uses
 `SpudFarm.ownerWanted`, so the same tour/growth/touch-up runs on that owner's
-fields. Equipment is still found **without** an owner filter (nearest
-tractor/tool), and a pass that changes nothing on a foreign field says
-`check worker permissions`. New `farm_width_test.py` (30 checks); suite
-**21/21**. Green but **not reloaded in game**.
+fields. Equipment was still found **without** an owner filter at that point
+(nearest tractor/tool — fixed in v1.27 below), and a pass that changes nothing
+on a foreign field says `check worker permissions`. New
+`farm_width_test.py` (30 checks); suite **21/21**. Green but **not reloaded in
+game**.
 
-**Where it stands:** `rebuild v1.26 · fluent gui`, whole suite green (21/21),
-harness verified. **Not yet reloaded in game** after v1.22–v1.26 — the next real
+**"make it use the farm owners tools then commit and push"** → v1.27. The
+owner picker changed which **fields** were worked, but the machines still came
+from "nearest in `Objects.Equipment`" — a stranger's ZM80 was borrowed whenever
+it happened to be closer. `equipOwnerRank` now ranks machines: the farm being
+worked first, then mine, then one with no readable owner; another account's is
+never used. `findTractor` and `findImplement` scan the ranks in order (nearest
+wins inside a rank, and the implement still prefers the model name over
+`EquipmentType`); a stored machine of the chosen rank goes to the Equipment
+Manager for a spawn rather than taking a lower rank's spawned machine.
+`logEquipment` prints every machine's owner, and the not-found lines name the
+farm. New `equip_owner_test.py` (23 checks); suite **22/22**.
+
+**Where it stands:** `rebuild v1.27 · fluent gui`, whole suite green (22/22),
+harness verified. **Not yet reloaded in game** after v1.22–v1.27 — the next real
 test is a live pass watching `path: … theta* N pops / N ms, min clear N`, the
 new width line (`tool … — 3-wide …; rows every 30`), the Farm owner picker on
-the other farm, and the milk lines (`… read from here - none reports dirt`,
+the other farm, the equipment owner column (`· ZM80 = Tractor [spawned] ·
+oksimba_1`), and the milk lines (`… read from here - none reports dirt`,
 `… cleaned in X.XXs`).
 
 ---
@@ -528,9 +549,11 @@ the other farm, and the milk lines (`… read from here - none reports dirt`,
 1. **In-game confirmation is pending** for v1.22 (2 s clean wait), v1.23
    (meter trigger + no-cow-in-dirt gate), v1.24 (unload/reload guard, drop
    scoping, clean backoff), v1.25 (new path engine: watch the first `path:`
-   lines and whether the tractor stops hugging gear) and v1.26 (wide tools:
+   lines and whether the tractor stops hugging gear), v1.26 (wide tools:
    check the `tool … — N-wide` line matches the real tool, and that a picked
-   foreign farm actually accepts the drive-overs). Harness green ≠ game green.
+   foreign farm actually accepts the drive-overs) and v1.27 (owner-first
+   equipment: check the owner column in the equipment log, and that a picked
+   farm's tractor/tool is the one mounted). Harness green ≠ game green.
 2. **The 24 % baseline may differ per build.** If stalls sit higher, the first
    pass logs `reads X% but the game offers no Clean there - the dirty line moves
    to X%` and then stops hopping. That is the designed self-correction, not a

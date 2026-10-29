@@ -12,7 +12,7 @@ local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/release
     .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
     .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.26 · fluent gui"
+local VERSION    = "rebuild v1.27 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -1178,6 +1178,25 @@ local okBuild, errBuild = pcall(function()
         return ok and v == true
     end
 
+    -- ▸ WHOSE TOOL (user: "make it use the farm owners tools"): the probe
+    --   proved every machine carries Configurations.Owner (ZM80/SRC6 =
+    --   oksimba_1, LH150/MTS/UH = Miou2251). The farm being worked ranks
+    --   first, my own machines next (a picked farm can still include mine),
+    --   an unreadable-owner machine after that, and another account's never.
+    function equipOwnerRank(m)
+        local who = milkStoreOwnerOf(m)
+        local pick = farmOwnerPick
+        if who == nil then
+            return (pick ~= nil and pick ~= "") and 2 or 1
+        end
+        if pick ~= nil and pick ~= "" and who == pick then return 0 end
+        if who == LocalPlayer.Name then
+            return (pick ~= nil and pick ~= "") and 1 or 0
+        end
+        return nil
+    end
+
+    -- ── harvest detection stays separate from the owner rank
     local HARVEST_MODEL_NAMES = { SRC6 = true }
     local harvestDetectLogged = false
     local function isHarvester(tr, impl)
@@ -1269,34 +1288,45 @@ local okBuild, errBuild = pcall(function()
         local objects = workspace:FindFirstChild("Objects")
         local folder = objects and objects:FindFirstChild("Equipment")
         local list = folder and folder:GetChildren() or workspace:GetDescendants()
-        local best, bestDist, bestSeat, stashed, stashedModel = nil, nil, nil, 0, nil
-        for _, d in ipairs(list) do
-            if d:IsA("Model") then
-                local etype = equipTypeOf(d)
-                -- attribute first (probe: ZM80=Tractor); name only when the
-                -- attribute is missing entirely, never as a veto
-                local isTractor = (etype == "Tractor")
-                if not isTractor and etype == nil then
-                    isTractor = d.Name:lower():find("zm80", 1, true) ~= nil
-                end
-                if isTractor then
-                    if equipInStorage(d) then
-                        stashed += 1
-                        stashedModel = stashedModel or d -- for auto-spawn
-                    else
-                        local seat = d:FindFirstChildWhichIsA("VehicleSeat", true)
-                            or d:FindFirstChildWhichIsA("Seat", true)
-                        if seat and hrp then
-                            local dist = (seat.Position - hrp.Position).Magnitude
-                            if not bestDist or dist < bestDist then
-                                best, bestDist, bestSeat = d, dist, seat
+        local function scan(tier)
+            local best, bestDist, bestSeat, stashed, stashedModel = nil, nil, nil, 0, nil
+            for _, d in ipairs(list) do
+                if d:IsA("Model") then
+                    local etype = equipTypeOf(d)
+                    -- attribute first (probe: ZM80=Tractor); name only when the
+                    -- attribute is missing entirely, never as a veto
+                    local isTractor = (etype == "Tractor")
+                    if not isTractor and etype == nil then
+                        isTractor = d.Name:lower():find("zm80", 1, true) ~= nil
+                    end
+                    if isTractor and equipOwnerRank(d) == tier then
+                        if equipInStorage(d) then
+                            stashed += 1
+                            stashedModel = stashedModel or d -- for auto-spawn
+                        else
+                            local seat = d:FindFirstChildWhichIsA("VehicleSeat", true)
+                                or d:FindFirstChildWhichIsA("Seat", true)
+                            if seat and hrp then
+                                local dist = (seat.Position - hrp.Position).Magnitude
+                                if not bestDist or dist < bestDist then
+                                    best, bestDist, bestSeat = d, dist, seat
+                                end
                             end
                         end
                     end
                 end
             end
+            return best, bestDist, bestSeat, stashedModel, stashed
         end
-        return best, bestDist, bestSeat, stashedModel, stashed
+        -- the farm being worked first, then my own machines, then an
+        -- unreadable owner. Another account's is never returned.
+        for tier = 0, 2 do
+            local best, bestDist, bestSeat, stashedModel, stashed = scan(tier)
+            if best or stashedModel then
+                return best, bestDist, bestSeat, stashedModel, stashed
+            end
+        end
+        return nil, nil, nil, nil, 0
     end
 
     -- ▸ AUTO-FARM STEP 3: hitch the plow (rules from the old script:
@@ -1356,28 +1386,36 @@ local okBuild, errBuild = pcall(function()
     local function findImplement(typeName, nearPos, tractorModel, includeStored)
         local folder = equipmentFolder()
         local wantName = TYPE_MODEL[typeName]
-        local byName, nameDist, byType, typeDist
-        for _, d in ipairs(folder and folder:GetChildren() or {}) do
-            -- a stored implement sits in the garage with no live hitch: towing
-            -- it is impossible, so it is never a drive/hitch candidate (probe:
-            -- 7 of 10 were parked). includeStored exists ONLY so the respawn
-            -- check can SEE the parked one and bring it out.
-            if d:IsA("Model") and d ~= tractorModel
-                and (includeStored or not equipInStorage(d)) then
-                local dist = (d:GetPivot().Position - nearPos).Magnitude
-                if wantName and d.Name == wantName then
-                    if not nameDist or dist < nameDist then
-                        byName, nameDist = d, dist
-                    end
-                elseif d:GetAttribute("EquipmentType") == typeName then
-                    if not typeDist or dist < typeDist then
-                        byType, typeDist = d, dist
+        local function scan(tier)
+            local byName, nameDist, byType, typeDist
+            for _, d in ipairs(folder and folder:GetChildren() or {}) do
+                -- a stored implement sits in the garage with no live hitch: towing
+                -- it is impossible, so it is never a drive/hitch candidate (probe:
+                -- 7 of 10 were parked). includeStored exists ONLY so the respawn
+                -- check can SEE the parked one and bring it out.
+                if d:IsA("Model") and d ~= tractorModel
+                    and (includeStored or not equipInStorage(d))
+                    and equipOwnerRank(d) == tier then
+                    local dist = (d:GetPivot().Position - nearPos).Magnitude
+                    if wantName and d.Name == wantName then
+                        if not nameDist or dist < nameDist then
+                            byName, nameDist = d, dist
+                        end
+                    elseif d:GetAttribute("EquipmentType") == typeName then
+                        if not typeDist or dist < typeDist then
+                            byType, typeDist = d, dist
+                        end
                     end
                 end
             end
+            return byName, nameDist, byType, typeDist
         end
-        if byName then return byName, nameDist, "model name " .. wantName end
-        if byType then return byType, typeDist, "EquipmentType" end
+        -- same owner rule as the tractor
+        for tier = 0, 2 do
+            local byName, nameDist, byType, typeDist = scan(tier)
+            if byName then return byName, nameDist, "model name " .. wantName end
+            if byType then return byType, typeDist, "EquipmentType" end
+        end
         return nil
     end
 
@@ -1412,12 +1450,13 @@ local okBuild, errBuild = pcall(function()
             log("Objects.Equipment folder not found")
             return
         end
-        log("equipment on your farm:")
+        log("equipment here (owner shown):")
         for _, d in ipairs(folder:GetChildren()) do
             if d:IsA("Model") then
                 local t = tostring(d:GetAttribute("EquipmentType") or "?")
                 local stored = d:GetAttribute("InStorage") and " [in storage]" or " [spawned]"
-                log(string.format("  · %s = %s%s", d.Name, t, stored))
+                local who = milkStoreOwnerOf(d) or "no owner"
+                log(string.format("  · %s = %s%s · %s", d.Name, t, stored, who))
             end
         end
     end
@@ -1869,7 +1908,8 @@ local okBuild, errBuild = pcall(function()
         local impl, dist, basis =
             findImplement(typeName, tr:GetPivot().Position, tr, true)
         if not impl then
-            log("no equipment with EquipmentType=" .. typeName .. " found — see list above")
+            log("no " .. typeName .. " for " .. (farmOwnerPick or "you")
+                .. " found — the owner tags in the equipment list above show what is here")
             return nil
         end
         local stored = impl:GetAttribute("InStorage")
@@ -2485,9 +2525,10 @@ local okBuild, errBuild = pcall(function()
     -- logged so a wrong pick is visible.
     -- ▸ WHOSE FIELDS (user: "make the farming be able to work on someone
     --   elses farm"): nil = mine; the Farm tab's "Farm owner" picker sets the
-    --   name. Equipment is NOT filtered by owner — findTractor/findImplement
-    --   already scan every machine in Equipment, so the nearest tractor/tool
-    --   is used, including the other farm's.
+    --   name. Equipment follows the same picker through equipOwnerRank —
+    --   findTractor/findImplement use the farm being worked's machines first,
+    --   then mine, then an unreadable-owner machine, and never borrow another
+    --   account's.
     farmOwnerPick = nil
     findMyFields = function(nearPos)
         local seen, mine = {}, {}
@@ -5763,7 +5804,8 @@ local okBuild, errBuild = pcall(function()
             end
         end
         if not tr then
-            log("tractor not found — no spawned model with EquipmentType=Tractor (check the Equipment Manager, parked ones cannot drive)")
+            log("tractor not found for " .. (farmOwnerPick or "you")
+                .. " — no spawned Tractor with that owner (check the Equipment Manager; parked ones cannot drive)")
             return
         end
 
