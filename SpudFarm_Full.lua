@@ -12,7 +12,7 @@ local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/release
     .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
     .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.32 · fluent gui"
+local VERSION    = "rebuild v1.33 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -1249,8 +1249,8 @@ local okBuild, errBuild = pcall(function()
         end)
         if ok and cur and max and max > 0 and cur >= max then
             watchHit = true
-            log(string.format("harvester hit capacity (%d/%d) while driving — stopping this leg%s",
-                cur, max, spudSellWired and " to sell" or ""))
+            log(string.format("harvester hit capacity (%d/%d) while driving — stopping this leg to unload",
+                cur, max))
         end
         return watchHit
     end
@@ -5368,16 +5368,52 @@ local okBuild, errBuild = pcall(function()
         return true
     end
 
-    -- ▸ FULL TANK STOPS THE RUN FOR NOW (user: "once the harvester is full just
-    --   make it stop because we dont have the spot yet"): the real drop-off is
-    --   the Fulfillment building next to Shipment, and its pad/lever is not
-    --   probed yet, so driving to a guessed pad only wastes the pass. Flip
-    --   spudSellWired to true in the change that wires the Fulfillment spot.
-    spudSellWired = false
+    -- ▸ WHERE A FULL HARVESTER UNLOADS (user: "make a option in the farm to
+    --   either furfull or sell"). Farm tab → Drop-off picks the destination:
+    --   FULFILLMENT is the probed pad (Stores.DropOffs.Deposit_Warehouse at
+    --   -353,138,-90), SELL keeps the old crop sell-board scan. Both go
+    --   through the same trip and the same judge — the tank dropping is the
+    --   only proof a pad accepted the load.
+    spudDropOff = spudSavedDropOff or "Fulfillment"
     function spudSellNow(cur, max)
-        if not spudSellWired then return false end
+        if spudDropOff ~= "Fulfillment" and spudDropOff ~= "Sell" then return false end
         return type(cur) == "number" and type(max) == "number"
             and max > 0 and cur >= max
+    end
+
+    -- the Fulfillment pad, read from the world — never a guessed position.
+    -- Deposit_Warehouse is the drop pad; Withdraw_Warehouse is the opposite
+    -- action, so it only wins when it is the only pad there. Aim at the TOP
+    -- surface, like the sell pads do: a pad's centre can sit below the deck.
+    function spudFulfillSpots()
+        local out = {}
+        local stores = workspace:FindFirstChild("Stores")
+        local drops = stores and stores:FindFirstChild("DropOffs")
+        if not drops then
+            log("fulfillment: Stores.DropOffs is not streamed — no unload pad to go to")
+            return out
+        end
+        local best, bestScore = nil, nil
+        for _, d in ipairs(drops:GetChildren()) do
+            if d:IsA("BasePart") then
+                local n = tostring(d.Name):lower()
+                local score = 0
+                if n:find("deposit", 1, true) then score += 2 end
+                if n:find("warehouse", 1, true) then score += 2 end
+                if n:find("drop", 1, true) then score += 1 end
+                if n:find("withdraw", 1, true) then score -= 3 end
+                if not best or score > bestScore then best, bestScore = d, score end
+            end
+        end
+        if not best then
+            log("fulfillment: Stores.DropOffs holds no pad part — nothing to drive onto")
+            return out
+        end
+        local top = best.Position + Vector3.new(0, best.Size.Y / 2, 0)
+        log(string.format("fulfillment pad: %s at (%.0f, %.0f, %.0f)",
+            best.Name, top.X, top.Y, top.Z))
+        out[1] = { p = top, what = "DropOffs." .. best.Name, store = "Fulfillment" }
+        return out
     end
 
     -- the whole trip: drive to a pad, sell, drive back to the field
@@ -5387,10 +5423,11 @@ local okBuild, errBuild = pcall(function()
             log("harvester load unreadable — sell trip skipped")
             return false
         end
-        log(string.format("harvester FULL (%d/%s) — going to sell", cur, tostring(max)))
-        local spots = findSellSpots()
+        local dest = (spudDropOff == "Sell") and "sell" or "Fulfillment"
+        log(string.format("harvester FULL (%d/%s) — going to %s", cur, tostring(max), dest))
+        local spots = (spudDropOff == "Sell") and findSellSpots() or spudFulfillSpots()
         if #spots == 0 then
-            log("⚠ no sell pad found (GameplayVisuals.SellArea / Stores.DropOffs) — sell skipped")
+            log("⚠ no " .. dest .. " pad found — unload skipped")
             return false
         end
         -- the 1-second watch is muted for the whole trip: the tank is STILL
@@ -5401,7 +5438,7 @@ local okBuild, errBuild = pcall(function()
         local back = ride:GetPivot().Position
         for i, s in ipairs(spots) do
             if stopping() then sellingNow = false return false end
-            log(string.format("sell point %d/%d: %s at (%.0f, %.0f) — arc hop, no pathfinding", i, #spots,
+            log(string.format("drop-off %d/%d: %s at (%.0f, %.0f) — arc hop, no pathfinding", i, #spots,
                 s.what, s.p.X, s.p.Z))
             local ok = hopTo(ride, s.p, SELL_HOP_SPEED)
             if not ok then
@@ -5417,7 +5454,7 @@ local okBuild, errBuild = pcall(function()
             end
         end
         sellingNow = false
-        log("⚠ still full — none of the pads sold the load (the log above says which pad was tried and whether its sell menu opened; if it stayed closed, do the trip once by hand — Q then E — and tell me where the vehicle was parked)")
+        log("⚠ still full — none of the pads took the load (the log above says which pad was tried and whether its menu opened; if it stayed closed, do the trip once by hand — Q then E — and tell me where the vehicle was parked)")
         return false
     end
 
@@ -5435,9 +5472,8 @@ local okBuild, errBuild = pcall(function()
         if cur < max then return false, false end
         if not spudSellNow(cur, max) then
             log(string.format(
-                "harvester is FULL (%d/%d%s) — stopping the run: the Fulfillment drop-off isn't wired yet",
+                "harvester is FULL (%d/%d%s) — stopping the run: pick a Drop-off in the Farm tab",
                 cur, max, note and (", " .. note) or ""))
-            -- stop the farming loop the same way the toggle does
             loopThread = nil
             pcall(function()
                 local opt = Fluent.Options and Fluent.Options.farmingLoop
@@ -5445,12 +5481,12 @@ local okBuild, errBuild = pcall(function()
             end)
             return true, false
         end
-        log(string.format("harvester is FULL (%d/%d%s) — going to sell", cur, max,
+        log(string.format("harvester is FULL (%d/%d%s) — unloading", cur, max,
             note and (", " .. note) or ""))
         local sold = sellHarvester(ride, seat, field)
         if not sold then
             sellCooldownUntil = os.clock() + 60
-            log("no sale landed — backing off for 60 s instead of hammering the pads (the harvest carries on with the load it has)")
+            log("no unload landed — backing off for 60 s instead of hammering the pad (the harvest carries on with the load it has)")
         end
         return true, sold
     end
@@ -6710,6 +6746,22 @@ local okBuild, errBuild = pcall(function()
         })
         log("farm owner list: " .. table.concat(owners, ", "))
     end
+
+    -- ▸ WHERE A FULL HARVESTER GOES (user: "make a option in the farm to
+    --   either furfull or sell"). Fulfillment is the probed warehouse pad
+    --   (Stores.DropOffs.Deposit_Warehouse); Sell is the old crop sell
+    --   board. The choice survives a reload.
+    Tabs.Farm:CreateDropdown("dropOffChoice", {
+        Title = "Drop-off",
+        Values = { "Fulfillment", "Sell" },
+        Multi = false,
+        Default = spudDropOff,
+        Callback = function(v)
+            spudDropOff = v
+            spudSavedDropOff = v -- survives a reload
+            log("drop-off: " .. tostring(v))
+        end,
+    })
 
     -- ▸🩺 DOCTOR REPORT (read-only). After a run of patches where each fix
     --   exposed the next weak spot, the answer is not another feature: too

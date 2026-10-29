@@ -8,7 +8,7 @@ asked and fixed, and the exact loop to prove a change works.
 description — it is the long-form manual and it is kept in sync with behaviour.
 
 - Main script: [SpudFarm_Full.lua](SpudFarm_Full.lua) — one paste-and-run Luau
-  file for the Roblox game *Farming and Friends*, currently `rebuild v1.32 ·
+  file for the Roblox game *Farming and Friends*, currently `rebuild v1.33 ·
   fluent gui` (`VERSION`, line 9). ≈11.4k lines.
 - Target: Windows + Git Bash. Luau toolchain lives in
   `%LOCALAPPDATA%\Temp\opencode\luau\` (`luau.exe`, `luau-compile.exe`,
@@ -72,7 +72,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 ### 1.4 Script limits (these have broken the build before)
 
 13. **Luau's 200-local limit is real and we are 2 away from the practical
-    ceiling.** Run `python tools/local_budget.py`. As of v1.32:
+    ceiling.** Run `python tools/local_budget.py`. As of v1.33:
     `4-space locals before milkCycle: 183 (practical ceiling 185)`,
     whole body `190 / 200`, **headroom 2**. Do **not** add a `local` inside the
     main build closure. Reuse an existing local, convert the feature to a
@@ -105,7 +105,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 
 ### 1.6 Working tree state (read before editing)
 
-`HEAD` is the latest committed build (v1.32, go to the picked farm), `main`
+`HEAD` is the latest committed build (v1.33, Drop-off pick), `main`
 tracks `origin/main`, and the tree is clean. Keep it that way: make the change,
 run the gates, and commit only the files the change touches. `git add -A` is
 banned here. **Commit and push after every completed change** (owner's standing
@@ -139,10 +139,10 @@ The one command that runs everything — compile, budget, name audit and every
 harness, checking both the exit code and the text — is:
 
 ```bash
-python tools/run_all.py        # 26/26 checks on v1.32
+python tools/run_all.py        # 26/26 checks on v1.33
 ```
 
-Last full run (v1.32): **26/26 checks passed** (23 harnesses + 3 gates).
+Last full run (v1.33): **26/26 checks passed** (23 harnesses + 3 gates).
 
 | Script | What it actually proves |
 |---|---|
@@ -166,7 +166,7 @@ Last full run (v1.32): **26/26 checks passed** (23 harnesses + 3 gates).
 | `equip_owner_test.py` | Whose tractor/tool is picked: the farm being worked first, mine next, an unreadable owner after that, a stranger's never; stored machines are reported for spawning; the implement distance/basis stay honest. |
 | `field_soil_test.py` | Tree/wood field types and names are never crop-harvest targets; a successful cell read with 0 cells is empty (skipped), while a failed read stays unknown (never a skip reason). |
 | `row_steer_test.py` | The row steering decision: a real heading error steers toward the aim, a parallel offset beyond 2.5 studs re-centers onto the row, and a small offset inside the deadband presses nothing. |
-| `sell_gate_test.py` | The full-tank gate: while `spudSellWired` is false a full harvester never starts a sell trip; once wired, full sells and a half tank does not. |
+| `dropoff_test.py` | The full-tank gate follows the Farm tab's Drop-off pick: a full tank unloads with Fulfillment or Sell chosen, a half tank works on, an unknown/nil destination never moves; the Fulfillment pad is read from `Stores.DropOffs` (Deposit_Warehouse preferred over Withdraw_Warehouse), aimed at its top surface, and an unstreamed/empty folder returns no pad instead of a guess. |
 | `stall_probe_test.py` | The stall probe's report shape (it must name every dirt candidate and count visible stains). |
 | `test_doctor.py` | The in-script 🩺 DOCTOR report runs on stubbed world objects and reports, not crashes. |
 
@@ -453,25 +453,30 @@ pure-pursuit aim corrected **heading only** — a tractor parallel to the row bu
 `row_steer_test.py` pins the steering decision. The real-W row speed is the
 game's own, so it is faster than the old 10-stud mover by construction.
 
-### 3.10 A full harvester stops
+### 3.10 A full harvester unloads at the chosen drop-off
 
-User: *"once the harvester is full just make it stop because we dont have the
-spot yet."* The real drop-off is the **Fulfillment** building next to
-**Shipment**; its pad/lever has not been probed, and the old sell-pad scan
-(`findSellSpots` → `GameplayVisuals.SellArea` / `Stores.DropOffs`) can point at
-another store. So a full tank no longer starts a sell trip:
+User: *"im telling you i ON the pad to furfull bro, make a option in the farm to
+either furfull or sell bro."* The Farm tab now carries **Drop-off** with two
+values, and the full tank always ends in a real trip:
 
-- global `spudSellWired = false` is the switch; `spudSellNow(cur, max)` returns
-  true only when it is wired **and** `cur >= max` with a readable capacity.
-- `harvestSellIfFull` sees the unwired gate, logs
-  `harvester is FULL (N/N …) — stopping the run: the Fulfillment drop-off isn't wired yet`,
-  sets `loopThread = nil` (which makes `stopping()` true) and flips the Farm
-  toggle off. The loop unwinds through its normal abort paths.
-- `sellHarvester` / `findSellSpots` stay in place for the change that wires the
-  Fulfillment spot (flip `spudSellWired` then).
-- `SpudFulfillProbe.lua` dumps the area: candidate Fulfillment/Shipment models,
-  pad-like parts, prompts (action text + key), signs, the live context actions,
-  and the old sell-pad targets.
+- global `spudDropOff` (default **Fulfillment**, remembered across a reload in
+  `spudSavedDropOff`); `spudSellNow(cur, max)` is true only for a readable
+  `cur >= max` **and** one of the two known destinations — an unknown or nil
+  pick still stops the run rather than driving nowhere.
+- **Fulfillment** → `spudFulfillSpots()` reads `Stores.DropOffs` and prefers
+  `Deposit_Warehouse` (the probed pad at -353,138,-90) over `Withdraw_Warehouse`
+  and the plain `DropOff`s, aiming at the pad's **top surface**. The folder
+  being unstreamed/empty is logged and returns no pad — never a guessed spot.
+- **Sell** → the old `findSellSpots()` crop sell-board scan, unchanged.
+- The trip itself is the existing arc hop (`hopTo`, `SELL_HOP_SPEED`) plus
+  `trySellAt`: wait a beat, then Q (menu) / E (confirm) while watching the tank;
+  **the tank dropping is the only proof** a pad took the load. A failed trip
+  backs off 60 s and the harvest carries on with the load it has.
+- `SpudFulfillProbe.lua` reads the game's **live** offer billboards
+  (`PCGP_ContextActions.Billboards`, with key + adornee), what the character is
+  standing on, everything within 30 studs, `DropOffs` by distance, and nearby
+  equipment. `PCGP_ContextActions.Buttons` is the whole action registry (70
+  entries, no keys) and must not be used to answer "what is offered here".
 
 ### 3.11 A picked farm is reached before anything is read
 
@@ -509,6 +514,7 @@ before the equipment scan:
 | Tree soil | global `spudTreeField(typeName, modelName)` (wood/tree/log/forest/timber/lumber/sawmill/stump → no crop harvest) and `spudNoCells(st)` (successful 0-cell read is empty, `nil` read is unknown); used in `probeWork`, `runPass`, `needLeft`, `grownLeft`, growth wait |
 | Row driving | `keyRow(tr, seat, from, goal, who)` drives rows on real W (the game auto-steers); global `spudRowSteer(angDeg, crossY, cross, tol)` (heading > 8°, cross-track > 2.5 studs → re-center); travel `ALIGN_MAXVEL = 34`, fallback row speed 18 |
 | Dirt line | global `milkDirtLine = 24`; `milkDirtHigh(spot)` (the single "is this dirty?" answer) |
+| Drop-off | global `spudDropOff` (**Fulfillment** / **Sell**, remembered in `spudSavedDropOff`), `spudSellNow(cur,max)`, `spudFulfillSpots()` (Deposit_Warehouse top), `findSellSpots()` (crop sell board), `sellHarvester` (arc hop + `trySellAt`), `harvestSellIfFull`; Farm tab dropdown `dropOffChoice` |
 | Clean pass | pre-pass offer watch (0.96 s) → clean watch (2.2 s); per-cow clean `≤2.25 s` |
 | Herd | `milkHerdBatch(stalls, cows)`, `milkHerdTargets`, `milkHerdSend`, ordering nearest-barn-first, `milkHerdArm` |
 | Farm choice | `milkFarmReadyCount(who)`, `milkFarmSwitch(want, owner, readyHere, parkedHere)` |
@@ -706,17 +712,29 @@ owner pasted is useful (CompanyArea with Fulfillment/Shipment titles,
 to wire the unload**: the probe was run from the start point, not the pad, so
 which action/key the pad offers with a full harvester is still unknown.
 
-**Where it stands:** `rebuild v1.32 · fluent gui`, whole suite green (26/26),
-harness verified. **Not yet reloaded in game** after v1.22–v1.32 — the next real
+**"im telling you i ON the pad to furfull bro, make a option in the farm to
+either furfull or sell bro"** → v1.33. The probe upgrade went in first: it now
+reads `PCGP_ContextActions.Billboards` (only what is offered here, with each
+action's key and adornee) instead of `Buttons` (the whole 70-action registry,
+which is why two runs answered nothing). Then the Farm tab got **Drop-off**:
+**Fulfillment** (default) drives the full harvester to the probed
+`Stores.DropOffs.Deposit_Warehouse` top surface; **Sell** keeps the old crop
+sell-board scan. The tank dropping is the only proof a pad took the load; a
+failed trip backs off 60 s. `spudSellWired` is gone, so is `sell_gate_test.py` —
+`dropoff_test.py` (17 checks) replaces it. Suite **26/26**.
+
+**Where it stands:** `rebuild v1.33 · fluent gui`, whole suite green (26/26),
+harness verified. **Not yet reloaded in game** after v1.22–v1.33 — the next real
 test is a live pass watching `path: … theta* N pops / N ms, min clear N`, the
 new width line (`tool … — 3-wide …; rows every 30`), the Farm owner picker
 showing ONLY that owner's fields (`Field · Miou2251`), the equipment owner
 column (`· ZM80 = Tractor [spawned] · oksimba_1`), a
 `SKIP … — <type> soil, trees are left alone` line on the wood field, the rows
-being driven on W with the tractor re-centering after a drift, a full harvester
-stopping the run (`Fulfillment drop-off isn't wired yet`), the
+being driven on W with the tractor re-centering after a drift, the
 `farm owner: teleporting to …'s plot` hop followed by
-`farm: using <tool> (<owner>)`, and the milk lines
+`farm: using <tool> (<owner>)`, a full harvester taking the Drop-off trip
+(`fulfillment pad: Deposit_Warehouse at (…` → `✅ sold at …` or the honest
+`still full — none of the pads took the load`), and the milk lines
 (`… read from here - none reports dirt`, `… cleaned in X.XXs`).
 
 ---
@@ -736,9 +754,11 @@ stopping the run (`Fulfillment drop-off isn't wired yet`), the
    picked, the tour must list ONLY that owner's fields and never mine), v1.30
    (real-W row driving: watch for a `tractor: the W row drive handed back`
    fallback line and whether rows actually re-center after a drift), v1.31
-   (a full harvester must stop the run and NOT drive to a sell pad) and v1.32
+   (a full harvester must stop the run and NOT drive to a sell pad), v1.32
    (a picked farm: `farm owner: teleporting to …'s plot` must appear once, the
-   fields must stream in, and the mounted tool must be that owner's).
+   fields must stream in, and the mounted tool must be that owner's) and v1.33
+   (the Drop-off pick: a full tank must hop to the chosen pad and the tank must
+   drop; if it does not, the log names the pad and whether a menu opened).
    Harness green ≠ game green.
 2. **The 24 % baseline may differ per build.** If stalls sit higher, the first
    pass logs `reads X% but the game offers no Clean there - the dirty line moves

@@ -43,11 +43,14 @@ Everything merged into one paste-and-run file:
   it re-centers instead of running parallel to it. If W can't finish a leg, the
   align mover takes over. Travel between fields is faster (**34 studs/s**,
   previously 24), and rows no longer use the old 10-stud/s mover cap.
-- **Full harvester stops** — when the tank fills, the run **stops** instead of
-  driving to a guessed sell pad: the real drop-off is the **Fulfillment**
-  building next to Shipment and its pad is not wired yet. The console says
-  `harvester is FULL (N/N) — stopping the run: the Fulfillment drop-off isn't
-  wired yet` and the Farm toggle switches itself off.
+- **Drop-off pick** — Farm tab → **Drop-off**: **Fulfillment** (default) or
+  **Sell**. When the harvester's tank fills, it stops the row, arc-hops to the
+  chosen pad, and unloads: Fulfillment is the warehouse pad
+  (`Stores.DropOffs.Deposit_Warehouse`), Sell is the old crop sell board. The
+  tank dropping is the only proof a pad took the load — the console prints
+  `fulfillment pad: Deposit_Warehouse at (…)`, `drop-off 1/1: …`, then
+  `✅ sold at …` or an honest `still full — none of the pads took the load`,
+  after which the trip backs off 60 s and the harvest carries on.
 - **Trees are left alone** — the harvester never drives a field whose type or
   model name says wood / tree / log / forest / timber / lumber / sawmill / stump,
   so standing trees are not cut. A field whose cell read succeeds but returns
