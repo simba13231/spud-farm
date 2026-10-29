@@ -62,12 +62,13 @@ Everything merged into one paste-and-run file:
   Console: `plow: tool KQF3000 — 3-wide (model, 42 part(s), declared 3);
   rows every 30, headland band 30`.
 - **Someone else's farm** — Farm tab → **Farm owner** (mine + every owner seen
-  in streamed fields; **Refresh farm list** rescans after you walk over). The
-  tour, growth wait and missed-cell read all use that owner's fields, and the
+  in streamed fields; **Refresh farm list** rescans after you walk over). That
+  owner's fields are worked **alone** — your own fields are left out while a
+  pick is active, so the machinery and the soil always belong together. The
   tractor/tool follows the same picker: **that farm's machines first, then
   yours, then one with no readable owner** — another player's is never taken.
-  The equipment log prints each machine's owner, so a wrong pick is visible. If
-  the game refuses an action, the sweep says so
+  The tour log names each field's owner, so a wrong pick is visible. If the
+  game refuses an action, the sweep says so
   (`field belongs to <name> — check worker permissions`).
 - **Presets tab** — **Barn Care** (walks every stall near your plot and cleans it —
   uses the game's own CleanAnimalContainer = V context), Chocolate Milk

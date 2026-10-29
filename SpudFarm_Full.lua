@@ -12,7 +12,7 @@ local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/release
     .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
     .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.28 · fluent gui"
+local VERSION    = "rebuild v1.29 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -699,8 +699,12 @@ end
 -- unreadable owner never matches, so a streamed-out field is not "mine".
 function SpudFarm.ownerWanted(ownerName, mineName, pick)
     if not ownerName or ownerName == "" then return false end
-    if ownerName == mineName then return true end
-    return pick ~= nil and pick ~= "" and ownerName == pick
+    -- one owner at a time: a picked farm is worked ALONE. Mixing my fields
+    -- into that tour hitched the picked farm's machinery and then drove it
+    -- onto my own soil (user: "it's using the player it's working for's
+    -- equipment then going on it's own field").
+    local want = (pick ~= nil and pick ~= "") and pick or mineName
+    return ownerName == want
 end
 
 local function partBox(p)
@@ -1181,7 +1185,7 @@ local okBuild, errBuild = pcall(function()
     -- ▸ WHOSE TOOL (user: "make it use the farm owners tools"): the probe
     --   proved every machine carries Configurations.Owner (ZM80/SRC6 =
     --   oksimba_1, LH150/MTS/UH = Miou2251). The farm being worked ranks
-    --   first, my own machines next (a picked farm can still include mine),
+    --   first, my own machines next (a fallback when that farm has none out),
     --   an unreadable-owner machine after that, and another account's never.
     function equipOwnerRank(m)
         local who = milkStoreOwnerOf(m)
@@ -6024,7 +6028,10 @@ local okBuild, errBuild = pcall(function()
             --   tour and goes home at the end
             -- the whole path, logged once: this is the order it will drive
             local tourNames = {}
-            for _, m in ipairs(tour) do tourNames[#tourNames + 1] = m.d.Name end
+            for _, m in ipairs(tour) do
+                tourNames[#tourNames + 1] = m.d.Name
+                    .. (m.ownerName and (" · " .. tostring(m.ownerName)) or "")
+            end
             log(string.format("tour (%d field(s), one go): %s", #tour,
                 table.concat(tourNames, " → ")))
             for _, grp in ipairs(groups) do
@@ -6043,8 +6050,9 @@ local okBuild, errBuild = pcall(function()
                         log(string.format("SKIP %s — nothing needs %s (%d cells)",
                             m.d.Name, job.verb, st.total))
                     else
-                        log(string.format("%s %s (%s land, %s)",
+                        log(string.format("%s %s (%s land · %s, %s)",
                             job.verb, m.d.Name, m.typeName,
+                            tostring(m.ownerName or "?"),
                             need and (need .. " cells need it") or "state unknown"))
                         -- ▸ THE HARVESTER ARCS EVERYWHERE (user: "the harvester
                         --   is not using the arc tween bro, make it use it to

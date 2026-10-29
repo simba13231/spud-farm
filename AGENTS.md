@@ -8,7 +8,7 @@ asked and fixed, and the exact loop to prove a change works.
 description — it is the long-form manual and it is kept in sync with behaviour.
 
 - Main script: [SpudFarm_Full.lua](SpudFarm_Full.lua) — one paste-and-run Luau
-  file for the Roblox game *Farming and Friends*, currently `rebuild v1.28 ·
+  file for the Roblox game *Farming and Friends*, currently `rebuild v1.29 ·
   fluent gui` (`VERSION`, line 9). ≈11.4k lines.
 - Target: Windows + Git Bash. Luau toolchain lives in
   `%LOCALAPPDATA%\Temp\opencode\luau\` (`luau.exe`, `luau-compile.exe`,
@@ -72,7 +72,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 ### 1.4 Script limits (these have broken the build before)
 
 13. **Luau's 200-local limit is real and we are 2 away from the practical
-    ceiling.** Run `python tools/local_budget.py`. As of v1.28:
+    ceiling.** Run `python tools/local_budget.py`. As of v1.29:
     `4-space locals before milkCycle: 183 (practical ceiling 185)`,
     whole body `190 / 200`, **headroom 2**. Do **not** add a `local` inside the
     main build closure. Reuse an existing local, convert the feature to a
@@ -105,7 +105,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 
 ### 1.6 Working tree state (read before editing)
 
-`HEAD` is the latest committed build (v1.28, tree soil left alone), `main`
+`HEAD` is the latest committed build (v1.29, one owner at a time), `main`
 tracks `origin/main`, and the tree is clean. Keep it that way: make the change,
 run the gates, and commit only the files the change touches. `git add -A` is
 banned here. **Commit and push after every completed change** (owner's standing
@@ -391,6 +391,14 @@ rank is reported for the Equipment Manager instead of taking a spawned machine
 from a lower rank. `logEquipment` prints each machine's owner, and the "not
 found" lines name the farm the pass was looking for.
 
+**The fields follow the same picker, one owner at a time** (v1.29):
+`SpudFarm.ownerWanted` now means *exactly* the picked owner when a pick is
+active, not "mine **or** the pick". Before that, picking Miou2251 hitched that
+farm's plow (rank 0) and then toured **my** fields as well — user: *"it's using
+the player it's working for's equipment then going on it's own field."* With
+`(mine)` it is still exactly my fields. The tour and per-field log lines now
+carry the owner (`Field · Miou2251`), so a mixed tour can never look anonymous.
+
 ### 3.8 Trees and wood soil
 
 User: *"it's trying to harvest my trees but i don't want to."* The harvest job
@@ -579,14 +587,23 @@ a `nil` read stays unknown. Applied in `probeWork`, both `runPass` decisions,
 `needLeft`/`grownLeft` and the growth wait. New `field_soil_test.py`
 (22 checks); suite **23/23**.
 
-**Where it stands:** `rebuild v1.28 · fluent gui`, whole suite green (23/23),
-harness verified. **Not yet reloaded in game** after v1.22–v1.28 — the next real
+**"no but it's using the player it's working for's equipment then going on it's
+own field"** → v1.29. Picking a farm did not replace my fields: `ownerWanted`
+returned true for `ownerName == mine` *or* the pick, so the tour mixed both
+owners — the pass hitched Miou2251's plow and then plowed my field. It is now
+**one owner at a time** (`pick or mine`), so the machinery and the soil always
+match. `(mine)` still means exactly mine. The tour line and each per-field line
+now include the owner (`Field · Miou2251`), which is what made the mismatch
+visible in the console. `farm_width_test.py` gained the two pick-vs-mine checks.
+
+**Where it stands:** `rebuild v1.29 · fluent gui`, whole suite green (23/23),
+harness verified. **Not yet reloaded in game** after v1.22–v1.29 — the next real
 test is a live pass watching `path: … theta* N pops / N ms, min clear N`, the
-new width line (`tool … — 3-wide …; rows every 30`), the Farm owner picker on
-the other farm, the equipment owner column (`· ZM80 = Tractor [spawned] ·
-oksimba_1`), a `SKIP … — <type> soil, trees are left alone` line on the wood
-field, and the milk lines (`… read from here - none reports dirt`,
-`… cleaned in X.XXs`).
+new width line (`tool … — 3-wide …; rows every 30`), the Farm owner picker
+showing ONLY that owner's fields (`Field · Miou2251`), the equipment owner
+column (`· ZM80 = Tractor [spawned] · oksimba_1`), a
+`SKIP … — <type> soil, trees are left alone` line on the wood field, and the
+milk lines (`… read from here - none reports dirt`, `… cleaned in X.XXs`).
 
 ---
 
@@ -599,9 +616,11 @@ field, and the milk lines (`… read from here - none reports dirt`,
    check the `tool … — N-wide` line matches the real tool, and that a picked
    foreign farm actually accepts the drive-overs), v1.27 (owner-first
    equipment: check the owner column in the equipment log, and that a picked
-   farm's tractor/tool is the one mounted) and v1.28 (tree soil: the wood field
+   farm's tractor/tool is the one mounted), v1.28 (tree soil: the wood field
    must log `SKIP … — <type> soil, trees are left alone`, and a normal pass must
-   still harvest the crop field). Harness green ≠ game green.
+   still harvest the crop field) and v1.29 (one owner at a time: with a farm
+   picked, the tour must list ONLY that owner's fields and never mine). Harness
+   green ≠ game green.
 2. **The 24 % baseline may differ per build.** If stalls sit higher, the first
    pass logs `reads X% but the game offers no Clean there - the dirty line moves
    to X%` and then stops hopping. That is the designed self-correction, not a

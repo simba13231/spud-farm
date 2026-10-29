@@ -136,6 +136,13 @@ check("owner: the picked farm matches", SpudFarm.ownerWanted("bob", "me", "bob")
 check("owner: another owner does not", SpudFarm.ownerWanted("bob", "me", nil) == false)
 check("owner: a different pick does not", SpudFarm.ownerWanted("bob", "me", "alice") == false)
 check("owner: an unreadable owner never matches", SpudFarm.ownerWanted(nil, "me", "bob") == false)
+-- a picked farm must be worked ALONE: "it's using the player it's working
+-- for's equipment then going on it's own field" - my fields are not part of
+-- that tour, or the machinery and the soil disagree
+check("owner: my field does not match while bob is picked",
+    SpudFarm.ownerWanted("me", "me", "bob") == false)
+check("owner: a blank pick still means mine",
+    SpudFarm.ownerWanted("me", "me", "") == true)
 
 print(fails == 0 and "ALL OK" or (fails .. " FAILED"))
 """
