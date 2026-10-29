@@ -12,7 +12,7 @@ local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/release
     .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
     .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.27 · fluent gui"
+local VERSION    = "rebuild v1.28 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -3490,6 +3490,34 @@ local okBuild, errBuild = pcall(function()
         return nil
     end
 
+    -- ▸ TREE/WOOD SOIL IS NOT A CROP FIELD (user: "it's trying to harvest my
+    --   trees but i don't want to"). The harvest job treats any cell stage it
+    --   does not recognise as "a crop is standing", so a tree field gets driven
+    --   over and the harvester cuts the trees. The field's own type/name is the
+    --   readable signal we have: wood/tree/log/forest/timber/lumber/stump means
+    --   no crop harvest. Every pass logs the real type, so a build that names
+    --   its soil differently shows up in one run instead of failing silently.
+    function spudTreeField(typeName, modelName)
+        local words = { "wood", "tree", "timber", "log", "forest", "lumber", "sawmill", "stump" }
+        for _, raw in ipairs({ typeName, modelName }) do
+            local n = tostring(raw or ""):lower()
+            if n ~= "" and n ~= "?" then
+                for _, w in ipairs(words) do
+                    if n:find(w, 1, true) then return w end
+                end
+            end
+        end
+        return nil
+    end
+
+    -- ▸ EMPTY ≠ UNREADABLE (owner rule 7). countStages returns total = 0 only
+    --   when the game's cell read SUCCEEDED and the field holds no cells — that
+    --   is not a crop field and is skipped. A nil read (failed API, streamed
+    --   out) stays "unknown" and is never a reason to skip work.
+    function spudNoCells(st)
+        return type(st) == "table" and st.total ~= nil and st.total == 0
+    end
+
     -- world centers of every cell still at `stage` — §26 ground truth:
     -- GetCells is a dict keyed by id = x*128+y (1-based x/y), the grid is
     -- cols×rows of 10-stud tiles laid over the plate, and the plate is
@@ -3598,8 +3626,11 @@ local okBuild, errBuild = pcall(function()
         local needPlow, needCult, needSeed, needHarv =
             false, false, false, false
         for _, m in ipairs(crops) do
+            local treeWhy = spudTreeField(m.typeName, m.d.Name)
             local st = countStages(m.d)
-            if st and st.total > 0 then
+            if spudNoCells(st) then
+                log(m.d.Name .. ": 0 cells — not a crop field, skipped")
+            elseif st and st.total > 0 then
                 local bare, plowedN = st.Empty or 0, st.Plowed or 0
                 local cultN, seedN = st.Cultivated or 0, st.Seeded or 0
                 local grownN = whichNeed(JOBS[4], st) or 0
@@ -3619,11 +3650,19 @@ local okBuild, errBuild = pcall(function()
                 if bare > 0 then needPlow = true end
                 if plowedN > 0 then needCult = true end
                 if cultN > 0 then needSeed = true end
-                if grownN > 0 then needHarv = true end
+                if grownN > 0 then
+                    if treeWhy then
+                        log(string.format(
+                            "%s: %s soil — standing trees are left alone (no harvest)",
+                            m.d.Name, tostring(m.typeName)))
+                    else
+                        needHarv = true
+                    end
+                end
             else
                 log(m.d.Name .. ": cell count unavailable — treating as needing work")
                 needPlow, needCult, needSeed = true, true, true
-                needHarv = true -- unknown counts never skip the harvest
+                if not treeWhy then needHarv = true end
             end
         end
         return needPlow, needCult, needSeed, needHarv
@@ -5934,10 +5973,13 @@ local okBuild, errBuild = pcall(function()
             for _, grp in ipairs(groups) do
                 for _, m in ipairs(grp.fields) do
                     local st = countStages(m.d)
-                    -- unknown counts stay eligible (never skip on unknown)
-                    if not st or st.total == 0
-                        or (whichNeed(job, st) or 0) > 0 then
-                        anyNeed = true
+                    local treeWhy = job.selfPropelled
+                        and spudTreeField(m.typeName, m.d.Name) or nil
+                    if not (spudNoCells(st) or treeWhy) then
+                        -- unknown counts stay eligible (never skip on unknown)
+                        if not st or (whichNeed(job, st) or 0) > 0 then
+                            anyNeed = true
+                        end
                     end
                 end
             end
@@ -5990,7 +6032,14 @@ local okBuild, errBuild = pcall(function()
                     if stopping() then return false end
                     local st = countStages(m.d)
                     local need = st and whichNeed(job, st) or nil
-                    if st and st.total > 0 and need == 0 then
+                    local treeWhy = job.selfPropelled
+                        and spudTreeField(m.typeName, m.d.Name) or nil
+                    if spudNoCells(st) then
+                        log(string.format("SKIP %s — 0 cells, not a crop field", m.d.Name))
+                    elseif treeWhy then
+                        log(string.format("SKIP %s — %s soil, trees are left alone",
+                            m.d.Name, tostring(m.typeName)))
+                    elseif st and st.total > 0 and need == 0 then
                         log(string.format("SKIP %s — nothing needs %s (%d cells)",
                             m.d.Name, job.verb, st.total))
                     else
@@ -6067,8 +6116,13 @@ local okBuild, errBuild = pcall(function()
         local function needLeft(job)
             local cells, fields = 0, 0
             for _, m in ipairs(findMyFields(tr:GetPivot().Position)) do
-                local n = whichNeed(job, countStages(m.d))
-                if n and n > 0 then cells += n fields += 1 end
+                local st = countStages(m.d)
+                local treeWhy = job.selfPropelled
+                    and spudTreeField(m.typeName, m.d.Name) or nil
+                if not (spudNoCells(st) or treeWhy) then
+                    local n = whichNeed(job, st)
+                    if n and n > 0 then cells += n fields += 1 end
+                end
             end
             return cells, fields
         end
@@ -6113,10 +6167,13 @@ local okBuild, errBuild = pcall(function()
             local crops = findMyFields(tr:GetPivot().Position)
             local cells, fields = 0, 0
             for _, m in ipairs(crops) do
-                local n = whichNeed(JOBS[4], countStages(m.d))
-                if n and n > 0 then
-                    cells += n
-                    fields += 1
+                local st = countStages(m.d)
+                if not (spudNoCells(st) or spudTreeField(m.typeName, m.d.Name)) then
+                    local n = whichNeed(JOBS[4], st)
+                    if n and n > 0 then
+                        cells += n
+                        fields += 1
+                    end
                 end
             end
             return cells, fields
@@ -6310,7 +6367,7 @@ local okBuild, errBuild = pcall(function()
             local seeded, grown, total, seen = 0, 0, 0, {}
             for _, m in ipairs(crops) do
                 local st = countStages(m.d)
-                if st and st.total > 0 then
+                if st and st.total > 0 and not spudTreeField(m.typeName, m.d.Name) then
                     total += st.total
                     seeded += (st.Seeded or 0)
                     grown += (whichNeed(JOBS[4], st) or 0)

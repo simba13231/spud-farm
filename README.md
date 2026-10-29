@@ -37,6 +37,11 @@ Everything merged into one paste-and-run file:
   requirements · price-rotation tip), auto seed-loading during PLANT, Auto-Sell,
   Grow time slider, Skip Stage / Reset buttons, live status line,
   **live sell-price readout** (reads the in-game SellValueBoards every 3s)
+- **Trees are left alone** — the harvester never drives a field whose type or
+  model name says wood / tree / log / forest / timber / lumber / sawmill / stump,
+  so standing trees are not cut. A field whose cell read succeeds but returns
+  **0 cells** is also skipped (empty is not the same as unreadable). Every pass
+  prints the real field type, so a differently named soil shows up in the log.
 - **Pathfinding** — a top-level `SpudPath` engine (outside the 200-local build
   closure): binary-heap A* with a closed set, **Lazy Theta\*** any-angle routes,
   exact voxel line-of-sight, a cached and **height-aware** obstacle map, and
