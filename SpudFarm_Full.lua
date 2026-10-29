@@ -12,7 +12,7 @@ local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/release
     .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
     .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.30 · fluent gui"
+local VERSION    = "rebuild v1.31 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -1249,8 +1249,8 @@ local okBuild, errBuild = pcall(function()
         end)
         if ok and cur and max and max > 0 and cur >= max then
             watchHit = true
-            log(string.format("harvester hit capacity (%d/%d) while driving — stopping this leg to sell",
-                cur, max))
+            log(string.format("harvester hit capacity (%d/%d) while driving — stopping this leg%s",
+                cur, max, spudSellWired and " to sell" or ""))
         end
         return watchHit
     end
@@ -5355,6 +5355,18 @@ local okBuild, errBuild = pcall(function()
         return true
     end
 
+    -- ▸ FULL TANK STOPS THE RUN FOR NOW (user: "once the harvester is full just
+    --   make it stop because we dont have the spot yet"): the real drop-off is
+    --   the Fulfillment building next to Shipment, and its pad/lever is not
+    --   probed yet, so driving to a guessed pad only wastes the pass. Flip
+    --   spudSellWired to true in the change that wires the Fulfillment spot.
+    spudSellWired = false
+    function spudSellNow(cur, max)
+        if not spudSellWired then return false end
+        return type(cur) == "number" and type(max) == "number"
+            and max > 0 and cur >= max
+    end
+
     -- the whole trip: drive to a pad, sell, drive back to the field
     local function sellHarvester(ride, seat, field)
         local cur, max = harvesterLoad(ride)
@@ -5408,6 +5420,18 @@ local okBuild, errBuild = pcall(function()
         local cur, max = harvesterLoad(ride)
         if not (cur and max and max > 0) then return false, false end
         if cur < max then return false, false end
+        if not spudSellNow(cur, max) then
+            log(string.format(
+                "harvester is FULL (%d/%d%s) — stopping the run: the Fulfillment drop-off isn't wired yet",
+                cur, max, note and (", " .. note) or ""))
+            -- stop the farming loop the same way the toggle does
+            loopThread = nil
+            pcall(function()
+                local opt = Fluent.Options and Fluent.Options.farmingLoop
+                if opt then opt:SetValue(false) end
+            end)
+            return true, false
+        end
         log(string.format("harvester is FULL (%d/%d%s) — going to sell", cur, max,
             note and (", " .. note) or ""))
         local sold = sellHarvester(ride, seat, field)

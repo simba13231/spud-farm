@@ -43,6 +43,11 @@ Everything merged into one paste-and-run file:
   it re-centers instead of running parallel to it. If W can't finish a leg, the
   align mover takes over. Travel between fields is faster (**34 studs/s**,
   previously 24), and rows no longer use the old 10-stud/s mover cap.
+- **Full harvester stops** — when the tank fills, the run **stops** instead of
+  driving to a guessed sell pad: the real drop-off is the **Fulfillment**
+  building next to Shipment and its pad is not wired yet. The console says
+  `harvester is FULL (N/N) — stopping the run: the Fulfillment drop-off isn't
+  wired yet` and the Farm toggle switches itself off.
 - **Trees are left alone** — the harvester never drives a field whose type or
   model name says wood / tree / log / forest / timber / lumber / sawmill / stump,
   so standing trees are not cut. A field whose cell read succeeds but returns
