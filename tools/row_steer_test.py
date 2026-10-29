@@ -1,17 +1,19 @@
-"""Row steering decision for the field driver (spudRowSteer).
+"""Row steering decision for the field driver (spudRowSteer / spudRowNeedsAlign).
 
-The game auto-steers a tractor on its field, so the row should be driven on
-real W and only corrected when it is actually off course. Two failures came
-from the old steering:
+The game auto-steers a tractor on its field. Driving the row on real W and
+nudging A/D every tick to hug the line made the tractor swing side to side:
+the nudge and the game's own steering fought each other.
 
-  * heading error > 8 degrees -> steer toward the aim (unchanged);
-  * heading fine but the tractor sits 2.5+ studs BESIDE the row -> it never
-    re-centers, because zero heading error pressed no key at all.
+The rule now (user: "make it force the alignement then jus tgo straight and
+let the game do the ajustments"):
 
-`spudRowSteer(angDeg, crossY, cross, tol)` returns (left, right):
-  - a real heading error wins: crossY > 0 means the aim is to our left;
-  - otherwise a cross-track offset past `tol` steers back onto the row
-    (cross > 0 = we are left of the line, so steer right).
+  * ONE snap at the start of a leg - `spudRowNeedsAlign(angDeg, cross, tol)`
+    is true for a heading error over 8 degrees or a lateral offset past
+    `tol` (2.5 studs). The leg then starts exactly on the row, nose down it.
+  * After the snap no A/D is pressed; W holds and the game steers. A/D is
+    still used while swinging onto a row (a real heading error), where
+    `spudRowSteer(angDeg, crossY)` answers left/right - and answers "no key"
+    whenever the heading is fine, whatever the offset.
 
     python tools/row_steer_test.py [path-to-luau.exe]
 """
@@ -25,7 +27,7 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SRC = ROOT / "SpudFarm_Full.lua"
-WANTED = ["spudRowSteer"]
+WANTED = ["spudRowSteer", "spudRowNeedsAlign"]
 
 
 def extract(text: str, name: str) -> str:
@@ -46,26 +48,31 @@ local function check(name, ok, detail)
         detail and ("  " .. detail) or ""))
 end
 
-local function keys(a, cy, c, tol)
-    local l, r = spudRowSteer(a, cy, c, tol)
+local function keys(a, cy)
+    local l, r = spudRowSteer(a, cy)
     return (l and "L" or "") .. (r and "R" or "")
 end
 
 -- 1. a real heading error steers toward the aim
-check("20deg, aim left  -> left", keys(20, 1, 0) == "L", keys(20, 1, 0))
-check("20deg, aim right -> right", keys(20, -1, 0) == "R", keys(20, -1, 0))
-check("20deg, aim dead ahead -> no key", keys(20, 0, 0) == "", keys(20, 0, 0))
+check("20deg, aim left  -> left", keys(20, 1) == "L", keys(20, 1))
+check("20deg, aim right -> right", keys(20, -1) == "R", keys(20, -1))
+check("20deg, aim dead ahead -> no key", keys(20, 0) == "", keys(20, 0))
 
--- 2. heading fine: cross-track re-centers
-check("straight, 5 studs left of row -> right", keys(2, 0, 5) == "R", keys(2, 0, 5))
-check("straight, 5 studs right of row -> left", keys(2, 0, -5) == "L", keys(2, 0, -5))
-check("straight, 1 stud left -> deadband, no key", keys(2, 0, 1) == "", keys(2, 0, 1))
-check("straight, exactly at tol -> no key", keys(2, 0, 2.5) == "", keys(2, 0, 2.5))
-check("custom tol: 3 studs inside a 4-stud tol -> no key", keys(2, 0, 3, 4) == "", keys(2, 0, 3, 4))
+-- 2. heading fine: NO key at all - the game holds the line
+check("straight, aim left -> no key", keys(2, 1) == "", keys(2, 1))
+check("straight, aim right -> no key", keys(2, -1) == "", keys(2, -1))
+check("exactly 8deg -> no key", keys(8, 1) == "", keys(8, 1))
+check("9deg -> steers", keys(9, 1) == "L", keys(9, 1))
 
--- 3. the heading correction is not overridden by a cross offset
-check("15deg left aim with a right offset still steers left", keys(15, 1, -8) == "L",
-    keys(15, 1, -8))
+-- 3. the one-shot alignment decision
+check("aligned: nothing to do", spudRowNeedsAlign(0, 0) == false)
+check("aligned inside the deadband", spudRowNeedsAlign(2, 2.4) == false)
+check("beside the row -> snap", spudRowNeedsAlign(2, 2.6) == true)
+check("heading error -> snap", spudRowNeedsAlign(9, 0) == true)
+check("8deg is not an error", spudRowNeedsAlign(8, 2.0) == false)
+check("custom tol: 5 inside 6", spudRowNeedsAlign(0, 5, 6) == false)
+check("custom tol: 7 outside 6", spudRowNeedsAlign(0, 7, 6) == true)
+check("nil-safe: no readings -> no snap", spudRowNeedsAlign(nil, nil) == false)
 
 print(fails == 0 and "ALL OK" or (fails .. " FAILED"))
 """

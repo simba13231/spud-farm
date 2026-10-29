@@ -12,7 +12,7 @@ local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/release
     .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
     .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.34 · fluent gui"
+local VERSION    = "rebuild v1.35 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -4639,18 +4639,26 @@ local okBuild, errBuild = pcall(function()
     --   Returns true = row done, false = W didn't move it (caller falls back to
     --   the seat throttle), nil = stopped.
     -- ▸ ROW STEERING DECISION (user: "when you drive there is like a game
-    --   helper that auto re steers the tractor on course"): the game holds the
-    --   heading on a field, so the driver only corrects a real heading error —
-    --   plus the part the game leaves: a parallel offset from the row. Before
-    --   this, zero heading error pressed no key at all, so a tractor sitting
-    --   2-6 studs beside the row never re-centered. Returns left, right.
-    function spudRowSteer(angDeg, crossY, cross, tol)
-        tol = tol or 2.5
+    --   helper that auto re steers the tractor on course"). A/D is only for
+    --   swinging the nose onto a row: a real heading error steers toward the
+    --   aim. With the heading fine it presses NOTHING — the game holds the
+    --   line. Returns left, right.
+    function spudRowSteer(angDeg, crossY)
         if (angDeg or 0) > 8 then
             return (crossY or 0) > 0, (crossY or 0) < 0
         end
-        local c = cross or 0
-        return c < -tol, c > tol
+        return false, false
+    end
+
+    -- ▸ FORCE THE ALIGNMENT ONCE (user: "make it force the alignement then jus
+    --   tgo straight and let the game do the ajustments"). Nudging A/D every
+    --   tick to hug the row made the tractor swing side to side: the nudge and
+    --   the game's own steering fought each other. Instead the leg is snapped
+    --   onto its row line before W goes down (heading error > 8 deg or a
+    --   lateral offset > tol), and after that only W is held.
+    function spudRowNeedsAlign(angDeg, cross, tol)
+        tol = tol or 2.5
+        return (angDeg or 0) > 8 or math.abs(cross or 0) > tol
     end
 
     local function keyRow(tr, seat, from, goal, who)
@@ -4678,6 +4686,28 @@ local okBuild, errBuild = pcall(function()
         local deadline = os.clock() + 12 + legLen / 4
         releaseDriveKeys()
         claimOwnership(tr)
+        -- ▸ THE ONE SNAP. Put the ride exactly on the row line, nose down the
+        --   row, before any throttle: after this the leg is a straight W hold.
+        --   Only on a REAL ROW (>= 20 studs) and only when it is off (8 deg /
+        --   2.5 studs) — the short Omega turn legs keep their swing-through
+        --   (user: "keep going on the angle"). Waits two frames so the move
+        --   reaches the server before W goes down.
+        do
+            local cf0 = tr:GetPivot()
+            local p0 = cf0.Position
+            local off0 = Vector3.new(p0.X, 0, p0.Z) - A
+            local cross0 = off0:Dot(perp)
+            local flat0 = Vector3.new(cf0.LookVector.X, 0, cf0.LookVector.Z)
+            flat0 = flat0.Magnitude > 0.1 and flat0.Unit or dir
+            local ang0 = math.deg(math.acos(math.clamp(flat0:Dot(dir), -1, 1)))
+            if legLen >= 20 and spudRowNeedsAlign(ang0, cross0) then
+                tr:PivotTo(CFrame.lookAt(Vector3.new(A.X, y0, A.Z),
+                    Vector3.new(B.X, y0, B.Z)))
+                task.wait(0.15)
+                stallP, startP = tr:GetPivot().Position, tr:GetPivot().Position
+                stallT, startT = os.clock(), os.clock()
+            end
+        end
         while os.clock() < deadline do
             if stopping() then releaseDriveKeys() return nil end
             -- ▸ "full" is its OWN signal. It used to return false, which the
@@ -4687,7 +4717,7 @@ local okBuild, errBuild = pcall(function()
             local cf = tr:GetPivot()
             local p = cf.Position
             local rel = Vector3.new(p.X, 0, p.Z) - A
-            local along, cross = rel:Dot(dir), rel:Dot(perp)
+            local along = rel:Dot(dir)
             local remaining = legLen - along
             -- movement bookkeeping happens EVERY tick, whatever phase we are in
             if (p - stallP).Magnitude > 0.6 then
@@ -4723,7 +4753,7 @@ local okBuild, errBuild = pcall(function()
                     --   game's own controller turn the wheels — the arc is real,
                     --   the harvest keeps counting, and W stays down so it never
                     --   stops (user: "keep going on the angle").
-                    local left, right = spudRowSteer(math.deg(ang), crossY, cross)
+                    local left, right = spudRowSteer(math.deg(ang), crossY)
                     setKey(KEY_A, left)
                     setKey(KEY_D, right)
                 else
@@ -4742,12 +4772,13 @@ local okBuild, errBuild = pcall(function()
                 end
             else
                 turnSince = nil
-                -- heading is fine; re-center when the tractor sits beside the
-                -- row (the game helper holds the course, this fixes the offset
-                -- it leaves — the old code pressed no key at all here)
-                local left, right = spudRowSteer(math.deg(ang), 0, cross)
-                setKey(KEY_A, left)
-                setKey(KEY_D, right)
+                -- ▸ GO STRAIGHT (user: "jus tgo straight and let the game do
+                --   the ajustments"): the leg was snapped onto the row before
+                --   W went down, so there is nothing to nudge — the game's own
+                --   steering holds the line. The old per-tick cross-track A/D
+                --   here was the side-to-side.
+                setKey(KEY_A, false)
+                setKey(KEY_D, false)
                 local wantW = remaining > BRAKE
                 if wantW then
                     -- W ignored entirely (from a standstill)? fall back
@@ -5613,10 +5644,11 @@ local okBuild, errBuild = pcall(function()
             --   let the game's thing that focuses is on the field do its
             --   thing"): the game's own controller auto-steers a tractor on its
             --   field, so the row is driven on real W exactly like the
-            --   harvester's rows — with spudRowSteer only correcting a real
-            --   heading error and a parallel offset (the part the game helper
-            --   leaves, and the "it does not re-center" report). The align
-            --   mover stays as the fallback for a leg the keys cannot finish.
+            --   harvester's rows. keyRow snaps the leg onto the row ONCE and
+            --   then holds W only (user: "force the alignement then jus tgo
+            --   straight") — no A/D nudge loop, which is what made it swing
+            --   side to side. The align mover stays as the fallback for a leg
+            --   the keys cannot finish.
             if realDrive ~= false then
                 local keyed = keyRow(tr, seat, from, goal, "tractor")
                 if keyed == nil then return nil end

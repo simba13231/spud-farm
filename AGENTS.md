@@ -8,7 +8,7 @@ asked and fixed, and the exact loop to prove a change works.
 description — it is the long-form manual and it is kept in sync with behaviour.
 
 - Main script: [SpudFarm_Full.lua](SpudFarm_Full.lua) — one paste-and-run Luau
-  file for the Roblox game *Farming and Friends*, currently `rebuild v1.34 ·
+  file for the Roblox game *Farming and Friends*, currently `rebuild v1.35 ·
   fluent gui` (`VERSION`, line 9). ≈11.4k lines.
 - Target: Windows + Git Bash. Luau toolchain lives in
   `%LOCALAPPDATA%\Temp\opencode\luau\` (`luau.exe`, `luau-compile.exe`,
@@ -72,7 +72,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 ### 1.4 Script limits (these have broken the build before)
 
 13. **Luau's 200-local limit is real and we are 2 away from the practical
-    ceiling.** Run `python tools/local_budget.py`. As of v1.34:
+    ceiling.** Run `python tools/local_budget.py`. As of v1.35:
     `4-space locals before milkCycle: 183 (practical ceiling 185)`,
     whole body `190 / 200`, **headroom 2**. Do **not** add a `local` inside the
     main build closure. Reuse an existing local, convert the feature to a
@@ -105,7 +105,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 
 ### 1.6 Working tree state (read before editing)
 
-`HEAD` is the latest committed build (v1.34, no foreign respawns), `main`
+`HEAD` is the latest committed build (v1.35, snap-then-straight rows), `main`
 tracks `origin/main`, and the tree is clean. Keep it that way: make the change,
 run the gates, and commit only the files the change touches. `git add -A` is
 banned here. **Commit and push after every completed change** (owner's standing
@@ -139,10 +139,10 @@ The one command that runs everything — compile, budget, name audit and every
 harness, checking both the exit code and the text — is:
 
 ```bash
-python tools/run_all.py        # 27/27 checks on v1.34
+python tools/run_all.py        # 27/27 checks on v1.35
 ```
 
-Last full run (v1.34): **27/27 checks passed** (24 harnesses + 3 gates).
+Last full run (v1.35): **27/27 checks passed** (24 harnesses + 3 gates).
 
 | Script | What it actually proves |
 |---|---|
@@ -165,7 +165,7 @@ Last full run (v1.34): **27/27 checks passed** (24 harnesses + 3 gates).
 | `farm_width_test.py` | Working width and row plan: studs→tiles rounding, oriented-box union width, rotated bars, 1/2/3-wide plans (step, headland, row half-extent) and an interval-coverage proof on 100/200-stud and narrow fields; owner match rules. |
 | `equip_owner_test.py` | Whose tractor/tool is picked: the farm being worked first, mine next, an unreadable owner after that, a stranger's never; stored machines are reported for spawning; the implement distance/basis stay honest. |
 | `field_soil_test.py` | Tree/wood field types and names are never crop-harvest targets; a successful cell read with 0 cells is empty (skipped), while a failed read stays unknown (never a skip reason). |
-| `row_steer_test.py` | The row steering decision: a real heading error steers toward the aim, a parallel offset beyond 2.5 studs re-centers onto the row, and a small offset inside the deadband presses nothing. |
+| `row_steer_test.py` | The row decision: `spudRowNeedsAlign` asks for ONE snap when the heading is off by >8° or the ride sits >2.5 studs beside the row, and `spudRowSteer` presses nothing once the heading is fine (only a real heading error steers) — no per-tick nudge to oscillate. |
 | `foreign_respawn_test.py` | `spudMayRespawn()` is false while a Farm owner is picked, and `ensureToolNearby` then never calls `respawnTool`: a stored or far-away tool is named and the pass is skipped, while `(mine)` still respawns. |
 | `dropoff_test.py` | The full-tank gate follows the Farm tab's Drop-off pick: a full tank unloads with Fulfillment or Sell chosen, a half tank works on, an unknown/nil destination never moves; the Fulfillment pad is read from `Stores.DropOffs` (Deposit_Warehouse preferred over Withdraw_Warehouse), aimed at its top surface, and an unstreamed/empty folder returns no pad instead of a guess. |
 | `stall_probe_test.py` | The stall probe's report shape (it must name every dirt candidate and count visible stains). |
@@ -451,11 +451,17 @@ pure-pursuit aim corrected **heading only** — a tractor parallel to the row bu
 - Rows are now driven on **real W** (`keyRow`, the driver the harvester already
   used), so the game's controller does the steering. `keyRow(tr, seat, from,
   goal, who)` gained the `who` label so the log says `tractor:` as well.
-- `spudRowSteer(angDeg, crossY, cross, tol)` decides the A/D nudge: a heading
-  error > **8°** steers toward the aim (unchanged); otherwise a cross-track
-  offset > **2.5 studs** steers back onto the row (`cross > 0` = left of the
-  line → steer right). Inside the deadband it presses nothing and lets the game
-  hold the course.
+- **v1.35 — snap once, then go straight** (user: *"it is still going back and
+  fourth bro like side to side, make it force the alignement then jus tgo
+  straight and let the game do the ajustments"*). The per-tick cross-track A/D
+  nudge was fighting the game's steering, which is the side-to-side. Now, at
+  the start of a **row** (leg ≥ 20 studs) `keyRow` snaps the ride onto the row
+  line with `CFrame.lookAt` when `spudRowNeedsAlign(angDeg, cross, tol)` says
+  it is off (**heading > 8° or |cross| > 2.5 studs**), waits 0.15 s for the
+  move to reach the server, and then holds **W only** for the rest of the leg.
+  `spudRowSteer(angDeg, crossY)` is now heading-only: A/D is pressed to swing
+  the nose onto a row, and **nothing** while the heading is fine. Short Omega
+  turn legs (< 20 studs) keep the swing-through from v1.30.
 - Travel speed `ALIGN_MAXVEL` is **34 studs/s** (was 24). The align mover is now
   only the row **fallback** (`math.min(HARVEST_TWEEN_SPEED + 8, ALIGN_MAXVEL)` =
   18), so a plow doesn't snag at travel speed; the old 10-stud/s mover cap no
@@ -742,8 +748,17 @@ tractor past `RESPAWN_RANGE`, and `ensureToolNearby`); each one now logs the
 machine, why (stored / N studs away) and that `(mine)` is how to spawn it.
 New `foreign_respawn_test.py` (14 checks); suite **27/27**.
 
-**Where it stands:** `rebuild v1.34 · fluent gui`, whole suite green (27/27),
-harness verified. **Not yet reloaded in game** after v1.22–v1.34 — the next real
+**"it is still going back and fourth bro like side to side, make it force the
+alignement then jus tgo straight and let the game do the ajustments"** → v1.35.
+The cross-track A/D nudge added in v1.30 was re-centering every 100 ms and
+fighting the game's own steering — a visible side-to-side on every row. Now the
+row is **snapped onto its line once** (`spudRowNeedsAlign`: heading > 8° or
+offset > 2.5 studs, rows ≥ 20 studs only) and then driven with **W alone**;
+`spudRowSteer` is heading-only, so a straight tractor presses no key. Short
+Omega turns keep swinging through. `row_steer_test.py` rewritten (15 checks).
+
+**Where it stands:** `rebuild v1.35 · fluent gui`, whole suite green (27/27),
+harness verified. **Not yet reloaded in game** after v1.22–v1.35 — the next real
 test is a live pass watching `path: … theta* N pops / N ms, min clear N`, the
 new width line (`tool … — 3-wide …; rows every 30`), the Farm owner picker
 showing ONLY that owner's fields (`Field · Miou2251`), the equipment owner
@@ -779,7 +794,9 @@ being driven on W with the tractor re-centering after a drift, the
    (the Drop-off pick: a full tank must hop to the chosen pad and the tank must
    drop; if it does not, the log names the pad and whether a menu opened) and
    v1.34 (a picked farm: no `Equipment Manager` line may appear for a stored or
-   far machine — the run must name it and stop/skip instead).
+   far machine — the run must name it and stop/skip instead) and v1.35 (rows:
+   no side-to-side — the tractor may snap once onto the row and must then run
+   straight with the game's own steering holding it).
    Harness green ≠ game green.
 2. **The 24 % baseline may differ per build.** If stalls sit higher, the first
    pass logs `reads X% but the game offers no Clean there - the dirty line moves

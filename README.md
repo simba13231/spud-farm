@@ -38,11 +38,12 @@ Everything merged into one paste-and-run file:
   Grow time slider, Skip Stage / Reset buttons, live status line,
   **live sell-price readout** (reads the in-game SellValueBoards every 3s)
 - **Field driving** — rows are driven on real **W**, so the game's own
-  auto-steer holds the tractor on course; the script only nudges A/D for a real
-  heading error (>8°) or when the tractor sits **>2.5 studs beside the row**, so
-  it re-centers instead of running parallel to it. If W can't finish a leg, the
-  align mover takes over. Travel between fields is faster (**34 studs/s**,
-  previously 24), and rows no longer use the old 10-stud/s mover cap.
+  auto-steer holds the tractor on course. At the start of each row the ride is
+  **snapped once** onto the row line (only when it is off by >8° or >2.5 studs
+  beside it), then it just goes straight: no A/D nudging, so there is no
+  side-to-side wobble fighting the game's steering. A/D only swings the nose
+  onto a row. If W can't finish a leg, the align mover takes over. Travel
+  between fields is faster (**34 studs/s**, previously 24).
 - **Drop-off pick** — Farm tab → **Drop-off**: **Fulfillment** (default) or
   **Sell**. When the harvester's tank fills, it stops the row, arc-hops to the
   chosen pad, and unloads: Fulfillment is the warehouse pad
