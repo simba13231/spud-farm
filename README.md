@@ -43,8 +43,11 @@ Everything merged into one paste-and-run file:
   more than **15°** or the ride sits more than **6 studs** beside it, then it
   just goes straight — no A/D nudging, so nothing fights the game's steering.
   Steering itself has hysteresis (engage past 15°, release inside 7.5°), so the
-  boundary can't flip A/D back and forth. If W can't finish a leg, the align
-  mover takes over. Travel between fields is **34 studs/s**.
+  boundary can't flip A/D back and forth. If the steering still swings, the row
+  **slows itself down**: three direction changes take a step off the throttle
+  (never below 30 %), and every steady 3 s gives a step back — so a wobbling row
+  settles into a slow straight pass. If W can't finish a leg, the align mover
+  takes over. Travel between fields is **34 studs/s**.
 - **Drop-off pick** — Farm tab → **Drop-off**: **Fulfillment** (default) or
   **Sell**. When the harvester's tank fills, it stops the row, arc-hops to the
   chosen pad, and unloads: Fulfillment is the warehouse pad

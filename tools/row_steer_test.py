@@ -30,7 +30,7 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SRC = ROOT / "SpudFarm_Full.lua"
-WANTED = ["spudRowSteer", "spudRowNeedsAlign"]
+WANTED = ["spudRowSteer", "spudRowNeedsAlign", "spudRowEase"]
 
 
 def extract(text: str, name: str) -> str:
@@ -79,6 +79,17 @@ check("15deg is the edge, not an error", spudRowNeedsAlign(15, 2.0) == false)
 check("custom tol: 5 inside 6", spudRowNeedsAlign(0, 5, 6) == false)
 check("custom tol: 7 outside 6", spudRowNeedsAlign(0, 7, 6) == true)
 check("nil-safe: no readings -> no snap", spudRowNeedsAlign(nil, nil) == false)
+
+-- 4. throttle easing: swinging back and forth slows the row down
+local function near(a, b) return math.abs(a - b) < 1e-9 end
+check("swinging: 100% -> 70%", near(spudRowEase(1.0, 3, 0), 0.7), tostring(spudRowEase(1.0, 3, 0)))
+check("swinging again: 70% -> 49%", near(spudRowEase(0.7, 4, 0), 0.49), tostring(spudRowEase(0.7, 4, 0)))
+check("floor: never below 30%", near(spudRowEase(0.4, 3, 0), 0.3), tostring(spudRowEase(0.4, 3, 0)))
+check("floor holds at the bottom", near(spudRowEase(0.3, 9, 0), 0.3), tostring(spudRowEase(0.3, 9, 0)))
+check("steady 3 s: speeds back up one step", near(spudRowEase(0.7, 0, 3), 0.8), tostring(spudRowEase(0.7, 0, 3)))
+check("steady: never above 100%", near(spudRowEase(0.95, 0, 5), 1.0), tostring(spudRowEase(0.95, 0, 5)))
+check("a single flip changes nothing", near(spudRowEase(0.7, 1, 1), 0.7), tostring(spudRowEase(0.7, 1, 1)))
+check("nil-safe: full throttle", near(spudRowEase(nil, nil, nil), 1.0), tostring(spudRowEase(nil, nil, nil)))
 
 print(fails == 0 and "ALL OK" or (fails .. " FAILED"))
 """

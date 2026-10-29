@@ -12,7 +12,7 @@ local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/release
     .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
     .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.36 · fluent gui"
+local VERSION    = "rebuild v1.37 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -4668,6 +4668,23 @@ local okBuild, errBuild = pcall(function()
         return (angDeg or 0) > (spudRowAng or 15) or math.abs(cross or 0) > tol
     end
 
+    -- ▸ SLOW DOWN WHEN THE STEERING SWINGS (user: "if it keeps going back and
+    --   fourth with the seering make it slowly go slower bro"). `level` is the
+    --   row's throttle duty (0.3–1). Three direction changes inside a window
+    --   take a step off it (×0.7, never below 0.3); three steady seconds earn
+    --   a step back (+0.1, never above 1). The game's steering gets an easier
+    --   job at a lower speed, which is what actually stops the swing.
+    function spudRowEase(level, flips, steadyFor)
+        level = level or 1
+        if (flips or 0) >= 3 then
+            return math.max(0.3, level * 0.7)
+        end
+        if (steadyFor or 0) >= 3 then
+            return math.min(1, level + 0.1)
+        end
+        return level
+    end
+
     local function keyRow(tr, seat, from, goal, who)
         who = who or "harvester"
         local y0 = tr:GetPivot().Position.Y
@@ -4691,6 +4708,8 @@ local okBuild, errBuild = pcall(function()
         local startP, startT = stallP, stallT
         local turnSince, stalls = nil, 0
         local steerRow = false
+        -- throttle duty (1 = W held), the steering-swing bookkeeping behind it
+        local thr, flipN, steadyAt, lastDir = 1, 0, os.clock(), 0
         local deadline = os.clock() + 12 + legLen / 4
         releaseDriveKeys()
         claimOwnership(tr)
@@ -4745,6 +4764,26 @@ local okBuild, errBuild = pcall(function()
             elseif ang <= math.rad(spudRowAng or 15) * 0.5 then
                 steerRow = false
             end
+            -- ▸ EASE OFF WHEN THE STEERING SWINGS (see spudRowEase): three
+            --   direction changes inside the window take a step off the
+            --   throttle, three steady seconds earn one back. A slower row
+            --   gives the game's steering an easier job.
+            local nowT = os.clock()
+            if flipN >= 3 then
+                local before = thr
+                thr = spudRowEase(thr, flipN, 0)
+                flipN, steadyAt = 0, nowT
+                if thr < before then
+                    log(string.format("%s: steering is swinging — easing the row to %d%% throttle",
+                        who, math.floor(thr * 100 + 0.5)))
+                end
+            elseif nowT - steadyAt >= 3 then
+                thr = spudRowEase(thr, 0, nowT - steadyAt)
+                steadyAt = nowT
+            end
+            -- a reduced throttle is a duty cycle on W: 4 pulses a second, on
+            -- for `thr` of each. At 100 % W is simply held.
+            local duty = thr >= 1 or (nowT * 4) % 1 < thr
             if steerRow then
                 -- ▸ KEEP GOING THROUGH THE CORNER (user: "instead of making it
                 --   stop at corners just make it keep going on the angle"):
@@ -4759,7 +4798,7 @@ local okBuild, errBuild = pcall(function()
                     releaseDriveKeys()
                     return "jammed"
                 end
-                setKey(KEY_W, remaining > BRAKE)
+                setKey(KEY_W, remaining > BRAKE and duty)
                 local turnT = os.clock() - turnSince
                 local crossY = flat:Cross(dir).Y -- > 0 = the aim is to our LEFT
                 if turnT < 2.0 then
@@ -4773,6 +4812,13 @@ local okBuild, errBuild = pcall(function()
                     local left, right = spudRowSteer(math.deg(ang), crossY)
                     setKey(KEY_A, left)
                     setKey(KEY_D, right)
+                    -- count direction changes: the same side twice is a
+                    -- correction, left-then-right-then-left is a swing
+                    local sgn = left and -1 or (right and 1 or 0)
+                    if sgn ~= 0 then
+                        if lastDir ~= 0 and sgn ~= lastDir then flipN += 1 end
+                        lastDir = sgn
+                    end
                 else
                     -- keys aren't bringing it round (fence, or the game ignored
                     -- the steer input): finish the swing by hand
@@ -4829,7 +4875,7 @@ local okBuild, errBuild = pcall(function()
                         break
                     end
                 end
-                setKey(KEY_W, wantW)
+                setKey(KEY_W, wantW and duty)
             end
             task.wait(0.1)
         end

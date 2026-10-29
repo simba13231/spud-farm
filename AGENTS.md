@@ -8,7 +8,7 @@ asked and fixed, and the exact loop to prove a change works.
 description — it is the long-form manual and it is kept in sync with behaviour.
 
 - Main script: [SpudFarm_Full.lua](SpudFarm_Full.lua) — one paste-and-run Luau
-  file for the Roblox game *Farming and Friends*, currently `rebuild v1.36 ·
+  file for the Roblox game *Farming and Friends*, currently `rebuild v1.37 ·
   fluent gui` (`VERSION`, line 9). ≈11.4k lines.
 - Target: Windows + Git Bash. Luau toolchain lives in
   `%LOCALAPPDATA%\Temp\opencode\luau\` (`luau.exe`, `luau-compile.exe`,
@@ -72,7 +72,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 ### 1.4 Script limits (these have broken the build before)
 
 13. **Luau's 200-local limit is real and we are 2 away from the practical
-    ceiling.** Run `python tools/local_budget.py`. As of v1.36:
+    ceiling.** Run `python tools/local_budget.py`. As of v1.37:
     `4-space locals before milkCycle: 183 (practical ceiling 185)`,
     whole body `190 / 200`, **headroom 2**. Do **not** add a `local` inside the
     main build closure. Reuse an existing local, convert the feature to a
@@ -105,7 +105,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 
 ### 1.6 Working tree state (read before editing)
 
-`HEAD` is the latest committed build (v1.36, wide row band), `main`
+`HEAD` is the latest committed build (v1.37, swing easing), `main`
 tracks `origin/main`, and the tree is clean. Keep it that way: make the change,
 run the gates, and commit only the files the change touches. `git add -A` is
 banned here. **Commit and push after every completed change** (owner's standing
@@ -139,10 +139,10 @@ The one command that runs everything — compile, budget, name audit and every
 harness, checking both the exit code and the text — is:
 
 ```bash
-python tools/run_all.py        # 27/27 checks on v1.36
+python tools/run_all.py        # 27/27 checks on v1.37
 ```
 
-Last full run (v1.36): **27/27 checks passed** (24 harnesses + 3 gates).
+Last full run (v1.37): **27/27 checks passed** (24 harnesses + 3 gates).
 
 | Script | What it actually proves |
 |---|---|
@@ -165,7 +165,7 @@ Last full run (v1.36): **27/27 checks passed** (24 harnesses + 3 gates).
 | `farm_width_test.py` | Working width and row plan: studs→tiles rounding, oriented-box union width, rotated bars, 1/2/3-wide plans (step, headland, row half-extent) and an interval-coverage proof on 100/200-stud and narrow fields; owner match rules. |
 | `equip_owner_test.py` | Whose tractor/tool is picked: the farm being worked first, mine next, an unreadable owner after that, a stranger's never; stored machines are reported for spawning; the implement distance/basis stay honest. |
 | `field_soil_test.py` | Tree/wood field types and names are never crop-harvest targets; a successful cell read with 0 cells is empty (skipped), while a failed read stays unknown (never a skip reason). |
-| `row_steer_test.py` | The row decision in the wide band: `spudRowNeedsAlign` asks for ONE snap only past `spudRowAng` (15°) or `spudRowTol` (6 studs), and `spudRowSteer` presses nothing inside that band — only a bigger heading error steers. |
+| `row_steer_test.py` | The row decision in the wide band: `spudRowNeedsAlign` asks for ONE snap only past `spudRowAng` (15°) or `spudRowTol` (6 studs); `spudRowSteer` presses nothing inside the band; `spudRowEase` takes a step off the throttle after three steering flips (×0.7, floor 30 %) and gives one back per steady 3 s. |
 | `foreign_respawn_test.py` | `spudMayRespawn()` is false while a Farm owner is picked, and `ensureToolNearby` then never calls `respawnTool`: a stored or far-away tool is named and the pass is skipped, while `(mine)` still respawns. |
 | `dropoff_test.py` | The full-tank gate follows the Farm tab's Drop-off pick: a full tank unloads with Fulfillment or Sell chosen, a half tank works on, an unknown/nil destination never moves; the Fulfillment pad is read from `Stores.DropOffs` (Deposit_Warehouse preferred over Withdraw_Warehouse), aimed at its top surface, and an unstreamed/empty folder returns no pad instead of a guess. |
 | `stall_probe_test.py` | The stall probe's report shape (it must name every dirt candidate and count visible stains). |
@@ -469,6 +469,14 @@ pure-pursuit aim corrected **heading only** — a tractor parallel to the row bu
   **hysteresis**: steering starts past 15° and only stops once the nose is back
   inside half that band, so a nose wobbling around one threshold can no longer
   flip A/D/A/D.
+- **v1.37 — a swinging row slows itself down** (user: *"if it keeps going back
+  and fourth with the seering make it slowly go slower bro"*). `keyRow` counts
+  steering **direction changes**; three of them take a step off the row's
+  throttle through `spudRowEase(level, flips, steadyFor)` (×0.7, never below
+  **0.3**), and every steady **3 s** earns +0.1 back (never above 1). A reduced
+  throttle is a duty cycle on W (4 pulses a second), because the key API has no
+  analogue input. So an oscillating row converges to a slow, steady pass instead
+  of a fast wobble.
 - Travel speed `ALIGN_MAXVEL` is **34 studs/s** (was 24). The align mover is now
   only the row **fallback** (`math.min(HARVEST_TWEEN_SPEED + 8, ALIGN_MAXVEL)` =
   18), so a plow doesn't snag at travel speed; the old 10-stud/s mover cap no
@@ -771,8 +779,15 @@ game's steering: 8° / 2.5 studs. It is now `spudRowAng = 15` and
 release inside 7.5°) so the boundary cannot flip A/D back and forth. Both are
 globals, so they can be retuned without touching the loop.
 
-**Where it stands:** `rebuild v1.36 · fluent gui`, whole suite green (27/27),
-harness verified. **Not yet reloaded in game** after v1.22–v1.36 — the next real
+**"if it keeps going back and fourth with the seering make it slowly go slower
+bro"** → v1.37. The throttle now eases itself: `spudRowEase` counts steering
+flips, drops the row's duty to 70 % of what it was on the third flip (floor
+30 %), and restores 10 % per steady 3 s. W is pulsed at 4 Hz when the duty is
+below 100 %, so "slower" is real rather than a no-op. `row_steer_test.py` grew
+to 23 checks.
+
+**Where it stands:** `rebuild v1.37 · fluent gui`, whole suite green (27/27),
+harness verified. **Not yet reloaded in game** after v1.22–v1.37 — the next real
 test is a live pass watching `path: … theta* N pops / N ms, min clear N`, the
 new width line (`tool … — 3-wide …; rows every 30`), the Farm owner picker
 showing ONLY that owner's fields (`Field · Miou2251`), the equipment owner
@@ -810,8 +825,10 @@ being driven on W with the tractor re-centering after a drift, the
    v1.34 (a picked farm: no `Equipment Manager` line may appear for a stored or
    far machine — the run must name it and stop/skip instead), v1.35 (rows: no
    side-to-side — the tractor may snap once onto the row and must then run
-   straight with the game's own steering holding it) and v1.36 (the 15°/6-stud
-   band: a row should now tolerate a visible drift without touching A/D).
+   straight with the game's own steering holding it), v1.36 (the 15°/6-stud
+   band: a row should now tolerate a visible drift without touching A/D) and
+   v1.37 (a swinging row: watch for `steering is swinging — easing the row to
+   N% throttle` and whether the wobble settles at the lower duty).
    Harness green ≠ game green.
 2. **The 24 % baseline may differ per build.** If stalls sit higher, the first
    pass logs `reads X% but the game offers no Clean there - the dirty line moves
