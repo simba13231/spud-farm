@@ -37,6 +37,12 @@ Everything merged into one paste-and-run file:
   requirements · price-rotation tip), auto seed-loading during PLANT, Auto-Sell,
   Grow time slider, Skip Stage / Reset buttons, live status line,
   **live sell-price readout** (reads the in-game SellValueBoards every 3s)
+- **Field driving** — rows are driven on real **W**, so the game's own
+  auto-steer holds the tractor on course; the script only nudges A/D for a real
+  heading error (>8°) or when the tractor sits **>2.5 studs beside the row**, so
+  it re-centers instead of running parallel to it. If W can't finish a leg, the
+  align mover takes over. Travel between fields is faster (**34 studs/s**,
+  previously 24), and rows no longer use the old 10-stud/s mover cap.
 - **Trees are left alone** — the harvester never drives a field whose type or
   model name says wood / tree / log / forest / timber / lumber / sawmill / stump,
   so standing trees are not cut. A field whose cell read succeeds but returns

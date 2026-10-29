@@ -12,7 +12,7 @@ local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/release
     .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
     .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.29 · fluent gui"
+local VERSION    = "rebuild v1.30 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -2877,7 +2877,7 @@ local okBuild, errBuild = pcall(function()
     --   (creep while correcting, the key driver's rule). Note: writing the
     --   chassis CFrame every frame was REJECTED — physics dies and the towed
     --   tool jackknifes.
-    local ALIGN_MAXVEL = 24 -- studs/s
+    local ALIGN_MAXVEL = 34 -- studs/s — travel between fields (user: "make it go faster")
     local ALIGN_YAW = 70    -- deg/s — arcs, not pivots (a pivot drags the towed tool sideways)
     local ALIGN_AIM = 14    -- how far up the leg the aim point sits
     -- ▸ NETWORK OWNERSHIP (Roblox docs, "Network ownership": the DRIVER should
@@ -3036,13 +3036,10 @@ local okBuild, errBuild = pcall(function()
         local perp = Vector3.new(-dir.Z, 0, dir.X)
         local h = alignDriveStart(tr)
         if not h then return false end
-        -- ▸ FIELD LEGS RUN AT THE SWATH SPEED, not the travel speed (user: "it's
-        --   twitching the wheels a lot when working on the field"). The mover
-        --   was allowed its full 24 studs/s travel speed with a plow in the
-        --   dirt — 2.4× the harvester's swath speed — so the implement snagged
-        --   the soil, the chassis hopped and the front wheels buzzed. A leg now
-        --   uses the caller's speed (10 studs/s for passes); travel legs still
-        --   use ALIGN_MAXVEL.
+        -- ▸ FIELD LEGS RUN SLOWER THAN TRAVEL, and the real-W row driver is the
+        --   primary on a field (the game auto-steers there). This mover is the
+        --   fallback: the caller's 18-stud fallback speed keeps a plow in the
+        --   dirt from snagging (the old full travel speed made the chassis hop).
         h.cap = speed or ALIGN_MAXVEL
         local mark, markT = tr:GetPivot().Position, os.clock()
         local deadline = os.clock() + 8 + legLen / 6
@@ -4611,7 +4608,23 @@ local okBuild, errBuild = pcall(function()
     --   (small yaw, position untouched) and lift off W before the row end.
     --   Returns true = row done, false = W didn't move it (caller falls back to
     --   the seat throttle), nil = stopped.
-    local function keyRow(tr, seat, from, goal)
+    -- ▸ ROW STEERING DECISION (user: "when you drive there is like a game
+    --   helper that auto re steers the tractor on course"): the game holds the
+    --   heading on a field, so the driver only corrects a real heading error —
+    --   plus the part the game leaves: a parallel offset from the row. Before
+    --   this, zero heading error pressed no key at all, so a tractor sitting
+    --   2-6 studs beside the row never re-centered. Returns left, right.
+    function spudRowSteer(angDeg, crossY, cross, tol)
+        tol = tol or 2.5
+        if (angDeg or 0) > 8 then
+            return (crossY or 0) > 0, (crossY or 0) < 0
+        end
+        local c = cross or 0
+        return c < -tol, c > tol
+    end
+
+    local function keyRow(tr, seat, from, goal, who)
+        who = who or "harvester"
         local y0 = tr:GetPivot().Position.Y
         local A = Vector3.new(from.X, y0, from.Z)
         local B = Vector3.new(goal.X, y0, goal.Z)
@@ -4665,7 +4678,7 @@ local okBuild, errBuild = pcall(function()
                 stallT = os.clock() -- turning is not a stall
                 turnSince = turnSince or os.clock()
                 if os.clock() - turnSince > 6 then
-                    log("harvester: can't swing onto this row (6 s) — finishing it with the tween")
+                    log(who .. ": can't swing onto this row (6 s) — finishing it with the tween")
                     releaseDriveKeys()
                     return "jammed"
                 end
@@ -4680,8 +4693,9 @@ local okBuild, errBuild = pcall(function()
                     --   game's own controller turn the wheels — the arc is real,
                     --   the harvest keeps counting, and W stays down so it never
                     --   stops (user: "keep going on the angle").
-                    setKey(KEY_A, crossY > 0)
-                    setKey(KEY_D, crossY < 0)
+                    local left, right = spudRowSteer(math.deg(ang), crossY, cross)
+                    setKey(KEY_A, left)
+                    setKey(KEY_D, right)
                 else
                     -- keys aren't bringing it round (fence, or the game ignored
                     -- the steer input): finish the swing by hand
@@ -4698,7 +4712,12 @@ local okBuild, errBuild = pcall(function()
                 end
             else
                 turnSince = nil
-                setKey(KEY_A, false) setKey(KEY_D, false)
+                -- heading is fine; re-center when the tractor sits beside the
+                -- row (the game helper holds the course, this fixes the offset
+                -- it leaves — the old code pressed no key at all here)
+                local left, right = spudRowSteer(math.deg(ang), 0, cross)
+                setKey(KEY_A, left)
+                setKey(KEY_D, right)
                 local wantW = remaining > BRAKE
                 if wantW then
                     -- W ignored entirely (from a standstill)? fall back
@@ -4713,10 +4732,10 @@ local okBuild, errBuild = pcall(function()
                         stalls += 1
                         if stalls > 2 then
                             releaseDriveKeys()
-                            log("harvester: jammed on this row (3 tries) — tweening the rest of it")
+                            log(who .. ": jammed on this row (3 tries) — tweening the rest of it")
                             return "jammed"
                         end
-                        log(string.format("harvester: stuck for 1.8 s — backing off and retrying (try %d/2)", stalls))
+                        log(string.format("%s: stuck for 1.8 s — backing off and retrying (try %d/2)", who, stalls))
                         setKey(KEY_W, false)
                         setKey(KEY_S, true)
                         task.wait(0.8)
@@ -4728,7 +4747,7 @@ local okBuild, errBuild = pcall(function()
                     -- the row end, that IS the row end — never sit here waiting
                     -- for the deadline (that was the silent stall).
                     if stoppedFor > 1.2 then
-                        log("harvester: rolled to a stop before the row end — counting the row as done")
+                        log(who .. ": rolled to a stop before the row end — counting the row as done")
                         break
                     end
                 end
@@ -5472,8 +5491,8 @@ local okBuild, errBuild = pcall(function()
             end
         end
         local sellTries = 0
-        -- field driving starts on the ALIGN mover: binary WASD hunts across the
-        -- line, the mover holds it. One fallback per sweep if it gets stuck.
+        -- rows start on REAL W (the game auto-steers on the field); the align
+        -- mover is the fallback if the keys can't finish a leg, then WASD/glide
         local useAlign = true
         local lineStats = { worst = 0, flips = 0 }
         local function doLeg(from, goal, tol)
@@ -5500,11 +5519,41 @@ local okBuild, errBuild = pcall(function()
                 end
                 return okT
             end
+            -- ▸ LET THE GAME DRIVE THE ROW (user: "when it's on the field just
+            --   let the game's thing that focuses is on the field do its
+            --   thing"): the game's own controller auto-steers a tractor on its
+            --   field, so the row is driven on real W exactly like the
+            --   harvester's rows — with spudRowSteer only correcting a real
+            --   heading error and a parallel offset (the part the game helper
+            --   leaves, and the "it does not re-center" report). The align
+            --   mover stays as the fallback for a leg the keys cannot finish.
+            if realDrive ~= false then
+                local keyed = keyRow(tr, seat, from, goal, "tractor")
+                if keyed == nil then return nil end
+                if keyed == true then
+                    if realDrive == nil then
+                        realDrive = true
+                        log("real W row driving ON (the game steers on the field)")
+                    end
+                    task.wait(0.05)
+                    return true
+                end
+                -- W was pressed from a standstill and moved nothing: don't pay
+                -- the 3 s probe on every row — the mover takes this sweep.
+                if keyed == false and realDrive == nil then
+                    realDrive = false
+                    log("tractor: W didn't move it — the align mover takes the rows this sweep")
+                elseif keyed ~= false then
+                    log("tractor: the W row drive handed back — align mover takes this leg")
+                end
+            end
             -- never accept more than half a leg early (the short step onto
             -- the next ring would get cut otherwise)
             tol = math.min(tol or 7, (goal - from).Magnitude * 0.5)
             if useAlign then
-                local res = alignDriveLeg(tr, from, goal, tol, lineStats, HARVEST_TWEEN_SPEED)
+                -- fallback rows run swath + 8 (=18), still slower than travel
+                local res = alignDriveLeg(tr, from, goal, tol, lineStats,
+                    math.min(HARVEST_TWEEN_SPEED + 8, ALIGN_MAXVEL))
                 if res == nil then return nil end
                 if res then
                     task.wait(0.05)

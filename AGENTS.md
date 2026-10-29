@@ -8,13 +8,13 @@ asked and fixed, and the exact loop to prove a change works.
 description — it is the long-form manual and it is kept in sync with behaviour.
 
 - Main script: [SpudFarm_Full.lua](SpudFarm_Full.lua) — one paste-and-run Luau
-  file for the Roblox game *Farming and Friends*, currently `rebuild v1.29 ·
+  file for the Roblox game *Farming and Friends*, currently `rebuild v1.30 ·
   fluent gui` (`VERSION`, line 9). ≈11.4k lines.
 - Target: Windows + Git Bash. Luau toolchain lives in
   `%LOCALAPPDATA%\Temp\opencode\luau\` (`luau.exe`, `luau-compile.exe`,
   `luau-analyze.exe`).
 - Nothing here is a library or a build system. There is no bundler, no package
-  manager, no CI. Validation is a compile check plus nineteen harness scripts in
+  manager, no CI. Validation is a compile check plus twenty harness scripts in
   `tools/` (`python tools/run_all.py` runs the whole gate).
 
 ---
@@ -72,7 +72,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 ### 1.4 Script limits (these have broken the build before)
 
 13. **Luau's 200-local limit is real and we are 2 away from the practical
-    ceiling.** Run `python tools/local_budget.py`. As of v1.29:
+    ceiling.** Run `python tools/local_budget.py`. As of v1.30:
     `4-space locals before milkCycle: 183 (practical ceiling 185)`,
     whole body `190 / 200`, **headroom 2**. Do **not** add a `local` inside the
     main build closure. Reuse an existing local, convert the feature to a
@@ -105,7 +105,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 
 ### 1.6 Working tree state (read before editing)
 
-`HEAD` is the latest committed build (v1.29, one owner at a time), `main`
+`HEAD` is the latest committed build (v1.30, real-W row driving), `main`
 tracks `origin/main`, and the tree is clean. Keep it that way: make the change,
 run the gates, and commit only the files the change touches. `git add -A` is
 banned here. **Commit and push after every completed change** (owner's standing
@@ -132,17 +132,17 @@ done
 PYTHONIOENCODING=utf-8 python tools/test_doctor.py
 ```
 
-All of these must exit 0 (19 `*_test.py` harnesses + `test_doctor.py`, which
+All of these must exit 0 (20 `*_test.py` harnesses + `test_doctor.py`, which
 does not match `*_test.py`). A plain `for` loop is **not** enough on its own:
 most harnesses print `FAIL` but still exit 0, so the output has to be read.
 The one command that runs everything — compile, budget, name audit and every
 harness, checking both the exit code and the text — is:
 
 ```bash
-python tools/run_all.py        # 23/23 checks on v1.28
+python tools/run_all.py        # 24/24 checks on v1.30
 ```
 
-Last full run (v1.28): **23/23 checks passed** (20 harnesses + 3 gates).
+Last full run (v1.30): **24/24 checks passed** (21 harnesses + 3 gates).
 
 | Script | What it actually proves |
 |---|---|
@@ -164,6 +164,7 @@ Last full run (v1.28): **23/23 checks passed** (20 harnesses + 3 gates).
 | `farm_width_test.py` | Working width and row plan: studs→tiles rounding, oriented-box union width, rotated bars, 1/2/3-wide plans (step, headland, row half-extent) and an interval-coverage proof on 100/200-stud and narrow fields; owner match rules. |
 | `equip_owner_test.py` | Whose tractor/tool is picked: the farm being worked first, mine next, an unreadable owner after that, a stranger's never; stored machines are reported for spawning; the implement distance/basis stay honest. |
 | `field_soil_test.py` | Tree/wood field types and names are never crop-harvest targets; a successful cell read with 0 cells is empty (skipped), while a failed read stays unknown (never a skip reason). |
+| `row_steer_test.py` | The row steering decision: a real heading error steers toward the aim, a parallel offset beyond 2.5 studs re-centers onto the row, and a small offset inside the deadband presses nothing. |
 | `stall_probe_test.py` | The stall probe's report shape (it must name every dirt candidate and count visible stains). |
 | `test_doctor.py` | The in-script 🩺 DOCTOR report runs on stubbed world objects and reports, not crashes. |
 
@@ -426,6 +427,30 @@ wood soil) still needs the live `FieldType` values and the seed categories —
 that is what `SpudFieldProbe.lua` answers; the harvest guard is independent of
 it and needs no mapping.
 
+### 3.9 Row driving and speed
+
+User: *"when you drive there is like a game helper that auto re steers the
+tractor on course"* + *"it does not re-center"* + *"make it go faster"*. The
+game has its own steering assist on a field; the align mover fought it, and its
+pure-pursuit aim corrected **heading only** — a tractor parallel to the row but
+2–6 studs beside it had zero heading error, pressed no key, and never came back.
+
+- Rows are now driven on **real W** (`keyRow`, the driver the harvester already
+  used), so the game's controller does the steering. `keyRow(tr, seat, from,
+  goal, who)` gained the `who` label so the log says `tractor:` as well.
+- `spudRowSteer(angDeg, crossY, cross, tol)` decides the A/D nudge: a heading
+  error > **8°** steers toward the aim (unchanged); otherwise a cross-track
+  offset > **2.5 studs** steers back onto the row (`cross > 0` = left of the
+  line → steer right). Inside the deadband it presses nothing and lets the game
+  hold the course.
+- Travel speed `ALIGN_MAXVEL` is **34 studs/s** (was 24). The align mover is now
+  only the row **fallback** (`math.min(HARVEST_TWEEN_SPEED + 8, ALIGN_MAXVEL)` =
+  18), so a plow doesn't snag at travel speed; the old 10-stud/s mover cap no
+  longer governs a normal row.
+
+`row_steer_test.py` pins the steering decision. The real-W row speed is the
+game's own, so it is faster than the old 10-stud mover by construction.
+
 ---
 
 ## 4. Code map (names, not line numbers — they move)
@@ -437,6 +462,7 @@ it and needs no mapping.
 | Farm width / owner | top-level `SpudFarm` (`widthTiles`, `widthFromParts`, `rowPlan`, `ownerWanted`, `workTiles`, `partBoxes`, `declaredWidth`), `spudOwnerChoices`, global `farmOwnerPick`, `spudFarmOwnerDrop`; `sweepField` plans rows from `rowPlan` |
 | Whose machine | global `equipOwnerRank(m)` (farm being worked → mine → no readable owner → never another account), used by `findTractor` / `findImplement`; owner tag read by `milkStoreOwnerOf` |
 | Tree soil | global `spudTreeField(typeName, modelName)` (wood/tree/log/forest/timber/lumber/sawmill/stump → no crop harvest) and `spudNoCells(st)` (successful 0-cell read is empty, `nil` read is unknown); used in `probeWork`, `runPass`, `needLeft`, `grownLeft`, growth wait |
+| Row driving | `keyRow(tr, seat, from, goal, who)` drives rows on real W (the game auto-steers); global `spudRowSteer(angDeg, crossY, cross, tol)` (heading > 8°, cross-track > 2.5 studs → re-center); travel `ALIGN_MAXVEL = 34`, fallback row speed 18 |
 | Dirt line | global `milkDirtLine = 24`; `milkDirtHigh(spot)` (the single "is this dirty?" answer) |
 | Clean pass | pre-pass offer watch (0.96 s) → clean watch (2.2 s); per-cow clean `≤2.25 s` |
 | Herd | `milkHerdBatch(stalls, cows)`, `milkHerdTargets`, `milkHerdSend`, ordering nearest-barn-first, `milkHerdArm` |
@@ -596,14 +622,26 @@ match. `(mine)` still means exactly mine. The tour line and each per-field line
 now include the owner (`Field · Miou2251`), which is what made the mismatch
 visible in the console. `farm_width_test.py` gained the two pick-vs-mine checks.
 
-**Where it stands:** `rebuild v1.29 · fluent gui`, whole suite green (23/23),
-harness verified. **Not yet reloaded in game** after v1.22–v1.29 — the next real
+**"when it's on the field just let the game's thing that focuses is on the field
+do its thing … it does not re-center … make it go faster"** → v1.30. The game
+auto-steers a tractor on its field; the align mover fought it, and its aim
+corrected heading only — a tractor parallel to the row but 2–6 studs beside it
+had no heading error and never re-centered. Rows now run on real W (`keyRow`,
+the harvester's proven driver) so the game steers; `spudRowSteer` nudges A/D
+only for a heading error > 8° or a cross-track offset > 2.5 studs. Travel rose
+from 24 to **34 studs/s**; the align mover is now only the row fallback (18),
+so rows no longer run at its old 10-stud/s cap. New `row_steer_test.py`
+(9 checks); suite **24/24**.
+
+**Where it stands:** `rebuild v1.30 · fluent gui`, whole suite green (24/24),
+harness verified. **Not yet reloaded in game** after v1.22–v1.30 — the next real
 test is a live pass watching `path: … theta* N pops / N ms, min clear N`, the
 new width line (`tool … — 3-wide …; rows every 30`), the Farm owner picker
 showing ONLY that owner's fields (`Field · Miou2251`), the equipment owner
 column (`· ZM80 = Tractor [spawned] · oksimba_1`), a
-`SKIP … — <type> soil, trees are left alone` line on the wood field, and the
-milk lines (`… read from here - none reports dirt`, `… cleaned in X.XXs`).
+`SKIP … — <type> soil, trees are left alone` line on the wood field, the rows
+being driven on W with the tractor re-centering after a drift, and the milk
+lines (`… read from here - none reports dirt`, `… cleaned in X.XXs`).
 
 ---
 
@@ -618,9 +656,11 @@ milk lines (`… read from here - none reports dirt`, `… cleaned in X.XXs`).
    equipment: check the owner column in the equipment log, and that a picked
    farm's tractor/tool is the one mounted), v1.28 (tree soil: the wood field
    must log `SKIP … — <type> soil, trees are left alone`, and a normal pass must
-   still harvest the crop field) and v1.29 (one owner at a time: with a farm
-   picked, the tour must list ONLY that owner's fields and never mine). Harness
-   green ≠ game green.
+   still harvest the crop field), v1.29 (one owner at a time: with a farm
+   picked, the tour must list ONLY that owner's fields and never mine) and
+   v1.30 (real-W row driving: watch for a `tractor: the W row drive handed
+   back` fallback line and whether rows actually re-center after a drift).
+   Harness green ≠ game green.
 2. **The 24 % baseline may differ per build.** If stalls sit higher, the first
    pass logs `reads X% but the game offers no Clean there - the dirty line moves
    to X%` and then stops hopping. That is the designed self-correction, not a
