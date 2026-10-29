@@ -410,7 +410,9 @@ found" lines name the farm the pass was looking for.
 
 **Read-only probes** (run in game, paste the report): `SpudStallProbe.lua`
 (stalls/dirt), `SpudDump.lua` (world structure, run twice: town + farm),
-`SpudRemoteProbe.lua` (remotes while you act by hand), `SpudBarnProbe.lua`,
+`SpudFieldProbe.lua` (every field's `FieldType`, its cells, what is planted
+where, seed boxes and FieldHelper's tables), `SpudRemoteProbe.lua` (remotes
+while you act by hand), `SpudBarnProbe.lua`,
 `SpudCrateProbe.lua`, `SpudEquipProbe.lua`, `SpudFeedProbe.lua`,
 `SpudSellProbe.lua`, `SpudCapture.lua`. `SpudBoot.lua` is the error-reporting
 loader. `FarmingAndFriends_Main.lua` is the older generic script; superseded.
