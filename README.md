@@ -81,6 +81,14 @@ Everything merged into one paste-and-run file:
   The tour log names each field's owner, so a wrong pick is visible. If the
   game refuses an action, the sweep says so
   (`field belongs to <name> — check worker permissions`).
+- **Go to the farm** — with a Farm owner picked, the run **teleports to that
+  owner's plot first** (only when it is more than 60 studs away; the character
+  is stood up first, because a teleport while seated does not travel). It then
+  waits half a second for the fields and machines to stream in, finds **that
+  farm's** tractor/tool, and logs
+  `farm: using <tool> (<owner>) N studs away` before driving. If the plot is
+  not streamed the run says so and works from where it stands instead of
+  guessing a position.
 - **Presets tab** — **Barn Care** (walks every stall near your plot and cleans it —
   uses the game's own CleanAnimalContainer = V context), Chocolate Milk
   (clean stalls → milk cows → deposit → cocoa → levers → collect → sell),

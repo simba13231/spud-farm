@@ -12,7 +12,7 @@ local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/release
     .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
     .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.31 · fluent gui"
+local VERSION    = "rebuild v1.32 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -2533,6 +2533,19 @@ local okBuild, errBuild = pcall(function()
     --   findTractor/findImplement use the farm being worked's machines first,
     --   then mine, then an unreadable-owner machine, and never borrow another
     --   account's.
+    -- ▸ GO TO THE PICKED FARM (user: "make it teleport to the spesific farm,
+    --   find the tools then run"): a distant plot is streamed out, so its
+    --   fields and machines are invisible and every read says "no farm".
+    --   Returns the hop target, distance — or nil, why.
+    function spudFarmHop(here, plotPos)
+        if not plotPos then return nil, "no plot" end
+        if not here then return nil, "no position" end
+        local d = (plotPos - here).Magnitude
+        if d <= 60 then return nil, "close" end
+        -- 5 studs up so the character lands on the plot, not inside its plate
+        return Vector3.new(plotPos.X, plotPos.Y + 5, plotPos.Z), d
+    end
+
     farmOwnerPick = nil
     findMyFields = function(nearPos)
         local seen, mine = {}, {}
@@ -5899,6 +5912,33 @@ local okBuild, errBuild = pcall(function()
         local char = LocalPlayer.Character
         local hum = char and char:FindFirstChildOfClass("Humanoid")
         if not hum then log("no character") return end
+        -- ▸ GO TO THAT FARM (user: "make it teleport to the spesific farm, find
+        --   the tools then run"): hop to the picked owner's plot FIRST, so the
+        --   fields and that farm's machines stream in before anything is read.
+        --   A plot closer than 60 studs is left alone (no teleport for nothing);
+        --   a seated character is stood up first, because a CFrame write on a
+        --   seat does not travel.
+        if farmOwnerPick then
+            local plot = milkStorePlotOf(farmOwnerPick)
+            local root = char:FindFirstChild("HumanoidRootPart")
+            local target, distOrWhy = spudFarmHop(root and root.Position,
+                plot and plot:GetPivot().Position or nil)
+            if target then
+                if hum.SeatPart then milkStandUp("farm") end
+                root = char:FindFirstChild("HumanoidRootPart")
+                if root and not hum.SeatPart then
+                    spudTeleports = (spudTeleports or 0) + 1
+                    log(string.format("farm owner: teleporting to %s's plot (%.0f studs)",
+                        farmOwnerPick, distOrWhy))
+                    root.CFrame = CFrame.new(target) * (root.CFrame - root.CFrame.Position)
+                    task.wait(0.5) -- let the fields and that farm's machines stream in
+                else
+                    log("farm owner: couldn't get off the seat — not teleporting")
+                end
+            elseif distOrWhy == "no plot" then
+                log("farm owner: " .. farmOwnerPick .. "'s plot is not streamed — working from here")
+            end
+        end
         local tr, dist, seat, stashedTractor = findTractor()
         if not tr and stashedTractor then
             -- ▸ AUTO-SPAWN (user: "Auto-spawn it from the Equipment Manager"):
@@ -5923,6 +5963,10 @@ local okBuild, errBuild = pcall(function()
             log("tractor not found for " .. (farmOwnerPick or "you")
                 .. " — no spawned Tractor with that owner (check the Equipment Manager; parked ones cannot drive)")
             return
+        end
+        if farmOwnerPick then
+            log(string.format("farm: using %s (%s) %.0f studs away", tr.Name,
+                tostring(milkStoreOwnerOf(tr) or "no owner"), dist or 0))
         end
 
         -- ▸ SAFETY (user: "when a vehicle is not within 1000 studs it
@@ -8399,12 +8443,13 @@ local okBuild, errBuild = pcall(function()
     --   Returns true when the character is on foot. A GLOBAL (like the other
     --   milk store helpers) on purpose: a local here would take one more
     --   register in the GUI builder for the whole session (the R191 budget).
-    function milkStandUp()
+    function milkStandUp(who)
+        who = who or "milk"
         local ch = LocalPlayer.Character
         local hum = ch and ch:FindFirstChildOfClass("Humanoid")
         if not hum or not hum.SeatPart then return true end
         local what = tostring((hum.SeatPart.Parent and hum.SeatPart.Parent.Name) or "a vehicle")
-        log("milk: seated in " .. what .. " — getting out before collecting")
+        log(who .. ": seated in " .. what .. " — getting out first")
         pressKey(Enum.KeyCode.F)
         for _ = 1, 8 do -- ~2 s to stand up
             if not hum.SeatPart then break end
@@ -8419,7 +8464,7 @@ local okBuild, errBuild = pcall(function()
             end
         end
         if hum.SeatPart then
-            log("milk: still seated in " .. what
+            log(who .. ": still seated in " .. what
                 .. " — press F, the pass cannot move a seated character")
             return false
         end

@@ -8,7 +8,7 @@ asked and fixed, and the exact loop to prove a change works.
 description — it is the long-form manual and it is kept in sync with behaviour.
 
 - Main script: [SpudFarm_Full.lua](SpudFarm_Full.lua) — one paste-and-run Luau
-  file for the Roblox game *Farming and Friends*, currently `rebuild v1.31 ·
+  file for the Roblox game *Farming and Friends*, currently `rebuild v1.32 ·
   fluent gui` (`VERSION`, line 9). ≈11.4k lines.
 - Target: Windows + Git Bash. Luau toolchain lives in
   `%LOCALAPPDATA%\Temp\opencode\luau\` (`luau.exe`, `luau-compile.exe`,
@@ -72,7 +72,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 ### 1.4 Script limits (these have broken the build before)
 
 13. **Luau's 200-local limit is real and we are 2 away from the practical
-    ceiling.** Run `python tools/local_budget.py`. As of v1.31:
+    ceiling.** Run `python tools/local_budget.py`. As of v1.32:
     `4-space locals before milkCycle: 183 (practical ceiling 185)`,
     whole body `190 / 200`, **headroom 2**. Do **not** add a `local` inside the
     main build closure. Reuse an existing local, convert the feature to a
@@ -105,7 +105,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 
 ### 1.6 Working tree state (read before editing)
 
-`HEAD` is the latest committed build (v1.31, full tank stops), `main`
+`HEAD` is the latest committed build (v1.32, go to the picked farm), `main`
 tracks `origin/main`, and the tree is clean. Keep it that way: make the change,
 run the gates, and commit only the files the change touches. `git add -A` is
 banned here. **Commit and push after every completed change** (owner's standing
@@ -132,17 +132,17 @@ done
 PYTHONIOENCODING=utf-8 python tools/test_doctor.py
 ```
 
-All of these must exit 0 (21 `*_test.py` harnesses + `test_doctor.py`, which
+All of these must exit 0 (22 `*_test.py` harnesses + `test_doctor.py`, which
 does not match `*_test.py`). A plain `for` loop is **not** enough on its own:
 most harnesses print `FAIL` but still exit 0, so the output has to be read.
 The one command that runs everything — compile, budget, name audit and every
 harness, checking both the exit code and the text — is:
 
 ```bash
-python tools/run_all.py        # 25/25 checks on v1.31
+python tools/run_all.py        # 26/26 checks on v1.32
 ```
 
-Last full run (v1.31): **25/25 checks passed** (22 harnesses + 3 gates).
+Last full run (v1.32): **26/26 checks passed** (23 harnesses + 3 gates).
 
 | Script | What it actually proves |
 |---|---|
@@ -153,6 +153,7 @@ Last full run (v1.31): **25/25 checks passed** (22 harnesses + 3 gates).
 | `webhook_test.py` | A webhook URL must be Discord's own host + `/api/webhooks/` path; "contains the word discord" is rejected, and blank means off. |
 | `drop_scope_test.py` | A jug appearing elsewhere in the world during the 10 s milk wait is not counted as "this cow gave milk". |
 | `farm_batch_test.py` | Herd-batch arithmetic: who fills a batch, who hands over. |
+| `farm_hop_test.py` | The go-to-the-farm hop: no plot or no position answers with a reason, a plot within 60 studs is left alone, a far plot targets its centre +5 Y, and the reported distance is the real one. |
 | `farm_rotate_test.py` | Three-farm rotation order and wrap-around. |
 | `farm_switch_test.py` | The under-herd-amount hand-over: `ready + parked` compared, fullest other wins, equal counts do not swap, unreadable never a target, no self-hand-over, no ping-pong. |
 | `gate_visit_test.py` | Gate opened from where we stand (0 hops when the door is offered); an already-open gate is never pressed again. |
@@ -472,6 +473,28 @@ another store. So a full tank no longer starts a sell trip:
   pad-like parts, prompts (action text + key), signs, the live context actions,
   and the old sell-pad targets.
 
+### 3.11 A picked farm is reached before anything is read
+
+User: *"also make it teleport to the spesific farm, find the tools then run."*
+The start of a run with a **Farm owner** picked now hops to that owner's plot
+before the equipment scan:
+
+- `spudFarmHop(here, plotPos)` returns `nil, "no plot"`, `nil, "no position"`,
+  `nil, "close"` (≤60 studs — no teleport for nothing), or
+  `Vector3(plot.X, plot.Y + 5, plot.Z), distance`.
+- The plot is `milkStorePlotOf(pick)` — the same owner lookup the milk store
+  uses (`Configurations.Owner`, else the `PlotBillboard.Owner` label).
+- A **seated** character is stood up first (`milkStandUp("farm")`, the game's F
+  key), because a CFrame write on a seat does not replicate; if it cannot get
+  out it stays put and says so instead of teleporting nowhere.
+- After the hop it waits **0.5 s** so the fields and that farm's machines
+  stream in, then `findTractor` / `findImplement` pick **that owner's** gear
+  (§3.7), and the run logs `farm: using <tool> (<owner>) N studs away`.
+- An unstreamed plot is not a guess: the run says
+  `farm owner: <who>'s plot is not streamed — working from here`.
+
+`farm_hop_test.py` pins the helper's decisions (7 checks).
+
 ---
 
 ## 4. Code map (names, not line numbers — they move)
@@ -481,6 +504,7 @@ another store. So a full tank no longer starts a sell trip:
 | Build identity | `VERSION` at the top of the file (`rebuild vX.YY · fluent gui`) |
 | Pathfinding | top-level `SpudPath` (`heapPush`/`heapPop`, `astar`, `thetastar`, `search`, `los`, `clearance`, `smooth`, `markParts`, `worldParts`), then `pathfindAround`, `driveRoute`, `driveToField`, `driveWatchTick` |
 | Farm width / owner | top-level `SpudFarm` (`widthTiles`, `widthFromParts`, `rowPlan`, `ownerWanted`, `workTiles`, `partBoxes`, `declaredWidth`), `spudOwnerChoices`, global `farmOwnerPick`, `spudFarmOwnerDrop`; `sweepField` plans rows from `rowPlan` |
+| Go to the farm | global `spudFarmHop(here, plotPos)` (nil+reason, or centre +5 Y and distance), `milkStorePlotOf(who)`, `milkStandUp(who)` (default `"milk"`); wired at the top of `runFarmingBody` |
 | Whose machine | global `equipOwnerRank(m)` (farm being worked → mine → no readable owner → never another account), used by `findTractor` / `findImplement`; owner tag read by `milkStoreOwnerOf` |
 | Tree soil | global `spudTreeField(typeName, modelName)` (wood/tree/log/forest/timber/lumber/sawmill/stump → no crop harvest) and `spudNoCells(st)` (successful 0-cell read is empty, `nil` read is unknown); used in `probeWork`, `runPass`, `needLeft`, `grownLeft`, growth wait |
 | Row driving | `keyRow(tr, seat, from, goal, who)` drives rows on real W (the game auto-steers); global `spudRowSteer(angDeg, crossY, cross, tol)` (heading > 8°, cross-track > 2.5 studs → re-center); travel `ALIGN_MAXVEL = 34`, fallback row speed 18 |
@@ -667,15 +691,32 @@ driving somewhere wrong. `SpudFulfillProbe.lua` was added to dump the
 Fulfillment / Shipment area (models, pad parts, prompts, signs, live context
 actions, old pad targets). New `sell_gate_test.py` (7 checks); suite **25/25**.
 
-**Where it stands:** `rebuild v1.31 · fluent gui`, whole suite green (25/25),
-harness verified. **Not yet reloaded in game** after v1.22–v1.31 — the next real
+**"also make it teleport to the spesific farm, find the tools then run"** →
+v1.32. A picked farm was worked from wherever the character stood, so the far
+plot's fields and machines had not streamed in when the scan ran. The run now
+hops to the owner's plot first (`milkStorePlotOf` → `spudFarmHop`, >60 studs
+only, centre +5 Y), standing the character up first because a seated CFrame
+write does not replicate, waits 0.5 s for streaming, then finds **that
+owner's** tractor/tool (§3.7) and logs `farm: using <tool> (<owner>) N studs
+away`. `milkStandUp` takes a caller label now (`farm:` instead of `milk:`).
+New `farm_hop_test.py` (7 checks); suite **26/26**. The Fulfillment dump the
+owner pasted is useful (CompanyArea with Fulfillment/Shipment titles,
+`Deposit_Warehouse` at -353,138,-90, `Withdraw_Warehouse` at -286,138,-217,
+`UnloadTrailer` / `PullFactoryLever` / `TogglePipe` actions) but **not enough
+to wire the unload**: the probe was run from the start point, not the pad, so
+which action/key the pad offers with a full harvester is still unknown.
+
+**Where it stands:** `rebuild v1.32 · fluent gui`, whole suite green (26/26),
+harness verified. **Not yet reloaded in game** after v1.22–v1.32 — the next real
 test is a live pass watching `path: … theta* N pops / N ms, min clear N`, the
 new width line (`tool … — 3-wide …; rows every 30`), the Farm owner picker
 showing ONLY that owner's fields (`Field · Miou2251`), the equipment owner
 column (`· ZM80 = Tractor [spawned] · oksimba_1`), a
 `SKIP … — <type> soil, trees are left alone` line on the wood field, the rows
 being driven on W with the tractor re-centering after a drift, a full harvester
-stopping the run (`Fulfillment drop-off isn't wired yet`), and the milk lines
+stopping the run (`Fulfillment drop-off isn't wired yet`), the
+`farm owner: teleporting to …'s plot` hop followed by
+`farm: using <tool> (<owner>)`, and the milk lines
 (`… read from here - none reports dirt`, `… cleaned in X.XXs`).
 
 ---
@@ -694,8 +735,10 @@ stopping the run (`Fulfillment drop-off isn't wired yet`), and the milk lines
    still harvest the crop field), v1.29 (one owner at a time: with a farm
    picked, the tour must list ONLY that owner's fields and never mine), v1.30
    (real-W row driving: watch for a `tractor: the W row drive handed back`
-   fallback line and whether rows actually re-center after a drift) and v1.31
-   (a full harvester must stop the run and NOT drive to a sell pad).
+   fallback line and whether rows actually re-center after a drift), v1.31
+   (a full harvester must stop the run and NOT drive to a sell pad) and v1.32
+   (a picked farm: `farm owner: teleporting to …'s plot` must appear once, the
+   fields must stream in, and the mounted tool must be that owner's).
    Harness green ≠ game green.
 2. **The 24 % baseline may differ per build.** If stalls sit higher, the first
    pass logs `reads X% but the game offers no Clean there - the dirty line moves
