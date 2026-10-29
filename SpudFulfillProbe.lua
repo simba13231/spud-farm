@@ -165,72 +165,314 @@ end
 
 local function contextActions()
     say("")
-    say("== context actions (you are standing here) ==")
-    local ok, btns = pcall(function()
-        return LP.PlayerGui.GuiViews.HUD.PCGP_ContextActions.Buttons
-    end)
-    if not ok or not btns then
-        say("   PCGP_ContextActions.Buttons NOT FOUND")
+    say("== actions the game offers RIGHT NOW ==")
+    -- ▸ USE THE BILLBOARDS, NOT THE BUTTON LIST (dump §24 pattern): every
+    --   action in the game is in Buttons — that is why the first runs listed
+    --   all 70 of them with no key. Billboards holds ONLY the actions the game
+    --   is offering at this spot, each with its own one-letter key label and
+    --   the part it is adorned to.
+    local cpa = safe(function()
+        local pg = LP and LP:FindFirstChildOfClass("PlayerGui")
+        local gv = pg and pg:FindFirstChild("GuiViews")
+        local hud = gv and gv:FindFirstChild("HUD")
+        local gw = hud and hud:FindFirstChild("MainHUD")
+        return (gw and gw:FindFirstChild("PCGP_ContextActions"))
+            or (hud and hud:FindFirstChild("PCGP_ContextActions"))
+    end, nil)
+    if not cpa then
+        say("   PCGP_ContextActions NOT FOUND")
         return
     end
-    local any = 0
-    for _, b in ipairs(btns:GetChildren()) do
-        any += 1
-        say(string.format("   %s  bind=%s  label=%s", b.Name,
-            tostring(safe(function() return b:GetAttribute("Bind") end, "?")),
-            tostring(safe(function() return b:FindFirstChild("ActionLabel") end, nil)
-                and safe(function() return b.ActionLabel.Text end, "?") or "?")))
+    local function keyOf(b)
+        local texts, key = {}, nil
+        for _, d in ipairs(safe(function() return b:GetDescendants() end, {})) do
+            if d:IsA("TextLabel") and d.Text ~= "" then
+                texts[#texts + 1] = d.Text
+                if not key and d.Text:match("^%u$") then key = d.Text end
+            end
+        end
+        return key, table.concat(texts, " | ")
     end
-    if any == 0 then say("   (no action buttons — stand closer / sit in the vehicle)") end
-    local bills = safe(function()
-        return LP.PlayerGui.GuiViews.HUD.Billboards
-    end, nil)
+    local bills = safe(function() return cpa:FindFirstChild("Billboards") end, nil)
+    local shown = 0
     if bills then
         for _, b in ipairs(bills:GetChildren()) do
-            local ad = safe(function() return b.Adornee end, nil)
-            say("   billboard " .. b.Name .. " adornee=" .. (ad and ad:GetFullName() or "none"))
+            local on
+            if b:IsA("LayerCollector") then
+                on = b.Enabled == true
+            elseif b:IsA("GuiObject") then
+                on = b.Visible == true
+            else
+                on = false
+            end
+            if on then
+                shown += 1
+                local key, text = keyOf(b)
+                local ad = safe(function() return b.Adornee end, nil)
+                local p = ad and select(1, boxOf(ad)) or nil
+                say(string.format("   ON  %s  key=%s  text='%s'  adornee=%s at %s",
+                    b.Name, tostring(key or "?"), text,
+                    ad and ad:GetFullName() or "none", posText(p)))
+            end
+        end
+    else
+        say("   Billboards NOT FOUND")
+    end
+    if shown == 0 then
+        say("   (no billboard is on — the character is not on the pad, or nothing is offered here)")
+    end
+    local btns = safe(function() return cpa:FindFirstChild("Buttons") end, nil)
+    if btns then
+        local on, off = {}, 0
+        for _, b in ipairs(btns:GetChildren()) do
+            if b:IsA("GuiObject") and b.Visible then
+                local key, text = keyOf(b)
+                on[#on + 1] = string.format("%s(key=%s '%s')", b.Name, tostring(key or "?"), text)
+            elseif b:IsA("GuiObject") then
+                off += 1
+            end
+        end
+        say(string.format("   visible buttons (%d, %d hidden): %s", #on, off,
+            #on > 0 and table.concat(on, "  ·  ") or "none"))
+    end
+end
+
+-- what the character is standing on (a pad is usually a transparent part)
+local function standingOn()
+    say("")
+    say("== what you are standing on ==")
+    local char = LP and LP.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then say("   no character"); return end
+    local params = safe(function()
+        local p = RaycastParams.new()
+        p.FilterType = Enum.RaycastFilterType.Exclude
+        p.FilterDescendantsInstances = { char }
+        return p
+    end, nil)
+    local hit = params and safe(function()
+        return workspace:Raycast(root.Position, Vector3.new(0, -20, 0), params)
+    end, nil)
+    if not (hit and hit.Instance) then
+        say("   raycast hit nothing within 20 studs")
+        return
+    end
+    local inst = hit.Instance
+    say(string.format("   %s  [%s]  at %s  (you are %.1f above it)",
+        inst:GetFullName(), tostring(safe(function() return inst.ClassName end, "?")),
+        posText(hit.Position), hit.Distance))
+    local sz = safe(function() return inst.Size end, nil)
+    if sz then
+        say(string.format("   size %.1fx%.1fx%.1f  transp=%.2f  collide=%s  touch=%s",
+            sz.X, sz.Y, sz.Z,
+            tonumber(safe(function() return inst.Transparency end, 0)) or 0,
+            tostring(safe(function() return inst.CanCollide end, "?")),
+            tostring(safe(function() return inst.CanTouch end, "?"))))
+    end
+    local attrs = attrsOf(inst)
+    if #attrs > 0 then say("   attrs: " .. table.concat(attrs, " ")) end
+    local chain, p = {}, inst
+    for _ = 1, 6 do
+        p = p and p.Parent
+        if not p or p == workspace then break end
+        table.insert(chain, 1, p.Name)
+    end
+    if #chain > 0 then say("   under: " .. table.concat(chain, " / ") .. " / " .. inst.Name) end
+end
+
+-- everything close enough to be the thing you are supposed to use
+local function nearby(radius)
+    radius = radius or 30
+    say("")
+    say("== within " .. radius .. " studs (prompts, pad parts, labels) ==")
+    local char = LP and LP.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then say("   no character"); return end
+    local here = root.Position
+    local function guiSpot(d)
+        local p = d
+        for _ = 1, 5 do
+            if not p then return nil end
+            local ad = safe(function() return p.Adornee end, nil)
+            if ad then return safe(function() return ad.Position end, nil), ad end
+            if p:IsA("BasePart") then return safe(function() return p.Position end, nil), p end
+            p = p.Parent
+        end
+        return nil
+    end
+    local prompts, pads, labels = {}, {}, {}
+    for _, d in ipairs(safe(function() return workspace:GetDescendants() end, {})) do
+        local cls = safe(function() return d.ClassName end, "")
+        if cls == "ProximityPrompt" then
+            local par = safe(function() return d.Parent end, nil)
+            local pos = par and safe(function() return par.Position end, nil)
+            if pos and (pos - here).Magnitude <= radius then
+                prompts[#prompts + 1] = string.format(
+                    "   prompt %s  key=%s  action='%s'  object='%s'  enabled=%s  dist=%.0f",
+                    d:GetFullName(),
+                    tostring(safe(function() return d.KeyCode end, "?")),
+                    tostring(safe(function() return d.ActionText end, "")),
+                    tostring(safe(function() return d.ObjectText end, "")),
+                    tostring(safe(function() return d.Enabled end, "?")),
+                    tonumber(safe(function() return d.MaxActivationDistance end, 0)) or 0)
+            end
+        elseif cls:find("Part") or cls == "UnionOperation" then
+            local pos = safe(function() return d.Position end, nil)
+            if pos and (pos - here).Magnitude <= radius then
+                local tr = tonumber(safe(function() return d.Transparency end, 1)) or 1
+                if interesting(d.Name) or tr < 0.6 then
+                    local sz = safe(function() return d.Size end, nil)
+                    pads[#pads + 1] = string.format(
+                        "   part %s  at %s  dist=%.0f%s  transp=%.2f  collide=%s",
+                        d:GetFullName(), posText(pos), (pos - here).Magnitude,
+                        sz and string.format("  size %.1fx%.1fx%.1f", sz.X, sz.Y, sz.Z) or "",
+                        tr, tostring(safe(function() return d.CanCollide end, "?")))
+                end
+            end
+        elseif cls == "TextLabel" or cls == "TextButton" then
+            local pos, ad = guiSpot(d)
+            local txt = tostring(safe(function() return d.Text end, "") or "")
+            if pos and txt ~= "" and (pos - here).Magnitude <= radius then
+                labels[#labels + 1] = string.format("   text '%s'  at %s  dist=%.0f  %s%s",
+                    txt, posText(pos), (pos - here).Magnitude, d:GetFullName(),
+                    ad and ad ~= d and ("  -> " .. ad:GetFullName()) or "")
+            end
         end
     end
+    local function dump(list, cap, empty)
+        for i = 1, math.min(#list, cap or 40) do say(list[i]) end
+        if #list == 0 then say("   " .. empty) end
+        if #list > (cap or 40) then say("   … (" .. (#list - (cap or 40)) .. " more)") end
+    end
+    say("   -- prompts")
+    dump(prompts, 20, "(none)")
+    say("   -- pad-like / see-through parts")
+    dump(pads, 30, "(none)")
+    say("   -- labels (a pad's key is usually one of these)")
+    dump(labels, 40, "(none)")
+end
+
+-- the drop-off parts the script scans, with distance from here, and the
+-- nearest one's insides (a prompt/trigger would live there)
+local function dropTargets()
+    say("")
+    say("== Stores.DropOffs from here ==")
+    local char = LP and LP.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local here = root and root.Position
+    local stores = safe(function() return workspace:FindFirstChild("Stores") end, nil)
+    local drops = stores and safe(function() return stores:FindFirstChild("DropOffs") end, nil)
+    if not drops then
+        say("   Stores.DropOffs NOT FOUND")
+        return
+    end
+    local best, bestD
+    for _, d in ipairs(drops:GetChildren()) do
+        local p, sz = boxOf(d)
+        local dist = (p and here) and (p - here).Magnitude or nil
+        if dist and (not bestD or dist < bestD) then best, bestD = d, dist end
+        say(string.format("   %s  at %s%s%s", d:GetFullName(), posText(p),
+            sz and string.format("  size %.0fx%.0fx%.0f", sz.X, sz.Y, sz.Z) or "",
+            dist and string.format("  %.0f studs from you", dist) or ""))
+    end
+    if best then
+        say("   -- nearest: " .. best:GetFullName())
+        local attrs = attrsOf(best)
+        if #attrs > 0 then say("      attrs: " .. table.concat(attrs, " ")) end
+        for _, d in ipairs(safe(function() return best:GetDescendants() end, {})) do
+            local cls = safe(function() return d.ClassName end, "?")
+            if cls == "ProximityPrompt" then
+                say(string.format("      prompt %s key=%s action='%s' enabled=%s",
+                    d:GetFullName(), tostring(safe(function() return d.KeyCode end, "?")),
+                    tostring(safe(function() return d.ActionText end, "")),
+                    tostring(safe(function() return d.Enabled end, "?"))))
+            elseif cls == "TextLabel" or cls == "TextButton" then
+                say(string.format("      text %s = '%s'", d:GetFullName(),
+                    tostring(safe(function() return d.Text end, ""))))
+            else
+                say("      " .. cls .. " " .. d.Name)
+            end
+        end
+        if #safe(function() return best:GetDescendants() end, {}) == 0 then
+            say("      (no children — the part itself is the whole pad)")
+        end
+    end
+end
+
+-- the machines near you: is a harvester spawned, and is its tank readable?
+local function equipmentNear()
+    say("")
+    say("== equipment within 120 studs ==")
+    local char = LP and LP.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local here = root and root.Position
+    local equip = safe(function()
+        return workspace:FindFirstChild("Objects")
+            and workspace.Objects:FindFirstChild("Equipment")
+    end, nil)
+    if not equip or not here then say("   Objects.Equipment NOT FOUND"); return end
+    local any = 0
+    for _, m in ipairs(equip:GetChildren()) do
+        local p = safe(function() return m:GetPivot().Position end, nil)
+        local dist = p and (p - here).Magnitude or nil
+        if dist and dist <= 120 then
+            any += 1
+            say(string.format("   %s  at %s  %.0f studs", m:GetFullName(), posText(p), dist))
+            local attrs = attrsOf(m)
+            if #attrs > 0 then say("      attrs: " .. table.concat(attrs, " ")) end
+            for _, line in ipairs(cfgLines(m)) do say("      cfg." .. line) end
+        end
+    end
+    if any == 0 then say("   (none — spawn the harvester/trailer here first)") end
 end
 
 local function signsAnywhere()
     say("")
     say("== signs / texts that mention fulfill / ship / drop / sell ==")
-    local hits = 0
-    local root = safe(function() return workspace end, nil)
-    for _, d in ipairs(root and root:GetDescendants() or {}) do
+    local char = LP and LP.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local here = root and root.Position
+    local localHits, farHits = {}, {}
+    for _, d in ipairs(safe(function() return workspace:GetDescendants() end, {})) do
         local cls = safe(function() return d.ClassName end, "")
-        if (cls:find("TextLabel") or cls == "TextButton") and hits < 40 then
+        if cls:find("TextLabel") or cls == "TextButton" then
             local txt = tostring(safe(function() return d.Text end, "") or "")
             local low = txt:lower()
             if low:find("fulfill", 1, true) or low:find("fulfil", 1, true)
                 or low:find("ship", 1, true) or low:find("drop", 1, true)
                 or low:find("sell", 1, true) then
-                hits += 1
-                local ad = safe(function() return d.Adornee end, nil)
-                local p = ad and select(1, boxOf(ad)) or nil
-                say(string.format("   '%s'  at %s  %s", txt, posText(p), d:GetFullName()))
+                -- a label's spot is its gui's adornment, or the part holding it
+                local p, probe = nil, d
+                for _ = 1, 5 do
+                    if not probe then break end
+                    local ad = safe(function() return probe.Adornee end, nil)
+                    if ad then p = select(1, boxOf(ad)); break end
+                    if probe:IsA("BasePart") then p = safe(function() return probe.Position end, nil); break end
+                    probe = probe.Parent
+                end
+                local dist = (p and here) and (p - here).Magnitude or nil
+                local line = string.format("   '%s'  at %s%s  %s", txt, posText(p),
+                    dist and string.format("  %.0f studs", dist) or "", d:GetFullName())
+                if dist and dist <= 60 then
+                    localHits[#localHits + 1] = line
+                elseif #farHits < 12 then
+                    farHits[#farHits + 1] = line
+                end
             end
         end
     end
-    if hits == 0 then say("   (none readable)") end
+    say("   -- near you (<=60 studs)")
+    if #localHits == 0 then say("      (none)") end
+    for _, line in ipairs(localHits) do say(line) end
+    say("   -- elsewhere (first 12)")
+    if #farHits == 0 then say("      (none)") end
+    for _, line in ipairs(farHits) do say(line) end
 end
 
 local function oldTargets()
     say("")
-    say("== the old sell-pad targets the script scans today ==")
+    say("== the other old sell targets (SellArea / Buildings) ==")
     local objects = safe(function() return workspace:FindFirstChild("Objects") end, nil)
-    local stores = safe(function() return workspace:FindFirstChild("Stores") end, nil)
-    local drops = stores and safe(function() return stores:FindFirstChild("DropOffs") end, nil)
-    if drops then
-        for _, d in ipairs(drops:GetChildren()) do
-            local p, sz = boxOf(d)
-            say(string.format("   DropOffs.%s  at %s%s", d.Name, posText(p),
-                sz and string.format("  size %.0fx%.0fx%.0f", sz.X, sz.Y, sz.Z) or ""))
-        end
-    else
-        say("   Stores.DropOffs NOT FOUND")
-    end
     local gv = safe(function() return workspace:FindFirstChild("GameplayVisuals") end, nil)
     local sell = gv and safe(function() return gv:FindFirstChild("SellArea") end, nil)
     if sell then
@@ -260,7 +502,16 @@ local function run()
     local root = char and char:FindFirstChild("HumanoidRootPart")
     say("you: " .. tostring(LP and LP.Name or "?") .. " at " .. posText(root and root.Position))
 
-    -- 1. candidate buildings / models anywhere whose name says what this is
+    -- 1. the local answer first: what is offered here, what is underfoot, and
+    --    what is close enough to be the pad. This is the part that names the
+    --    unload action and its key.
+    contextActions()
+    standingOn()
+    nearby(30)
+    dropTargets()
+    equipmentNear()
+
+    -- 2. candidate buildings / models anywhere whose name says what this is
     say("")
     say("== candidate buildings/models ==")
     local seen = {}
@@ -295,7 +546,6 @@ local function run()
         say("   (no model name matched — stand closer so the area is streamed in)")
     end
 
-    contextActions()
     signsAnywhere()
     oldTargets()
 end
