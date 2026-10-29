@@ -12,7 +12,7 @@ local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/release
     .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
     .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.35 · fluent gui"
+local VERSION    = "rebuild v1.36 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -4638,13 +4638,20 @@ local okBuild, errBuild = pcall(function()
     --   (small yaw, position untouched) and lift off W before the row end.
     --   Returns true = row done, false = W didn't move it (caller falls back to
     --   the seat throttle), nil = stopped.
+    -- ▸ WIDE BAND (user: "widen the steering range it takes bro it's like still
+    --   going side to side yo"). The game steers the small stuff; the script
+    --   only steps in for a BIG error. These two are the whole band — raise
+    --   them to correct less, lower them to correct more.
+    spudRowAng = 15 -- degrees of heading error that count as "off the row"
+    spudRowTol = 6  -- studs beside the row that count as "off the row"
+
     -- ▸ ROW STEERING DECISION (user: "when you drive there is like a game
     --   helper that auto re steers the tractor on course"). A/D is only for
     --   swinging the nose onto a row: a real heading error steers toward the
     --   aim. With the heading fine it presses NOTHING — the game holds the
     --   line. Returns left, right.
     function spudRowSteer(angDeg, crossY)
-        if (angDeg or 0) > 8 then
+        if (angDeg or 0) > (spudRowAng or 15) then
             return (crossY or 0) > 0, (crossY or 0) < 0
         end
         return false, false
@@ -4654,11 +4661,11 @@ local okBuild, errBuild = pcall(function()
     --   tgo straight and let the game do the ajustments"). Nudging A/D every
     --   tick to hug the row made the tractor swing side to side: the nudge and
     --   the game's own steering fought each other. Instead the leg is snapped
-    --   onto its row line before W goes down (heading error > 8 deg or a
-    --   lateral offset > tol), and after that only W is held.
+    --   onto its row line before W goes down — and only for a BIG error, so a
+    --   small drift is left to the game.
     function spudRowNeedsAlign(angDeg, cross, tol)
-        tol = tol or 2.5
-        return (angDeg or 0) > 8 or math.abs(cross or 0) > tol
+        tol = tol or spudRowTol or 6
+        return (angDeg or 0) > (spudRowAng or 15) or math.abs(cross or 0) > tol
     end
 
     local function keyRow(tr, seat, from, goal, who)
@@ -4683,6 +4690,7 @@ local okBuild, errBuild = pcall(function()
         local stallP, stallT = tr:GetPivot().Position, os.clock()
         local startP, startT = stallP, stallT
         local turnSince, stalls = nil, 0
+        local steerRow = false
         local deadline = os.clock() + 12 + legLen / 4
         releaseDriveKeys()
         claimOwnership(tr)
@@ -4728,7 +4736,16 @@ local okBuild, errBuild = pcall(function()
             local flat = Vector3.new(cf.LookVector.X, 0, cf.LookVector.Z)
             flat = flat.Magnitude > 0.1 and flat.Unit or dir
             local ang = math.acos(math.clamp(flat:Dot(dir), -1, 1))
-            if ang > math.rad(8) then
+            -- ▸ HYSTERESIS, so the boundary itself cannot oscillate. The nose
+            --   starts being steered past `spudRowAng` and is only let go once
+            --   it is back inside HALF that band — a nose wobbling around a
+            --   single threshold used to flip A/D/A/D and read as side-to-side.
+            if ang > math.rad(spudRowAng or 15) then
+                steerRow = true
+            elseif ang <= math.rad(spudRowAng or 15) * 0.5 then
+                steerRow = false
+            end
+            if steerRow then
                 -- ▸ KEEP GOING THROUGH THE CORNER (user: "instead of making it
                 --   stop at corners just make it keep going on the angle"):
                 --   W stays down and the nose is eased around, so the combine
