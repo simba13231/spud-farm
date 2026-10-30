@@ -8,13 +8,13 @@ asked and fixed, and the exact loop to prove a change works.
 description — it is the long-form manual and it is kept in sync with behaviour.
 
 - Main script: [SpudFarm_Full.lua](SpudFarm_Full.lua) — one paste-and-run Luau
-  file for the Roblox game *Farming and Friends*, currently `rebuild v1.41 ·
+  file for the Roblox game *Farming and Friends*, currently `rebuild v1.42 ·
   fluent gui` (`VERSION`, line 15). ≈12.3k lines.
 - Target: Windows + Git Bash. Luau toolchain lives in
   `%LOCALAPPDATA%\Temp\opencode\luau\` (`luau.exe`, `luau-compile.exe`,
   `luau-analyze.exe`).
 - Nothing here is a library or a build system. There is no bundler, no package
-  manager, no CI. Validation is a compile check plus twenty-six harness scripts in
+  manager, no CI. Validation is a compile check plus twenty-seven harness scripts in
   `tools/` (`python tools/run_all.py` runs the whole gate).
 
 ---
@@ -72,7 +72,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 ### 1.4 Script limits (these have broken the build before)
 
 13. **Luau's 200-local limit is real and we are 2 away from the practical
-    ceiling.** Run `python tools/local_budget.py`. As of v1.41:
+    ceiling.** Run `python tools/local_budget.py`. As of v1.42:
     `4-space locals before milkCycle: 183 (practical ceiling 185)`,
     whole body `190 / 200`, **headroom 2**. Do **not** add a `local` inside the
     main build closure. Reuse an existing local, convert the feature to a
@@ -105,7 +105,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 
 ### 1.6 Working tree state (read before editing)
 
-`HEAD` is the latest committed build (v1.41, fulfillment auto-unload), `main`
+`HEAD` is the latest committed build (v1.42, arc hop lands from above), `main`
 tracks `origin/main`, and the tree is clean. Keep it that way: make the change,
 run the gates, and commit only the files the change touches. `git add -A` is
 banned here. **Commit and push after every completed change** (owner's standing
@@ -132,17 +132,17 @@ done
 PYTHONIOENCODING=utf-8 python tools/test_doctor.py
 ```
 
-All of these must exit 0 (25 `*_test.py` harnesses + `test_doctor.py`, which
+All of these must exit 0 (26 `*_test.py` harnesses + `test_doctor.py`, which
 does not match `*_test.py`). A plain `for` loop is **not** enough on its own:
 most harnesses print `FAIL` but still exit 0, so the output has to be read.
 The one command that runs everything — compile, budget, name audit and every
 harness, checking both the exit code and the text — is:
 
 ```bash
-python tools/run_all.py        # 29/29 checks on v1.41
+python tools/run_all.py        # 30/30 checks on v1.42
 ```
 
-Last full run (v1.41): **29/29 checks passed** (26 harnesses + 3 gates).
+Last full run (v1.42): **30/30 checks passed** (27 harnesses + 3 gates).
 
 | Script | What it actually proves |
 |---|---|
@@ -160,6 +160,7 @@ Last full run (v1.41): **29/29 checks passed** (26 harnesses + 3 gates).
 | `herd_arm_test.py` | Arming a cow is fast when the menu is up, and the no-menu timeout is bounded. |
 | `herd_order_test.py` | Cows nearest the barn go first; a dirty free stall is skipped and an all-dirty barn arms nobody. |
 | `herd_send_test.py` | The wrong-barn regression: no fallback to a stranger's `AutoWoodenBarn`. |
+| `hop_test.py` | The arc hop's landing height: a return leg from the lower pad lands ON the field (never keeps the pad's height, which flew it under the ground), a trip down still lands at the takeoff height, the arc clears the landing by ~12 studs and arrives from above, a level hop stays level, a missing target Y keeps the takeoff height, a zero-length hop is one move, and stopping aborts without landing. |
 | `milk_arrivals_test.py` | The arrival wait watches stall `Occupant` values and scans a handful of times, not five times a second. |
 | `path_test.py` | The path engine: heap order, A* gap/corner rules, exact LOS through a single blocked cell, clearance refusal, Theta* straight-line and shorter-than-8-way paths, arcs refused near a wall, curvature cap, height-banded marking, cell sizing. |
 | `farm_width_test.py` | Working width and row plan: studs→tiles rounding, oriented-box union width, rotated bars, 1/2/3-wide plans (step, headland, row half-extent) and an interval-coverage proof on 100/200-stud and narrow fields; owner match rules. |
@@ -513,6 +514,15 @@ values, and the full tank always ends in a real trip:
     first, then falls back to Q (menu) / E (confirm) after a 3 s grace.
   **The tank dropping is the only proof** a pad took the load, in both cases. A
   failed trip backs off 60 s and the harvest carries on with the load it has.
+- **The hop lands from above** (v1.42, user: *"when the harvester is coming back
+  from somewhere it should drop from higher, because right now it is coming
+  from under"*). `hopTo` used to keep the **takeoff** height at both ends, so
+  the return leg from the Fulfillment pad (~140) flew the whole way under the
+  field (~172) and only surfaced on the last frame. It now lands at
+  `max(takeoff, target.Y)`, and the arc's lift is raised so the peak clears that
+  landing by ~12 studs — the ride climbs and comes **down** onto it. A trip to a
+  lower pad is unchanged (takeoff height, as before). The log names both heights:
+  `arc hop: 412 studs, lifting 70 studs (Y 172 → 140)`.
 - `SpudFulfillProbe.lua` reads the game's **live** offer billboards
   (`PCGP_ContextActions.Billboards`, with key + adornee), what the character is
   standing on, everything within 30 studs, `DropOffs` by distance, and nearby
@@ -927,8 +937,18 @@ pad drops the load with **zero** keys and **zero** calls, a working Sell call
 presses nothing, and an ignored Sell call still falls back to Q and E without
 claiming a sale.
 
-**Where it stands:** `rebuild v1.41 · fluent gui`, whole suite green (29/29),
-harness verified. **Not yet reloaded in game** after v1.22–v1.41 — the next real
+**"i found a but. when the harvester is coming back from somewhere it should
+drop from higher, becuase right not it is coming from under"** → v1.42. The
+arc hop kept the takeoff height at both ends, so the return leg from the
+Fulfillment pad (~140) travelled under the field (~172) and popped up only at
+the last frame. `hopTo` now lands at `max(takeoff, target.Y)` and lifts enough
+to clear that landing by ~12 studs, so an upward trip arrives from above; a
+downward trip is unchanged. New `hop_test.py` (15 checks) pins the landing
+height, the clearance, the descent, level hops, a missing target Y, the
+zero-length case and the stop; suite **30/30**.
+
+**Where it stands:** `rebuild v1.42 · fluent gui`, whole suite green (30/30),
+harness verified. **Not yet reloaded in game** after v1.22–v1.42 — the next real
 test is a live pass watching `path: … theta* N pops / N ms, min clear N`, the
 new width line (`tool … — 3-wide …; rows every 30`), the Farm owner picker
 showing ONLY that owner's fields (`Field · Miou2251`), the equipment owner
@@ -993,7 +1013,10 @@ for this session`), and the equipment lines (`✅ mounted … (FNCEnterEquipment
    menu-click fallbacks must finish the step) and v1.41 (Fulfillment: the trip
    must log `fulfillment pad … parked — this pad unloads by itself, pressing
    nothing`, press **no** key, and the tank must still drop; if it does not, the
-   log must say `the pad didn't take it while parked`).
+   log must say `the pad didn't take it while parked`) and v1.42 (the arc hop:
+   the return trip from a lower pad must climb and **come down** onto the field
+   — watch `arc hop: N studs, lifting N studs (Y 140 → 172)` — not fly under
+   the ground; a trip to a lower pad must still land at the takeoff height).
    Harness green ≠ game green.
 2. **The 24 % baseline may differ per build.** If stalls sit higher, the first
    pass logs `reads X% but the game offers no Clean there - the dirty line moves

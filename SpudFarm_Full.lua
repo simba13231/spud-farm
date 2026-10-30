@@ -12,7 +12,7 @@ local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/release
     .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
     .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.41 · fluent gui"
+local VERSION    = "rebuild v1.42 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -5938,15 +5938,20 @@ local okBuild, errBuild = pcall(function()
     local SELL_HOP_SPEED = 140 -- studs/s (the arc makes it read as a jump, not a blur)
     -- ▸ THE ARC HOP (user: "make the harvester use arch tween thing to go to and
     --   back from the sell"). A flat slide reads as a teleport glued to the
-    --   ground; this lifts the ride on a sine arc — zero at both ends, highest
-    --   in the middle — while it covers the distance, so the trip reads as a
-    --   jump that lands exactly on the target (Y is the ride's own Y at both
-    --   ends, so it never sinks into the ground or the pad).
+    --   ground; this lifts the ride on a sine arc — highest in the middle —
+    --   while it covers the distance. The landing is the HIGHER of the two
+    --   heights: user: "when the harvester is coming back … it should drop from
+    --   higher, because right now it is coming from under". It used to keep the
+    --   TAKEOFF height at both ends, so a return leg from the lower Fulfillment
+    --   pad flew the whole way under the field and only surfaced at the end.
+    --   A trip down (pad below the field) still lands at the takeoff height,
+    --   which is where the ride left the ground.
     local function hopTo(tr, target, speed)
         speed = speed or SELL_HOP_SPEED
         local cf = tr:GetPivot()
         local from = cf.Position
-        local to = Vector3.new(target.X, from.Y, target.Z)
+        local toY = target.Y and math.max(from.Y, target.Y) or from.Y
+        local to = Vector3.new(target.X, toY, target.Z)
         local rot = cf - cf.Position -- heading only, zero position
         local flat = Vector3.new(to.X - from.X, 0, to.Z - from.Z)
         local dist = flat.Magnitude
@@ -5956,16 +5961,19 @@ local okBuild, errBuild = pcall(function()
         end
         local dir = flat / dist
         -- the arc grows with the trip but is capped: a 400-stud errand must not
-        -- leave the map. 0.25 × distance, 18…70 studs of lift.
-        local lift = math.clamp(dist * 0.25, 18, 70)
-        log(string.format("arc hop: %.0f studs, lifting %.0f studs", dist, lift))
+        -- leave the map. It is also always tall enough to clear the LANDING
+        -- height by ~12 studs, so the ride comes DOWN onto it.
+        local rise = toY - from.Y
+        local lift = math.clamp(math.max(dist * 0.25, rise / 2 + 12), 18, 70)
+        log(string.format("arc hop: %.0f studs, lifting %.0f studs (Y %.0f → %.0f)",
+            dist, lift, from.Y, toY))
         local travelled, tick = 0, 0.03
         while travelled < dist do
             if stopping() then return nil end
             travelled = math.min(dist, travelled + speed * tick)
             local t = travelled / dist
             local p = from + dir * travelled
-            p = Vector3.new(p.X, from.Y + lift * math.sin(math.pi * t), p.Z)
+            p = Vector3.new(p.X, from.Y + rise * t + lift * math.sin(math.pi * t), p.Z)
             tr:PivotTo(CFrame.new(p) * rot)
             task.wait(tick)
         end

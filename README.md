@@ -86,7 +86,9 @@ Everything merged into one paste-and-run file:
   tank dropping is the only proof a pad took the load — the console prints
   `fulfillment pad: Deposit_Warehouse at (…)`, `drop-off 1/1: …`, then
   `✅ sold at …` or an honest `still full — none of the pads took the load`,
-  after which the trip backs off 60 s and the harvest carries on.
+  after which the trip backs off 60 s and the harvest carries on. Every hop
+  lands at the **higher** of the two heights and arcs above it, so the trip
+  back from a lower pad drops down onto the field instead of flying under it.
 - **Trees are left alone** — the harvester never drives a field whose type or
   model name says wood / tree / log / forest / timber / lumber / sawmill / stump,
   so standing trees are not cut. A field whose cell read succeeds but returns
