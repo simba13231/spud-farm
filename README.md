@@ -120,7 +120,11 @@ Everything merged into one paste-and-run file:
   farm that finds **no pad at all** first hops the harvester to the store's own
   waypoint, waits for the pads to stream, and looks again (`no Sell pad is
   streamed from here — arc hop to the store, then looking again`); the trip
-  back still returns to the field.
+  back still returns to the field. And the sell call itself does **not** check
+  distance — the live test sold a full tank from 46 studs off the board — so
+  **Sell** fires `EVTSellAtStore` from wherever the harvester stands first:
+  a tank that drops logs `✅ sold in place … (no pad trip)` and the harvest
+  carries on without moving; only a refusal takes the pad trip.
 - **Trees are left alone** — the harvester never drives a field whose type or
   model name says wood / tree / log / forest / timber / lumber / sawmill / stump,
   so standing trees are not cut. A field whose cell read succeeds but returns

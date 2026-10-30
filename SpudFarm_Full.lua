@@ -12,7 +12,7 @@ local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/release
     .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
     .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.48 · fluent gui"
+local VERSION    = "rebuild v1.49 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -6103,6 +6103,7 @@ local okBuild, errBuild = pcall(function()
         -- Captured BEFORE any store hop, or the trip back would return to the
         -- market instead of the field.
         local back = ride:GetPivot().Position
+        local movedForStore = false
         local spots = sellMode and findSellSpots() or spudFulfillSpots()
         -- ▸ THE STORE STREAMS WITH DISTANCE (user: "the harvester's contents
         --   arent getting sold"). Both pad folders live at the market, so a
@@ -6133,6 +6134,7 @@ local okBuild, errBuild = pcall(function()
                 end)
             end
             if found then
+                movedForStore = true
                 log("no " .. dest .. " pad is streamed from here — arc hop to the store, then looking again")
                 hopTo(ride, found, SELL_HOP_SPEED)
                 task.wait(1.2)
@@ -6146,6 +6148,40 @@ local okBuild, errBuild = pcall(function()
         -- the 1-second watch is muted for the whole trip: the tank is STILL
         -- full while driving to the pad, and it must not abort that drive
         sellingNow = true
+        -- ▸ THE SELL CALL DOES NOT CHECK DISTANCE (live test 2026-10-30: a full
+        --   tank dropped 50 → 0 and paid +150 coins from 46 studs off the crop
+        --   board, with no pad visit). Fire it from where the harvester stands
+        --   first: a tank that drops there saves the whole approach. A refusal
+        --   falls through to the arc hop, exactly as before. Fulfillment is
+        --   left alone — that pad unloads by parking, not by this call.
+        if sellMode then
+            for _, s in ipairs(spots) do
+                if s.part then
+                    local l0 = harvesterLoad(ride)
+                    spudSellRemote(ride, s.part)
+                    log("sell: EVTSellAtStore fired from where the harvester stands — watching the tank")
+                    local deadline = os.clock() + 3.5
+                    while os.clock() < deadline do
+                        if stopping() then sellingNow = false return false end
+                        task.wait(0.25)
+                        local l1 = harvesterLoad(ride)
+                        if l0 and l1 and l1 < l0 then
+                            log(string.format("✅ sold in place — load %d → %d, coins %s (no pad trip)",
+                                l0, l1, tostring(coinBalance())))
+                            if movedForStore and field and field.Parent then
+                                log("arc back to " .. field.Name .. " to finish the harvest")
+                                hopTo(ride, back, SELL_HOP_SPEED)
+                            end
+                            sellingNow = false
+                            watchHit = false
+                            return true
+                        end
+                    end
+                    log("sell: the in-place call didn't move the tank — taking the pad trip")
+                    break
+                end
+            end
+        end
         for i, s in ipairs(spots) do
             if stopping() then sellingNow = false return false end
             log(string.format("drop-off %d/%d: %s at (%.0f, %.0f) — arc hop, no pathfinding", i, #spots,
