@@ -12,7 +12,7 @@ local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/release
     .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
     .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.47 · fluent gui"
+local VERSION    = "rebuild v1.48 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -5803,7 +5803,7 @@ local okBuild, errBuild = pcall(function()
                 end
                 if not near then out[#out + 1] = {
                     p = c.p, what = c.what, store = c.store, dist = c.dist,
-                    board = c.board } end
+                    board = c.board, part = c.part } end
             end
         end
         log(string.format("sell pads: %d candidate(s), %d at the crop store — nearest FarmCo first: %s",

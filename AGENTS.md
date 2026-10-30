@@ -8,7 +8,7 @@ asked and fixed, and the exact loop to prove a change works.
 description — it is the long-form manual and it is kept in sync with behaviour.
 
 - Main script: [SpudFarm_Full.lua](SpudFarm_Full.lua) — one paste-and-run Luau
-  file for the Roblox game *Farming and Friends*, currently `rebuild v1.47 ·
+  file for the Roblox game *Farming and Friends*, currently `rebuild v1.48 ·
   fluent gui` (`VERSION`, line 15). ≈12.3k lines.
 - Target: Windows + Git Bash. Luau toolchain lives in
   `%LOCALAPPDATA%\Temp\opencode\luau\` (`luau.exe`, `luau-compile.exe`,
@@ -72,7 +72,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 ### 1.4 Script limits (these have broken the build before)
 
 13. **Luau's 200-local limit is real and we are 2 away from the practical
-    ceiling.** Run `python tools/local_budget.py`. As of v1.47:
+    ceiling.** Run `python tools/local_budget.py`. As of v1.48:
     `4-space locals before milkCycle: 183 (practical ceiling 185)`,
     whole body `190 / 200`, **headroom 2**. Do **not** add a `local` inside the
     main build closure. Reuse an existing local, convert the feature to a
@@ -105,7 +105,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 
 ### 1.6 Working tree state (read before editing)
 
-`HEAD` is the latest committed build (v1.47, sell reaches the store), `main`
+`HEAD` is the latest committed build (v1.48, sell pad part), `main`
 tracks `origin/main`, and the tree is clean. Keep it that way: make the change,
 run the gates, and commit only the files the change touches. `git add -A` is
 banned here. **Commit and push after every completed change** (owner's standing
@@ -139,10 +139,10 @@ The one command that runs everything — compile, budget, name audit and every
 harness, checking both the exit code and the text — is:
 
 ```bash
-python tools/run_all.py        # 30/30 checks on v1.47
+python tools/run_all.py        # 30/30 checks on v1.48
 ```
 
-Last full run (v1.47): **30/30 checks passed** (27 harnesses + 3 gates).
+Last full run (v1.48): **30/30 checks passed** (27 harnesses + 3 gates).
 
 | Script | What it actually proves |
 |---|---|
@@ -1054,6 +1054,14 @@ fill test read nil — it now reads that pair and reports `seeds s/m`.
 `dropoff_test.py` grew 7 checks (streamed pad = one hop, no pad → store hop →
 sell, trip back to the field, no marker = honest skip).
 
+**v1.48** — the very next v1.47 report said `sell: the pads found carry no part
+to fire at`. The rebuilt output list in `findSellSpots` copied `p/what/store/
+dist/board` but **dropped `part`**, so every spot the trip used had no part for
+`EVTSellAtStore`. Fixed (`part = c.part`), and `dropoff_test.py` now asserts
+every returned spot carries a part (2 spots in the fixture). The same report
+confirmed the fill reads `seeds 0/50` and the fill from 965 studs left it at
+0/50 — the seeder fill needs proximity too.
+
 **Where it stands:** `rebuild v1.47 · fluent gui`, whole suite green (30/30),
 harness verified. **Not yet reloaded in game** after v1.22–v1.46 — the next real
 test is a live pass watching `path: … theta* N pops / N ms, min clear N`, the
@@ -1138,7 +1146,9 @@ for this session`), and the equipment lines (`✅ mounted … (FNCEnterEquipment
    must either read the seed count or dump the seeder's fields so the next run
    can name it) and v1.47 (a full harvester with no pad streamed must log
    `no Sell pad is streamed from here — arc hop to the store`, then sell at the
-   board; the fill test must read `seeds 0/50` and say whether the fill took).
+   board; the fill test must read `seeds 0/50` and say whether the fill took)
+   and v1.48 (every sell spot the trip receives must carry a `part`; the test
+   must fire `EVTSellAtStore` instead of saying "no part to fire at").
    Harness green ≠ game green.
 2. **The 24 % baseline may differ per build.** If stalls sit higher, the first
    pass logs `reads X% but the game offers no Clean there - the dirty line moves

@@ -25,7 +25,7 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SRC = ROOT / "SpudFarm_Full.lua"
-WANTED = ["spudSellNow", "spudFulfillSpots", "trySellAt", "sellHarvester"]
+WANTED = ["spudSellNow", "spudFulfillSpots", "findSellSpots", "trySellAt", "sellHarvester"]
 
 PRE = r"""
 local V = {}
@@ -43,6 +43,17 @@ local NODE = {}
 NODE.__index = NODE
 function NODE:FindFirstChild(name) return self.kids[name] end
 function NODE:GetChildren() return self.list end
+function NODE:GetDescendants()
+    local out = {}
+    local function walk(n)
+        for _, k in ipairs(n.list) do
+            out[#out + 1] = k
+            walk(k)
+        end
+    end
+    walk(self)
+    return out
+end
 function NODE:IsA(cls) return cls == self._cls end
 
 GRID = setmetatable({ kids = {}, list = {}, _cls = "Workspace" }, NODE)
@@ -174,6 +185,7 @@ check("sell pad: it falls back to Q and E", pressed:find("Q") ~= nil and pressed
 check("sell pad: the failure line names the pad", loggedText():find("DropOff") ~= nil)
 
 -- 6. a full tank still finds the store when no pad is streamed yet
+local realFindSellSpots = findSellSpots -- keep the extracted one for section 7
 local hops = {}
 function hopTo(ride, target, speed)
     hops[#hops + 1] = { X = target.X, Y = target.Y, Z = target.Z }
@@ -232,6 +244,24 @@ local okNone = sellHarvester(ride, nil, nil)
 check("sell: no pad and no marker -> no sale, no hop", okNone == false and #hops == 0 and soldAt == nil)
 check("sell: the log says the unload was skipped",
     loggedText():find("pad found") ~= nil and loggedText():find("skipped") ~= nil)
+
+-- 7. every sell spot carries the part the sell call fires at
+local gvNode = folder("GameplayVisuals", GRID)
+local saNode = folder("SellArea", gvNode)
+part("Pad", saNode, 20, 100, 20, 10, 1, 10)
+local markersNode = folder("Markers", GRID)
+local gotosNode = folder("GotoLocations", markersNode)
+part("FarmCo", gotosNode, 0, 100, 0, 8, 1, 8)
+part("SellBoardSeeds", gotosNode, 0, 100, 0, 8, 1, 8)
+function storeAnchors() return { FarmCo = Vector3.new(0, 100, 0) } end
+local sellSpots = realFindSellSpots()
+check("sell spots: pads are found", #sellSpots > 0, #sellSpots .. " spot(s)")
+local missingPart = 0
+for _, s in ipairs(sellSpots) do
+    if not s.part then missingPart += 1 end
+end
+check("sell spots: every spot carries the part to fire at", missingPart == 0,
+    missingPart .. " without part")
 
 print(fails == 0 and "ALL OK" or (fails .. " FAILED"))
 """
