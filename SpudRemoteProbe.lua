@@ -364,9 +364,11 @@ local function buildReport()
     --   fulfillment pad, seed buying, feeders and gates. None of these are
     --   wired yet because none has a captured shape.
     callSection("ACTION CALLS (clean / milk / herd / sell / fulfill / feed / gate)",
-        { "CleanAnimal", "AnimalInteraction", "CollectAnimalProduction",
-          "SellAtStore", "SellAtAnimalCo", "FulfillOrder", "FillFeeder",
-          "FillFeedDispenser", "Gate", "Shear", "Spindle" },
+        { "FilthCleaning", "CleanAnimal", "AnimalAction", "AnimalInteraction",
+          "CollectAnimalProduction", "SellAtStore", "SellAtAnimalCo",
+          "SellObjects", "FulfillOrder", "FillFeeder", "FillFeedDispenser",
+          "OpenBarnGate", "Gate", "Shear", "Spindle",
+          "RequestStorePurchase" },
         "do one clean / milk / herd / sell / fulfill / feed / gate action by hand")
 
     w("")

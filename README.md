@@ -65,14 +65,18 @@ Everything merged into one paste-and-run file:
   equipment calls, so the script fires them instead of pressing keys or driving
   the Equipment Manager UI: `FNCEnterEquipment(vehicle, seat)` to mount,
   `FNCAttemptHitch(hitchable, socket)` / `FNCUnhitch(hitchable)` for tools,
-  `FNCSpawnEquipment(model)` / `FNCStoreEquipment(model)` for storage, and
-  `EVTRequestToCarry(draggable)` / `EVTRequestToDrop()` for carried items. Each
-  is used only where the game offers the action, and the effect has to prove
-  it: the seat actually holding the character, the existing hitch/unhitch tug,
-  the `InStorage` flag (or a >100-stud move for a rebuilt spawn), hands
-  filling or emptying. A call that does not land falls back to the old
-  F/X/E/UI path in the same step, and three misses switch that one call off for
-  the session.
+  `FNCSpawnEquipment(model)` / `FNCStoreEquipment(model)` for storage,
+  `EVTRequestToCarry(draggable)` / `EVTRequestToDrop()` for carried items,
+  `EVTSellAtStore(harvester, pad)` for a **Sell** drop-off and
+  `FNCRequestStorePurchase({crate})` for buying a seed crate. Each is used only
+  where the game offers the action, and the effect has to prove it: the seat
+  actually holding the character, the existing hitch/unhitch tug, the
+  `InStorage` flag (or a >100-stud move for a rebuilt spawn), hands filling or
+  emptying, the tank dropping (sell) and the balance or crate count moving
+  (buy). A call that does not land falls back to the old F/X/E/Q/UI path in the
+  same step, and three misses switch that one call off for the session. The
+  **Fulfillment** drop-off still uses the pad's Q/E — its own order call was
+  never captured.
 - **Drop-off pick** — Farm tab → **Drop-off**: **Fulfillment** (default) or
   **Sell**. When the harvester's tank fills, it stops the row, arc-hops to the
   chosen pad, and unloads: Fulfillment is the warehouse pad
@@ -408,12 +412,13 @@ Roblox detection has three layers. **No Luau script can affect layer 1:**
    `EVTFillLiquidCarrier`); the field passes replay the game's own cell calls
    (`EVTCultivateFieldCell` was recorded verbatim; the plow/seed/harvest
    siblings share that shape on the same captured path); and the equipment
-   steps fire the captured mount, hitch/unhitch, spawn/store, carry and drop
-   calls. Nothing is trusted: a jug only counts once it is in `CarryLinks`, a
-   fill only once the tank rises, three ignored calls put the key path back for
-   the session, every field batch is re-read after firing, and every equipment
-   call has to show its effect (seat, tug, `InStorage`, hands) — a job the
-   server ignores goes back to keys/UI for the rest of the session.
+   steps fire the captured mount, hitch/unhitch, spawn/store, carry/drop, sell
+   and purchase calls. Nothing is trusted: a jug only counts once it is in
+   `CarryLinks`, a fill only once the tank rises, three ignored calls put the
+   key path back for the session, every field batch is re-read after firing,
+   and every equipment call has to show its effect (seat, tug, `InStorage`,
+   hands, tank, balance) — a job the server ignores goes back to keys/UI for
+   the rest of the session.
 3. **Behavioral/ML scoring** — flags robotic timing, 24/7 sessions, crowded-server
    play. Mitigations built in: ±40% timing jitter, random micro-pauses, session
    limiter (auto-break, default 45 min on / 4 min off).

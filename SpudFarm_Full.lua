@@ -12,7 +12,7 @@ local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/release
     .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
     .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.39 · fluent gui"
+local VERSION    = "rebuild v1.40 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -3907,6 +3907,8 @@ local okBuild, errBuild = pcall(function()
             store = { "FNCStoreEquipment", "InvokeServer" },
             carry = { "EVTRequestToCarry", "FireServer" },
             drop = { "EVTRequestToDrop", "FireServer" },
+            sell = { "EVTSellAtStore", "FireServer" },
+            purchase = { "FNCRequestStorePurchase", "InvokeServer" },
         }
         local kit = {}
         for key, spec in pairs(specs) do
@@ -4023,6 +4025,22 @@ local okBuild, errBuild = pcall(function()
         local th = tc and tc:FindFirstChild("Hitchable")
         if not th then return false end
         return spudEquipRemoteCall("unhitch", th)
+    end
+
+    -- EVTSellAtStore(ride, pad) — captured at the crop store with a full
+    -- harvester (the pad part is the second argument). The tank dropping is
+    -- still the proof; Q/E stays the fallback.
+    function spudSellRemote(ride, pad)
+        if not (ride and pad) then return false end
+        return spudEquipRemoteCall("sell", ride, pad)
+    end
+
+    -- FNCRequestStorePurchase({crate}) — what the buy popup's Purchase button
+    -- fires. The balance/crate count is the proof; the menu click stays the
+    -- fallback.
+    function spudPurchaseRemote(crate)
+        if not crate then return false end
+        return spudEquipRemoteCall("purchase", { crate })
     end
 
     -- scan every field of mine ONCE (nearest-first) and say what work is
@@ -4686,9 +4704,31 @@ local okBuild, errBuild = pcall(function()
         local bought, clickedAny = false, false
         local after, box, lastBtns
         local cratesBefore = crateCount()
-        setStage("shop trip: waiting for the " .. tostring(seedName) .. " purchase to land")
+        -- ▸ the captured FNCRequestStorePurchase({crate}) first — it is what
+        --   the popup's Purchase button fires. The balance (or a new crate)
+        --   is the proof; the click loop below is the fallback.
+        setStage("shop trip: buying the " .. tostring(seedName) .. " crate")
+        if spudPurchaseRemote(hit.m) then
+            for _ = 1, 8 do
+                if stopping() then return false end
+                task.wait(0.4)
+                after = coinBalance()
+                if before and after and after < before then bought = true break end
+                if crateCount() > cratesBefore then bought = true break end
+            end
+            if bought then
+                log(string.format("✅ %s bought via FNCRequestStorePurchase (balance %s → %s)",
+                    seedName, tostring(before), tostring(after)))
+            else
+                log("seed shop: FNCRequestStorePurchase didn't buy anything — clicking the menu")
+            end
+        end
+        if not bought then
+            setStage("shop trip: waiting for the " .. tostring(seedName) .. " purchase to land")
+        end
         for attempt = 1, 3 do
             if stopping() then return false end
+            if bought then break end
             local btns, lb = harvestMenu(views)
             if #btns == 0 then btns, lb = harvestMenu(pg) end
             lastBtns = btns
@@ -5622,6 +5662,7 @@ local okBuild, errBuild = pcall(function()
             end
             cands[#cands + 1] = {
                 p = top, what = what, named = named and true or false,
+                part = d,
                 store = nearest, dist = farm and (top - farm).Magnitude or 1e9,
                 y = top.Y, area = d.Size.X * d.Size.Z,
             }
@@ -5801,11 +5842,19 @@ local okBuild, errBuild = pcall(function()
     --   harvester sat on the pad for ever and the sweep carried on filling a
     --   tank that could not fill. The load dropping is still the only judge;
     --   Q/menu/E are just the ways to make it happen.
-    local function trySellAt(ride, what)
+    local function trySellAt(ride, what, pad)
         local cap0 = harvesterLoad(ride)
         local coins0 = coinBalance()
         task.wait(0.8) -- the pad needs a beat to register the vehicle
         if stopping() then return false end
+        -- ▸ the captured EVTSellAtStore(ride, pad) first — it is the call the
+        --   store's own sell action fires. The tank dropping is still the only
+        --   proof, and Q/E is the fallback after a short grace window.
+        local viaRemote = spudSellRemote(ride, pad)
+        local remoteBy = os.clock() + 3
+        if viaRemote then
+            log("sell pad " .. what .. ": EVTSellAtStore(ride, pad) — waiting for the tank to drop")
+        end
         local deadline = os.clock() + 16
         local opened, blind = 0, 0
         while os.clock() < deadline do
@@ -5818,32 +5867,38 @@ local okBuild, errBuild = pcall(function()
                 if sellMenuOpen() then closeSellMenu() end
                 return true
             end
-            -- 1) Q opens the sell menu (the documented key for the pad)
-            if not sellMenuOpen() and opened < 4 then
-                opened += 1
-                log(string.format("sell pad %s: Q (open the sell menu) — try %d", what, opened))
-                pressKey(Enum.KeyCode.Q)
-                task.wait(0.9)
-                if stopping() then return false end
-            end
-            -- 2) confirm inside the menu with its own handler (no mouse);
-            --    E is the documented confirm key and the fallback when no
-            --    menu shows up at all
-            if sellMenuOpen() then
-                if not confirmSellMenu() then
-                    log("sell menu is up but has no sell/confirm button — pressing E")
+            if viaRemote and os.clock() < remoteBy then
+                -- give the call its grace window before touching a key
+                task.wait(0.5)
+            else
+                -- 1) Q opens the sell menu (the documented key for the pad)
+                if not sellMenuOpen() and opened < 4 then
+                    opened += 1
+                    log(string.format("sell pad %s: Q (open the sell menu) — try %d", what, opened))
+                    pressKey(Enum.KeyCode.Q)
+                    task.wait(0.9)
+                    if stopping() then return false end
+                end
+                -- 2) confirm inside the menu with its own handler (no mouse);
+                --    E is the documented confirm key and the fallback when no
+                --    menu shows up at all
+                if sellMenuOpen() then
+                    if not confirmSellMenu() then
+                        log("sell menu is up but has no sell/confirm button — pressing E")
+                        pressKey(Enum.KeyCode.E)
+                    end
+                elseif blind < 3 then
+                    blind += 1
+                    log("sell pad " .. what .. ": no menu yet — pressing E (confirm)")
                     pressKey(Enum.KeyCode.E)
                 end
-            elseif blind < 3 then
-                blind += 1
-                log("sell pad " .. what .. ": no menu yet — pressing E (confirm)")
-                pressKey(Enum.KeyCode.E)
+                task.wait(1.0)
             end
-            task.wait(1.0)
         end
-        log(string.format("no sale at %s after 16 s (load %s, coins %s → %s, sell menu %s)",
+        log(string.format("no sale at %s after 16 s (load %s, coins %s → %s, sell menu %s%s)",
             what, tostring(cap0), tostring(coins0), tostring(coinBalance()),
-            sellMenuOpen() and "OPEN" or "never opened"))
+            sellMenuOpen() and "OPEN" or "never opened",
+            viaRemote and " · EVTSellAtStore was fired" or ""))
         -- ▸ SAY WHAT THE MENU ACTUALLY OFFERS. If the confirm button is named
         --   something this filter doesn't know, this line names it instead of
         --   leaving the trip a mystery.
@@ -5951,7 +6006,8 @@ local okBuild, errBuild = pcall(function()
         local top = best.Position + Vector3.new(0, best.Size.Y / 2, 0)
         log(string.format("fulfillment pad: %s at (%.0f, %.0f, %.0f)",
             best.Name, top.X, top.Y, top.Z))
-        out[1] = { p = top, what = "DropOffs." .. best.Name, store = "Fulfillment" }
+        out[1] = { p = top, what = "DropOffs." .. best.Name, store = "Fulfillment",
+            part = best }
         return out
     end
 
@@ -5962,7 +6018,8 @@ local okBuild, errBuild = pcall(function()
             log("harvester load unreadable — sell trip skipped")
             return false
         end
-        local dest = (spudDropOff == "Sell") and "sell" or "Fulfillment"
+        local sellMode = spudDropOff == "Sell"
+        local dest = sellMode and "sell" or "Fulfillment"
         log(string.format("harvester FULL (%d/%s) — going to %s", cur, tostring(max), dest))
         local spots = (spudDropOff == "Sell") and findSellSpots() or spudFulfillSpots()
         if #spots == 0 then
@@ -5982,7 +6039,7 @@ local okBuild, errBuild = pcall(function()
             local ok = hopTo(ride, s.p, SELL_HOP_SPEED)
             if not ok then
                 log("couldn't hop to " .. s.what .. " (hop interrupted)")
-            elseif trySellAt(ride, s.what) then
+            elseif trySellAt(ride, s.what, sellMode and s.part or nil) then
                 if field and field.Parent then
                     log("arc back to " .. field.Name .. " to finish the harvest")
                     hopTo(ride, back, SELL_HOP_SPEED)

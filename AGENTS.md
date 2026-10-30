@@ -8,7 +8,7 @@ asked and fixed, and the exact loop to prove a change works.
 description — it is the long-form manual and it is kept in sync with behaviour.
 
 - Main script: [SpudFarm_Full.lua](SpudFarm_Full.lua) — one paste-and-run Luau
-  file for the Roblox game *Farming and Friends*, currently `rebuild v1.39 ·
+  file for the Roblox game *Farming and Friends*, currently `rebuild v1.40 ·
   fluent gui` (`VERSION`, line 15). ≈12.3k lines.
 - Target: Windows + Git Bash. Luau toolchain lives in
   `%LOCALAPPDATA%\Temp\opencode\luau\` (`luau.exe`, `luau-compile.exe`,
@@ -72,7 +72,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 ### 1.4 Script limits (these have broken the build before)
 
 13. **Luau's 200-local limit is real and we are 2 away from the practical
-    ceiling.** Run `python tools/local_budget.py`. As of v1.39:
+    ceiling.** Run `python tools/local_budget.py`. As of v1.40:
     `4-space locals before milkCycle: 183 (practical ceiling 185)`,
     whole body `190 / 200`, **headroom 2**. Do **not** add a `local` inside the
     main build closure. Reuse an existing local, convert the feature to a
@@ -105,7 +105,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 
 ### 1.6 Working tree state (read before editing)
 
-`HEAD` is the latest committed build (v1.39, equipment remotes), `main`
+`HEAD` is the latest committed build (v1.40, sell + buy remotes), `main`
 tracks `origin/main`, and the tree is clean. Keep it that way: make the change,
 run the gates, and commit only the files the change touches. `git add -A` is
 banned here. **Commit and push after every completed change** (owner's standing
@@ -139,10 +139,10 @@ The one command that runs everything — compile, budget, name audit and every
 harness, checking both the exit code and the text — is:
 
 ```bash
-python tools/run_all.py        # 29/29 checks on v1.39
+python tools/run_all.py        # 29/29 checks on v1.40
 ```
 
-Last full run (v1.39): **29/29 checks passed** (26 harnesses + 3 gates).
+Last full run (v1.40): **29/29 checks passed** (26 harnesses + 3 gates).
 
 | Script | What it actually proves |
 |---|---|
@@ -598,14 +598,19 @@ EVTRequestToCarry(draggable) / EVTRequestToDrop()
   `dropImplementAtOrigin`), `InStorage` flipping (or a >100-stud move for a
   spawn that rebuilds the model) in `spudEquipRemoteAct`, and `carrying()`
   turning over for carry/drop.
+- **Sell and buy** — `EVTSellAtStore(ride, pad)` is fired for the **Sell**
+  destination (the tank dropping is the proof; Q/E after a 3 s grace), and
+  `FNCRequestStorePurchase({crate})` is fired at the buy popup (balance or a
+  new crate is the proof; the menu click is the fallback). **Fulfillment** still
+  uses Q/E — its order call was never captured.
 - **The old path always remains**: F for a mount, X for hitch/unhitch, E for a
   crate, the Equipment Manager UI for spawn/store. `spudEquipRemoteMiss` counts
   ignored calls; three switch that one action back to keys/UI for the session.
-- **Not wired yet**: cleaning a stall, milking, herding, selling, the
-  fulfillment pad, buying seeds, feeders and gates. Their shapes were never
+- **Not wired yet**: cleaning a stall, milking, herding, the fulfillment pad,
+  feeders and gates. Their shapes were never
   captured — `SpudRemoteProbe.lua` now has an **ACTION CALLS** section and a
   checklist for them (run it, or let one normal milk/barn cycle record while it
-  runs), and `EQUIPMENT CALLS` confirms the seven above.
+  runs), and `EQUIPMENT CALLS` confirms those above.
 
 `equip_remote_test.py` pins the kit, the call shapes, the effect proofs, the
 UI/key fallbacks and the three-miss switch-off.
@@ -623,7 +628,7 @@ UI/key fallbacks and the three-miss switch-off.
 | Whose machine | global `equipOwnerRank(m)` (farm being worked → mine → no readable owner → never another account), used by `findTractor` / `findImplement`; owner tag read by `milkStoreOwnerOf` |
 | Tree soil | global `spudTreeField(typeName, modelName)` (wood/tree/log/forest/timber/lumber/sawmill/stump → no crop harvest) and `spudNoCells(st)` (successful 0-cell read is empty, `nil` read is unknown); used in `probeWork`, `runPass`, `needLeft`, `grownLeft`, growth wait |
 | Field remotes | global `spudFieldRemoteKit()` (Modules.Larry: plow/cultivate/seed/harvest/fillSeeder), `spudFieldCellIds(field, stage)` (GetCells keys), `spudToolAttachment(impl)`, `spudFieldRemoteCall`, `spudFieldRemotePass` (fires, re-reads, self-disables a job), `spudFillSeederRemote`; state `spudFieldRemoteState`; wired at the top of `sweepField` and in `buySeedAndFill` |
-| Equipment remotes | global `spudEquipRemoteKit/State` (enter/hitch/unhitch/spawn/store/carry/drop), `spudEquipRemoteCall`, `spudEquipRemoteMiss`, `spudEquipRemoteAct` (spawn/store proof), `spudEnterRemote`, `spudHitchParts`, `spudHitchRemote`, `spudUnhitchRemote`, `spudCarryRemote`, `spudDropRemote`; wired in `managerAction`, `mountTractor`, `attemptHitch`, `dropImplementAtOrigin`, `carryCrate` and the two held-item drops |
+| Equipment remotes | global `spudEquipRemoteKit/State` (enter/hitch/unhitch/spawn/store/carry/drop/sell/purchase), `spudEquipRemoteCall`, `spudEquipRemoteMiss`, `spudEquipRemoteAct` (spawn/store proof), `spudEnterRemote`, `spudHitchParts`, `spudHitchRemote`, `spudUnhitchRemote`, `spudCarryRemote`, `spudDropRemote`, `spudSellRemote`, `spudPurchaseRemote`; wired in `managerAction`, `mountTractor`, `attemptHitch`, `dropImplementAtOrigin`, `carryCrate`, the two held-item drops, `trySellAt` and `buySeedAndFill` |
 | Row driving | `keyRow(tr, seat, from, goal, who)` drives rows on real W (the game auto-steers); global `spudRowSteer(angDeg, crossY, cross, tol)` (heading > 8°, cross-track > 2.5 studs → re-center); travel `ALIGN_MAXVEL = 34`, fallback row speed 18 |
 | Dirt line | global `milkDirtLine = 24`; `milkDirtHigh(spot)` (the single "is this dirty?" answer) |
 | Drop-off | global `spudDropOff` (**Fulfillment** / **Sell**, remembered in `spudSavedDropOff`), `spudSellNow(cur,max)`, `spudFulfillSpots()` (Deposit_Warehouse top), `findSellSpots()` (crop sell board), `sellHarvester` (arc hop + `trySellAt`), `harvestSellIfFull`; Farm tab dropdown `dropOffChoice` |
@@ -889,13 +894,22 @@ flip or a >100-stud move is the proof; the Equipment Manager UI is the
 fallback — this is where the old UI flow was slowest),
 `EVTRequestToCarry` / `EVTRequestToDrop` for crates and held items. Three
 ignored calls switch that one action off for the session. Cleaning, milking,
-herding, selling, fulfillment, seed buying, feeders and gates are **not** wired
-yet: their shapes were never captured, so the probe gained an ACTION CALLS
-section and a checklist for them. New `equip_remote_test.py` (22 checks); suite
-**29/29**.
+herding, fulfillment, feeders and gates are **not** wired yet: their shapes
+were never captured, so the probe gained an ACTION CALLS section and a checklist
+for them. New `equip_remote_test.py` (26 checks); suite **29/29**.
 
-**Where it stands:** `rebuild v1.39 · fluent gui`, whole suite green (29/29),
-harness verified. **Not yet reloaded in game** after v1.22–v1.39 — the next real
+**Two more capture runs** → v1.40. The plow report confirmed the field shape
+(`EVTPlowFieldCell(field, {id}, {plow RaycastPart})`), so plow is no longer an
+inferred sibling. The sell/buy report added two actions: a **Sell** drop-off now
+fires `EVTSellAtStore(harvester model, pad part)` before touching Q/E (the tank
+dropping is the proof), and the seed buy fires
+`FNCRequestStorePurchase({crate})` before clicking the popup (the balance or a
+new crate is the proof). Fulfillment still uses the pad's Q/E — its order call
+was never captured. The two reports also showed no clean/milk/herd/fulfill/
+feed/gate call, so those are still waiting on one targeted run.
+
+**Where it stands:** `rebuild v1.40 · fluent gui`, whole suite green (29/29),
+harness verified. **Not yet reloaded in game** after v1.22–v1.40 — the next real
 test is a live pass watching `path: … theta* N pops / N ms, min clear N`, the
 new width line (`tool … — 3-wide …; rows every 30`), the Farm owner picker
 showing ONLY that owner's fields (`Field · Miou2251`), the equipment owner
@@ -910,9 +924,11 @@ being driven on W with the tractor re-centering after a drift, the
 remote lines (`✅ remote seed: N cell(s) in X.Xs — the field is done without
 driving`, or the honest `remote seed: the game ignored N call(s) … — driving
 for this session`), and the equipment lines (`✅ mounted … (FNCEnterEquipment)`,
-`equipment: Store KADL via store (no UI)`, `✅ carrying the … (EVTRequestToCarry)`)
-or their honest fallback lines (`equipment: store didn't Store the KADL — using
-the Equipment Manager`).
+`equipment: Store KADL via store (no UI)`, `✅ carrying the … (EVTRequestToCarry)`,
+`sell pad …: EVTSellAtStore(ride, pad)`,
+`✅ <seed> bought via FNCRequestStorePurchase`) or their honest fallback lines
+(`equipment: store didn't Store the KADL — using the Equipment Manager`,
+`seed shop: FNCRequestStorePurchase didn't buy anything — clicking the menu`).
 
 ---
 
@@ -950,7 +966,11 @@ the Equipment Manager`).
    the count must rise, with V only on a refusal) and v1.39 (equipment remotes:
    watch `✅ mounted … (FNCEnterEquipment)`, `equipment: Store/Spawn … via …
    (no UI)`, `✅ carrying … (EVTRequestToCarry)`; a refused call must log its
-   fallback and the old F/X/E/UI path must still complete the step).
+   fallback and the old F/X/E/UI path must still complete the step) and v1.40
+   (sell/buy: a **Sell** drop-off must log `sell pad …: EVTSellAtStore(ride,
+   pad)` and the tank must drop; a seed buy must log `✅ <seed> bought via
+   FNCRequestStorePurchase` with the balance falling — otherwise the Q/E and
+   menu-click fallbacks must finish the step. Fulfillment still uses Q/E).
    Harness green ≠ game green.
 2. **The 24 % baseline may differ per build.** If stalls sit higher, the first
    pass logs `reads X% but the game offers no Clean there - the dirty line moves

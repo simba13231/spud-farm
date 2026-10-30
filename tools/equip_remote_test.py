@@ -9,6 +9,7 @@ tool, pick a crate up), all under Modules.Larry:
     FNCUnhitch(tractor.Components.Hitchable)
     FNCSpawnEquipment(model) / FNCStoreEquipment(model)
     EVTRequestToCarry(draggable) / EVTRequestToDrop()
+    EVTSellAtStore(harvester, pad) / FNCRequestStorePurchase({crate})
 
 Every helper fires the call only where the game offers the action and demands
 proof before trusting it:
@@ -46,6 +47,8 @@ WANTED = [
     "spudUnhitchRemote",
     "spudCarryRemote",
     "spudDropRemote",
+    "spudSellRemote",
+    "spudPurchaseRemote",
 ]
 
 PRE = r"""
@@ -157,6 +160,8 @@ local spawnRemote = newRemote("FNCSpawnEquipment", "RemoteFunction", spawnHandle
 local storeRemote = newRemote("FNCStoreEquipment", "RemoteFunction", storeHandler)
 local carryRemote = newRemote("EVTRequestToCarry", "RemoteEvent", carryHandler)
 local dropRemote = newRemote("EVTRequestToDrop", "RemoteEvent", dropHandler)
+local sellRemote = newRemote("EVTSellAtStore", "RemoteEvent", nil)
+local purchaseRemote = newRemote("FNCRequestStorePurchase", "RemoteFunction", nil)
 
 local larry = newInst("Larry", "Folder")
 adopt(larry, enterRemote)
@@ -166,6 +171,8 @@ adopt(larry, spawnRemote)
 adopt(larry, storeRemote)
 adopt(larry, carryRemote)
 adopt(larry, dropRemote)
+adopt(larry, sellRemote)
+adopt(larry, purchaseRemote)
 local modules = newInst("Modules", "Folder")
 adopt(modules, larry)
 local rs = newInst("ReplicatedStorage", "ReplicatedStorage")
@@ -338,7 +345,27 @@ mode.drop = "none"
 check("a refused drop returns false and counts a miss",
     spudDropRemote() == false and spudEquipRemoteState.fails.drop == 1)
 
--- 13. the kit goes away with the module folder
+-- 13. sell: EVTSellAtStore(ride, padPart)
+resetState()
+local pad = newInst("DropOff", "Part")
+local sl0 = sellRemote.fireCalls
+check("sell fires EVTSellAtStore(ride, pad)",
+    spudSellRemote(zm80, pad) == true
+        and sellRemote.fireCalls - sl0 == 1
+        and sellRemote.lastArgs[1] == zm80
+        and sellRemote.lastArgs[2] == pad)
+check("sell without a pad fires nothing", spudSellRemote(zm80, nil) == false)
+
+-- 14. buy: FNCRequestStorePurchase({crate})
+local pu0 = purchaseRemote.invokeCalls
+check("purchase fires FNCRequestStorePurchase({crate})",
+    spudPurchaseRemote(kadl) == true
+        and purchaseRemote.invokeCalls - pu0 == 1
+        and type(purchaseRemote.lastArgs[1]) == "table"
+        and purchaseRemote.lastArgs[1][1] == kadl)
+check("purchase without a crate fires nothing", spudPurchaseRemote(nil) == false)
+
+-- 15. the kit goes away with the module folder
 resetState()
 larry.Name = "LarryX"
 check("no Modules.Larry -> no equipment kit", spudEquipRemoteKit() == nil)
