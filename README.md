@@ -90,16 +90,22 @@ Everything merged into one paste-and-run file:
   see — a bulk field door we never fired would only show up there. **Wrong
   tool** fires a different job's call at the cell the hitched blade is over: if
   it takes, the server checks the blade's position, not which implement it
-  belongs to, and one tool could plow, cultivate and seed in one sweep. Every
-  line is logged as `test:` and **Copy report** puts place id, build, player
+  belongs to, and one tool could plow, cultivate and seed in one sweep.
+  **Lift test** parks the ride with the blade 0/8/20/40 studs directly above
+  one cell and fires: a take at height means the position check raycasts down
+  and the field could be flown over. **Field remotes** fires
+  `FNCSprayFieldCell(field, {id}, {att})` and reports `IsWatered` /
+  `PlantGrowth` / `Stage`, then invokes `FNCEditField()` and
+  `FNCConvertRundownField()` with **no arguments** just to read the shape they
+  demand (an error names it; nothing that could rebuild the field is handed to
+  them). Every line is logged as `test:` and **Copy report** puts place id, build, player
   and the whole run on the clipboard. Nothing touches animals or another
   player's plot, and the tests refuse to run while a farm pass is going.
   (The settled experiments — seat/stage/attachment checks, the burst, sell,
   carry, spawn, fill, the FieldHelper dump, force-a-tile and the field-packet
   watch/forge — were removed once they had their answer; their results are in
-  the console history. The packet was the last forcing candidate: patching a
-  real packet's stage byte sent nothing back and moved no cell, so
-  `EVTFieldPacket` is server→client only.)
+  the console history. The packet is server→client only: patching a real
+  packet's stage byte sent nothing back and moved no cell.)
 - **Equipment on the game's own remotes** — the same capture pass recorded the
   equipment calls, so the script fires them instead of pressing keys or driving
   the Equipment Manager UI: `FNCEnterEquipment(vehicle, seat)` to mount,

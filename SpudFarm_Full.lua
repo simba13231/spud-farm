@@ -12,7 +12,7 @@ local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/release
     .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
     .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.65 · fluent gui"
+local VERSION    = "rebuild v1.66 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -6351,7 +6351,7 @@ local okBuild, errBuild = pcall(function()
     end
 
     function spudTestRunAll()
-        for _, k in ipairs({ "remotes", "wrongtool" }) do
+        for _, k in ipairs({ "remotes", "wrongtool", "lift", "fieldremotes" }) do
             spudTestRun(k)
             task.wait(0.3)
         end
@@ -6392,6 +6392,142 @@ local okBuild, errBuild = pcall(function()
             return folder and folder:GetChildren() or {}
         end
 
+
+        -- ▸ LIFT TEST — is the blade's HEIGHT checked, or only its ground spot?
+        --   If the server raycasts down from the attachment, a flyover 20–40
+        --   studs above the field still stages cells. The ride is parked with
+        --   the blade directly over one cell at 0/8/20/40 studs and the call is
+        --   fired at each height; the stage says which heights it accepts.
+        if kind == "lift" then
+            local f = fields[1]
+            if not f then spudTestSay("lift: no field of ours is streamed") return end
+            local hname = hitchedImplementName()
+            local impl
+            for _, d in ipairs(equipList()) do
+                if d:IsA("Model") and hname and d.Name == hname then impl = d break end
+            end
+            if not impl then
+                spudTestSay("lift: nothing is hitched — mount the tractor with a tool first")
+                return
+            end
+            local att = spudToolAttachment(impl)
+            if not (att and att.Parent and att.Parent.Position) then
+                spudTestSay("lift: " .. impl.Name .. " has no blade attachment to send")
+                return
+            end
+            local tr = findTractor()
+            if not tr then spudTestSay("lift: no tractor found") return end
+            local ttype = tostring(equipTypeOf(impl) or "?")
+            local verb = (ttype == "Cultivator" and "cultivate")
+                or (ttype == "Planter" and "seed")
+                or (impl.Name == "KADL" and "seed")
+                or (impl.Name == "KQF3000" and "cultivate") or "plow"
+            local job = jobFor(verb)
+            local baseCF, baseSize = fieldFrame(f.d)
+            if not baseCF then spudTestSay("lift: " .. f.d.Name .. " has no bounds") return end
+            local pts = cellsAtStage(f.d, job.stage, baseCF, baseSize)
+            if not pts or #pts == 0 then
+                spudTestSay("lift: no cell of ours is waiting for " .. verb)
+                return
+            end
+            local cell, cd
+            for _, c in ipairs(pts) do
+                local dx, dz = c.X - here.X, c.Z - here.Z
+                local dd = math.sqrt(dx * dx + dz * dz)
+                if not cd or dd < cd then cell, cd = c, dd end
+            end
+            local cf = tr:GetPivot()
+            local off = att.Parent.Position - cf.Position
+            local rot = cf - cf.Position
+            local before = cellStage(f.d, cell.id)
+            spudTestSay(string.format(
+                "lift: %s (%s) on cell %d (%s), %.0f studs away — testing the blade height",
+                impl.Name, ttype, cell.id, tostring(before), cd))
+            local takenAt
+            for _, h in ipairs({ 0, 8, 20, 40 }) do
+                local target = Vector3.new(cell.X, cell.Y + h, cell.Z) - off
+                pcall(function() tr:PivotTo(CFrame.new(target) * rot) end)
+                task.wait(0.2)
+                spudFieldRemoteCall(verb, f.d, cell.id, att)
+                local deadline, to = os.clock() + 1.3, before
+                while os.clock() < deadline and to == before do
+                    task.wait(0.1)
+                    to = cellStage(f.d, cell.id)
+                end
+                if to ~= before then
+                    takenAt = h
+                    spudTestSay(string.format(
+                        "lift: TAKEN at %d studs above the cell (%s → %s) — height is NOT checked",
+                        h, tostring(before), tostring(to)))
+                    break
+                end
+                spudTestSay(string.format("lift: %d studs above — still %s", h, tostring(to)))
+            end
+            pcall(function() tr:PivotTo(cf) end)
+            if not takenAt then
+                spudTestSay("lift: IGNORED at 0/8/20/40 studs — the blade has to be at the cell")
+            end
+            return
+        end
+
+        -- ▸ FIELD REMOTES — the three field calls the probe never fired.
+        --   FNCSprayFieldCell is tried with the same (field, {id}, {att}) shape
+        --   the plow/seed calls use; IsWatered / PlantGrowth / Stage say whether
+        --   it took. FNCEditField and FNCConvertRundownField are invoked with NO
+        --   arguments only, to read the shape they demand (an error names it)
+        --   without handing them anything that could rebuild the field.
+        if kind == "fieldremotes" then
+            local mods = game:GetService("ReplicatedStorage"):FindFirstChild("Modules")
+            local larry = mods and mods:FindFirstChild("Larry")
+            local F = mods and mods:FindFirstChild("FieldHelper")
+            if not (larry and F) then
+                spudTestSay("fieldremotes: Modules.Larry or FieldHelper is missing")
+                return
+            end
+            local M = require(F)
+            local f = fields[1]
+            if not f then spudTestSay("fieldremotes: no field of ours is streamed") return end
+            local cells = M.GetCells(f.d)
+            local id, cell
+            for k, c in pairs(cells or {}) do
+                if type(k) == "number" and type(c) == "table" then id, cell = k, c break end
+            end
+            if not id then spudTestSay("fieldremotes: GetCells returned no cell") return end
+            local impl = findImplement("Planter", here) or findImplement("Cultivator", here)
+                or findImplement("Plow", here)
+            local att = impl and spudToolAttachment(impl) or nil
+            local bS, bW, bG = tostring(cell.Stage), tostring(cell.IsWatered), tostring(cell.PlantGrowth)
+            spudTestSay(string.format("fieldremotes: cell %d is %s, watered %s, growth %s (tool %s)",
+                id, bS, bW, bG, impl and impl.Name or "none"))
+            local spray = larry:FindFirstChild("FNCSprayFieldCell")
+            if not spray then
+                spudTestSay("fieldremotes: FNCSprayFieldCell is missing")
+            else
+                local ok, err = pcall(function() spray:InvokeServer(f.d, { id }, att) end)
+                spudTestSay("fieldremotes: FNCSprayFieldCell(field, {id}, {att}) — "
+                    .. (ok and "ran" or ("refused: " .. tostring(err))))
+                task.wait(1.5)
+                local c2 = (M.GetCells(f.d) or {})[id]
+                local aS = tostring(c2 and c2.Stage)
+                local aW = tostring(c2 and c2.IsWatered)
+                local aG = tostring(c2 and c2.PlantGrowth)
+                spudTestSay(string.format(
+                    "fieldremotes: after spray — stage %s, watered %s, growth %s — %s",
+                    aS, aW, aG,
+                    (aS ~= bS or aW ~= bW or aG ~= bG) and "TAKEN: the cell changed"
+                        or "no change from here"))
+            end
+            for _, name in ipairs({ "FNCEditField", "FNCConvertRundownField" }) do
+                local fn = larry:FindFirstChild(name)
+                if fn then
+                    local ok, res = pcall(function() return fn:InvokeServer() end)
+                    spudTestSay(string.format("fieldremotes: %s() — %s", name,
+                        ok and ("ran, returned " .. tostring(res))
+                            or ("refused: " .. tostring(res))))
+                end
+            end
+            return
+        end
 
         -- ▸ REMOTE LIST — read-only inventory of every remote the client can
         --   see. The field calls we know are the ones the game fired by hand;
@@ -8173,6 +8309,12 @@ local okBuild, errBuild = pcall(function()
     end })
     Tabs.Tests:CreateButton({ Title = "Wrong tool", Callback = function()
         task.spawn(function() spudTestRun("wrongtool") end)
+    end })
+    Tabs.Tests:CreateButton({ Title = "Lift test", Callback = function()
+        task.spawn(function() spudTestRun("lift") end)
+    end })
+    Tabs.Tests:CreateButton({ Title = "Field remotes", Callback = function()
+        task.spawn(function() spudTestRun("fieldremotes") end)
     end })
     Tabs.Tests:CreateButton({ Title = "Run all", Callback = function()
         task.spawn(function() spudTestRunAll() end)
