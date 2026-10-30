@@ -463,6 +463,15 @@ uses: `EVTFillLiquidCarrier(<carrier>)` and `EVTRequestToCarry(<jug>)` are fired
 as a fast path, with the key presses kept as the fallback whenever the world does
 not confirm the result.
 
+The same run also captures **field** calls, which is what a remote-driven
+seeding/planting pass needs: drive over **one** cell with any of the plow,
+cultivator, planter or harvester, and/or press V at the seeder holding a seed
+crate. The report gains a **FIELD CALLS** section with the exact arguments for
+`EVTPlowFieldCell`, `EVTCultivateFieldCell`, `FNCSeedFieldCell`,
+`FNCHarvestFieldCell` and `FNCFillSeeder` (plus the remote's full path). One
+cell per tool is enough; the farm loop keeps driving over cells until those
+shapes are captured.
+
 ### `SpudBoot.lua` — loader that shows its own errors
 A tiny (~8 KB) launcher for when the executor console is not visible: it
 downloads `SpudFarm_Full.lua`, compiles it and runs it, and puts every step in a

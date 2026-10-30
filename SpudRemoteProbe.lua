@@ -12,12 +12,21 @@
     1. Spawn in, go to the plot with milk jugs and a liquid truck/trailer.
     2. Execute this file. It starts recording immediately and prints a banner.
     3. Do these BY HAND, in this order, pausing a second between them:
+       MILK (what this probe was built for):
          a) pick up ONE milk jug            (Carry / E)
          b) walk to the truck, press Fill   (V), once
          c) milk ONE cow                    (whatever key the game shows)
          d) drop/put back whatever you hold
-       Optional: run  spudRemoteMark("carry")  /  spudRemoteMark("fill")  /
-       spudRemoteMark("milk")  right before each step so the report is grouped.
+       FIELD (seeding / planting on remotes) — ANY ONE of these is enough,
+       and every one you do adds a call shape to the report:
+         e) plow ONE bare cell              (drive the plow over it)
+         f) cultivate ONE plowed cell       (drive the cultivator over it)
+         g) seed ONE cultivated cell        (drive the planter over it)
+         h) stand at the seeder holding a seed crate and press V (FillSeeder)
+         i) harvest ONE grown cell          (drive the harvester over it)
+       Optional: run  spudRemoteMark("carry") / ("fill") / ("milk") /
+       ("plow") / ("seed") / ("harvest") right before each step so the
+       report is grouped.
     4. Run  spudRemoteStop()  in the executor.
        → it stops recording, prints the report, uploads it and copies the link
          to your clipboard. Send the link back.
@@ -216,7 +225,8 @@ local function remoteList()
     --   that can touch milk.
     local out, total = {}, 0
     local keys = { "fill", "carry", "milk", "liquid", "animal", "collect",
-        "silo", "juicery", "harvester" }
+        "silo", "juicery", "harvester", "seed", "plant", "plow",
+        "cultivat", "harvest", "field" }
     pcall(function()
         local rs = game:GetService("ReplicatedStorage")
         for _, d in ipairs(rs:GetDescendants()) do
@@ -278,9 +288,39 @@ local function buildReport()
         w("  not seen: " .. table.concat(missing, ", "))
     end
 
+    -- ▸ FIELD CALLS — the seeding/planting fast path. The names are already
+    --   in game_dump_town.txt; what was never captured is the ARGUMENT each
+    --   one sends. One manual pass over a cell (or one V at the seeder) lands
+    --   the exact shape here. The full path is printed too (Modules.Larry?),
+    --   because the farm script has to fire the same instance, not a copy.
+    w("")
+    w("══════ FIELD CALLS (plow / cultivate / seed / harvest / FillSeeder) ══════")
+    local fieldSuspects = { "PlowFieldCell", "CultivateFieldCell",
+        "SeedFieldCell", "HarvestFieldCell", "FillSeeder", "PlantSeed",
+        "FieldCell", "SeedBag", "SeedBox" }
+    local fieldSeen, fieldMissing = 0, {}
+    for _, s in ipairs(fieldSuspects) do
+        local fired = false
+        for _, r in ipairs(records) do
+            if r.kind == "call" and r.name:lower():find(s:lower(), 1, true) then
+                fired = true
+                fieldSeen += 1
+                w(string.format("  %s:%s(%s)", r.name, r.method, r.args))
+            end
+        end
+        if not fired then fieldMissing[#fieldMissing + 1] = s end
+    end
+    if fieldSeen == 0 then
+        w("  NONE — do ONE field action by hand WHILE the panel is counting")
+        w("  (drive over one cell, or press V at the seeder holding a crate).")
+    end
+    if #fieldMissing > 0 then
+        w("  not seen: " .. table.concat(fieldMissing, ", "))
+    end
+
     w("")
     local list, total = remoteList()
-    w(string.format("══════ MILK-RELATED REMOTES (%d of %d in ReplicatedStorage) ══════",
+    w(string.format("══════ MILK/FIELD-RELATED REMOTES (%d of %d in ReplicatedStorage) ══════",
         #list, total))
     if #list == 0 then
         w("  (none — the game may keep them elsewhere)")
@@ -590,7 +630,11 @@ print("if ANY button stops responding: run  spudRemoteRestore()  (or rejoin)")
 print("1) pick up a milk jug (Carry/E)")
 print("2) walk to the truck and press Fill (V) once")
 print("3) milk one cow")
-print("4) press  Copy report  on the little panel (or run spudRemoteStop()) and send it")
-print("   (spudRemoteMark(\"carry\") / (\"fill\") / (\"milk\") between steps if you like)")
+print("4) FIELD: drive over ONE cell with each tool you want fast (plow,")
+print("   cultivator, planter, harvester) and press V at the seeder holding")
+print("   one seed crate — ANY ONE of these is enough to capture its shape")
+print("5) press  Copy report  on the little panel (or run spudRemoteStop()) and send it")
+print("   (spudRemoteMark(\"carry\") / (\"fill\") / (\"milk\") / (\"plow\") / (\"seed\")")
+print("    between steps if you like)")
 print("   the panel number MUST rise after each action — 0 means nothing was captured")
 print("════════════════════════════════════════")

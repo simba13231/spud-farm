@@ -561,7 +561,8 @@ before the equipment scan:
 where, seed boxes and FieldHelper's tables), `SpudFulfillProbe.lua`
 (Fulfillment / Shipment area: candidate models, unload pad parts, prompts,
 signs, live context actions, and the old sell-pad targets), `SpudRemoteProbe.lua` (remotes
-while you act by hand), `SpudBarnProbe.lua`,
+while you act by hand — milk calls plus the FIELD CALLS section for
+plow/cultivate/seed/harvest/FillSeeder), `SpudBarnProbe.lua`,
 `SpudCrateProbe.lua`, `SpudEquipProbe.lua`, `SpudFeedProbe.lua`,
 `SpudSellProbe.lua`, `SpudCapture.lua`. `SpudBoot.lua` is the error-reporting
 loader. `FarmingAndFriends_Main.lua` is the older generic script; superseded.
