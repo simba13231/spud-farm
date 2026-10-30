@@ -8,7 +8,7 @@ asked and fixed, and the exact loop to prove a change works.
 description — it is the long-form manual and it is kept in sync with behaviour.
 
 - Main script: [SpudFarm_Full.lua](SpudFarm_Full.lua) — one paste-and-run Luau
-  file for the Roblox game *Farming and Friends*, currently `rebuild v1.58 ·
+  file for the Roblox game *Farming and Friends*, currently `rebuild v1.59 ·
   fluent gui` (`VERSION`, line 15). ≈12.3k lines.
 - Target: Windows + Git Bash. Luau toolchain lives in
   `%LOCALAPPDATA%\Temp\opencode\luau\` (`luau.exe`, `luau-compile.exe`,
@@ -72,7 +72,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 ### 1.4 Script limits (these have broken the build before)
 
 13. **Luau's 200-local limit is real and we are 2 away from the practical
-    ceiling.** Run `python tools/local_budget.py`. As of v1.58:
+    ceiling.** Run `python tools/local_budget.py`. As of v1.59:
     `4-space locals before milkCycle: 183 (practical ceiling 185)`,
     whole body `190 / 200`, **headroom 2**. Do **not** add a `local` inside the
     main build closure. Reuse an existing local, convert the feature to a
@@ -105,7 +105,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 
 ### 1.6 Working tree state (read before editing)
 
-`HEAD` is the latest committed build (v1.58, force verdict on the target stage),
+`HEAD` is the latest committed build (v1.59, remote list + wrong-tool test),
 `main`
 tracks `origin/main`, and the tree is clean. Keep it that way: make the change,
 run the gates, and commit only the files the change touches. `git add -A` is
@@ -140,10 +140,10 @@ The one command that runs everything — compile, budget, name audit and every
 harness, checking both the exit code and the text — is:
 
 ```bash
-python tools/run_all.py        # 30/30 checks on v1.58
+python tools/run_all.py        # 30/30 checks on v1.59
 ```
 
-Last full run (v1.58): **30/30 checks passed** (27 harnesses + 3 gates).
+Last full run (v1.59): **30/30 checks passed** (27 harnesses + 3 gates).
 
 | Script | What it actually proves |
 |---|---|
@@ -644,6 +644,20 @@ ReplicatedStorage.Modules.Larry.FNCFillSeeder:InvokeServer(Workspace.Objects.Equ
     proves it, then `EVTRequestToDrop` puts it back.
   - **Spawn from afar** — `FNCSpawnEquipment` on a stored machine of mine;
     `InStorage` flipping (or a >100-stud rebuild) is the proof.
+  - **Remote list** (v1.59, user: *"we need to find another way of forcing
+    the seeding and plowing"*) — read-only. Walks `ReplicatedStorage` (Modules
+    first, depth 4, 600 nodes) and lists every `RemoteEvent`/`RemoteFunction`/
+    `UnreliableRemoteEvent` by path. The per-cell field calls are only the ones
+    the game fired by hand; a bulk/field door that was never fired would show
+    up here and nowhere else.
+  - **Wrong tool** — isolates the one check still untested: does the server
+    care *which* tool the attachment belongs to, or only *where* the blade is?
+    It reads the hitched implement (`hitchedImplementName`), works out its own
+    verb, finds the nearest cell waiting for a **different** verb (cultivate →
+    Plowed, plow → Empty, seed → Cultivated) within 8 studs of the blade, fires
+    that verb with the hitched tool's own attachment, and waits on the stage.
+    A take means one tool could plow, cultivate and seed in **one sweep** — the
+    owner's "all in one go" without swapping implements.
   - **Field API** (v1.56, user: *"isnt there a way we can force a tile to
     become tiles"*) — read-only. Lists `FieldHelper`'s exports and children,
     what one `GetCells` entry actually holds (key = value + typeof), whether
@@ -1276,7 +1290,10 @@ for this session`), and the equipment lines (`✅ mounted … (FNCEnterEquipment
    well off the row; anything the server refuses must still be hopped) and
    v1.55 (a plow field must finish on the sweep: watch that its leftovers are
    not a row of missed cells, and that the log's `took` is close to `swept`)
-   and v1.57/v1.58 (Tests → **Force a tile**: the live FieldHelper dump has
+   and v1.59 (Tests → **Remote list** then **Wrong tool**: paste both. A
+   remote that looks like a field/bulk door names the next experiment; a
+   `TAKEN` wrong-tool verdict means one hitched tool can run every stage in a
+   single sweep) and v1.57/v1.58 (Tests → **Force a tile**: the live FieldHelper dump has
    **no setter**, and the client cell table is **writable** (`UpdateCell` keeps
    a forged stage), so the remaining question is whether the server uses it —
    the verdict is `reads Seeded` = TAKEN (a real abuse) or `reads Cultivated`

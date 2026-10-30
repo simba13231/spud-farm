@@ -101,9 +101,14 @@ Everything merged into one paste-and-run file:
   afar** (carry a seed box from across the map, then drop it back), **Spawn from
   afar** (spawn a stored machine from where you stand), **Fill from afar**
   (`FNCFillSeeder` on a distant seeder — does it refill, and does it charge?),
-  **Field API** (read-only: what `FieldHelper` exports, what one cell actually
-  holds, the `CELL_STAGES`/`SEED_TYPE`/`STAGE_MASK` values and the client's own
-  cell writer) and **Force a tile** (forges a cell the seed call would refuse —
+  **Remote list** (every `RemoteEvent`/`RemoteFunction` the client can see — a
+  bulk field door we never fired would only show up here), **Wrong tool** (fires
+  a different job's call on the cell the hitched blade is over: if it takes, the
+  server checks the blade's position, not which implement it belongs to, and one
+  tool could plow, cultivate and seed in one sweep), **Field API** (read-only:
+  what `FieldHelper` exports, what one cell actually holds, the
+  `CELL_STAGES`/`SEED_TYPE`/`STAGE_MASK` values and the client's own cell
+  writer) and **Force a tile** (forges a cell the seed call would refuse —
   any stage that is not `Cultivated`, so a Plowed field needs no Empty cell —
   lets the game's `UpdateCell` run on it, waits 2 s and re-reads, then fires
   the call and judges the **target** stage (`Seeded` = the server believed the

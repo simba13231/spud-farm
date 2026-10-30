@@ -12,7 +12,7 @@ local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/release
     .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
     .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.58 · fluent gui"
+local VERSION    = "rebuild v1.59 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -6352,7 +6352,7 @@ local okBuild, errBuild = pcall(function()
 
     function spudTestRunAll()
         for _, k in ipairs({ "ride", "stage", "tool", "burst", "carry", "spawn", "fill", "sell",
-            "fieldapi", "force" }) do
+            "fieldapi", "force", "remotes", "wrongtool" }) do
             spudTestRun(k)
             task.wait(0.3)
         end
@@ -6894,6 +6894,120 @@ local okBuild, errBuild = pcall(function()
                         and "IGNORED: no update arrived — the forged value is only our write, the server kept Plowed"
                         or "unclear — the game now reads " .. tostring(to))))
             pcall(function() cell.Stage = real end)
+            return
+        end
+
+        -- ▸ REMOTE LIST — read-only inventory of every remote the client can
+        --   see. The field calls we know are the ones the game fired by hand;
+        --   a bulk/field door that was never fired would only show up here.
+        if kind == "remotes" then
+            local out, n, seen, seenPath = {}, 0, 0, {}
+            local ok, err = pcall(function()
+                local function walk(node, depth, prefix)
+                    if depth > 4 or seen > 600 then return end
+                    for _, c in ipairs(node:GetChildren()) do
+                        seen += 1
+                        if seen > 600 then return end
+                        local path = prefix .. c.Name
+                        if seenPath[path] then continue end
+                        seenPath[path] = true
+                        local cls = c.ClassName
+                        if cls == "RemoteEvent" or cls == "RemoteFunction"
+                            or cls == "UnreliableRemoteEvent" then
+                            n += 1
+                            out[#out + 1] = path .. " (" .. cls .. ")"
+                        elseif depth < 4 then
+                            walk(c, depth + 1, path .. ".")
+                        end
+                    end
+                end
+                local rs = game:GetService("ReplicatedStorage")
+                local mods = rs:FindFirstChild("Modules")
+                if mods then walk(mods, 1, "Modules.") end
+                walk(rs, 0, "")
+            end)
+            table.sort(out)
+            spudTestSay(string.format("remotes: %d found under ReplicatedStorage (%d nodes walked)%s",
+                n, seen, ok and "" or (" — stopped: " .. tostring(err))))
+            for i = 1, #out, 5 do
+                local chunk = {}
+                for j = i, math.min(#out, i + 4) do chunk[#chunk + 1] = out[j] end
+                spudTestSay("remotes: " .. table.concat(chunk, " · "))
+            end
+            if n == 0 then
+                spudTestSay("remotes: none visible — nothing to fire beyond the captured calls")
+            end
+            return
+        end
+
+        -- ▸ WRONG TOOL — the one check left to isolate: does the server care
+        --   WHICH tool the attachment belongs to, or only WHERE the blade is?
+        --   It fires a different verb on the cell the hitched blade is over: a
+        --   take means one tool could plow, cultivate and seed in one sweep.
+        if kind == "wrongtool" then
+            local f = fields[1]
+            if not f then spudTestSay("wrongtool: no field of ours is streamed") return end
+            local hname = hitchedImplementName()
+            local impl
+            for _, d in ipairs(equipList()) do
+                if d:IsA("Model") and hname and d.Name == hname then impl = d break end
+            end
+            if not impl then
+                spudTestSay("wrongtool: nothing is hitched — mount the tractor with a tool first")
+                return
+            end
+            local att = spudToolAttachment(impl)
+            if not (att and att.Parent and att.Parent.Position) then
+                spudTestSay("wrongtool: " .. impl.Name .. " has no blade attachment to send")
+                return
+            end
+            local blade = att.Parent.Position
+            local ttype = tostring(equipTypeOf(impl) or "?")
+            local own = (ttype == "Cultivator" and "cultivate")
+                or (ttype == "Planter" and "seed")
+                or (ttype == "Plow" and "plow")
+                or (impl.Name == "KADL" and "seed")
+                or (impl.Name == "KQF3000" and "cultivate") or "plow"
+            local baseCF, baseSize = fieldFrame(f.d)
+            if not baseCF then spudTestSay("wrongtool: " .. f.d.Name .. " has no bounds") return end
+            local best, bd
+            for _, verb in ipairs({ "cultivate", "plow", "seed" }) do
+                if verb ~= own then
+                    local j = jobFor(verb)
+                    local pts = cellsAtStage(f.d, j.stage, baseCF, baseSize) or {}
+                    for _, c in ipairs(pts) do
+                        local dx, dz = c.X - blade.X, c.Z - blade.Z
+                        local dd = math.sqrt(dx * dx + dz * dz)
+                        if not bd or dd < bd then best, bd = { c = c, job = j }, dd end
+                    end
+                end
+            end
+            if not best then
+                spudTestSay("wrongtool: no cell of ours is waiting for a verb other than "
+                    .. own .. " — nothing to test with this tool hitched")
+                return
+            end
+            if bd > 8 then
+                spudTestSay(string.format(
+                    "wrongtool: the nearest %s cell is %.0f studs from the blade — drive onto the field first",
+                    best.job.verb, bd))
+                return
+            end
+            local before = cellStage(f.d, best.c.id)
+            spudTestSay(string.format(
+                "wrongtool: %s (%s) firing %s on cell %d — really %s, blade %.1f studs away",
+                impl.Name, ttype, best.job.verb, best.c.id, tostring(before), bd))
+            spudFieldRemoteCall(best.job.verb, f.d, best.c.id, att)
+            local deadline, to = os.clock() + 2.5, cellStage(f.d, best.c.id)
+            while os.clock() < deadline and to == before do
+                task.wait(0.1)
+                to = cellStage(f.d, best.c.id)
+            end
+            local took = to ~= before
+            spudTestSay(string.format("wrongtool: %s → %s — %s", tostring(before), tostring(to),
+                took and ("TAKEN: the server accepted " .. best.job.verb .. " from a " .. ttype
+                    .. " — the tool type is NOT checked")
+                    or "IGNORED: the server wants the right implement for that verb"))
             return
         end
 
@@ -8622,6 +8736,12 @@ local okBuild, errBuild = pcall(function()
     end })
     Tabs.Tests:CreateButton({ Title = "Force a tile", Callback = function()
         task.spawn(function() spudTestRun("force") end)
+    end })
+    Tabs.Tests:CreateButton({ Title = "Remote list", Callback = function()
+        task.spawn(function() spudTestRun("remotes") end)
+    end })
+    Tabs.Tests:CreateButton({ Title = "Wrong tool", Callback = function()
+        task.spawn(function() spudTestRun("wrongtool") end)
     end })
     Tabs.Tests:CreateButton({ Title = "Run all", Callback = function()
         task.spawn(function() spudTestRunAll() end)
