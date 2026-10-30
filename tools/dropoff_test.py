@@ -8,7 +8,10 @@ sell-board scan). Two things must hold:
     a full tank with an unknown destination still must not drive anywhere;
   * spudFulfillSpots names the Fulfillment pad from the world, aims at its
     top surface, prefers Deposit_Warehouse over Withdraw_Warehouse, and
-    returns nothing (with a log line) when the folder is not streamed.
+    returns nothing (with a log line) when the folder is not streamed;
+  * trySellAt presses NO key on the Fulfillment pad (the pad unloads a parked
+    harvester by itself), while the Sell pads still try the captured call and
+    then Q/E, and the tank dropping is the only proof of either.
 
     python tools/dropoff_test.py [path-to-luau.exe]
 """
@@ -22,7 +25,7 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SRC = ROOT / "SpudFarm_Full.lua"
-WANTED = ["spudSellNow", "spudFulfillSpots"]
+WANTED = ["spudSellNow", "spudFulfillSpots", "trySellAt"]
 
 PRE = r"""
 local V = {}
@@ -123,6 +126,52 @@ GRID.kids["Stores"] = nil
 GRID.list = {}
 local spots4 = spudFulfillSpots()
 check("no Stores at all: no crash, no pad", type(spots4) == "table" and #spots4 == 0, nil)
+
+-- 5. the pad behaviour itself: Fulfillment presses nothing, Sell calls then
+--    falls back to Q/E, and the tank dropping is the only proof
+local vtime = 0
+task = { wait = function(t) vtime = vtime + (t or 0) end }
+os = { clock = function() return vtime end }
+Enum = { KeyCode = { Q = "Q", E = "E" } }
+local keys, calls = {}, {}
+local function resetPad()
+    vtime, keys, calls = 0, {}, {}
+    logged = {}
+end
+function pressKey(k) keys[#keys + 1] = tostring(k) end
+function stopping() return false end
+function coinBalance() return 100 end
+function sellMenuOpen() return false end
+function sellMenuGui() return nil end
+function closeSellMenu() return true end
+local drainAt, remoteTakes = 2.4, true
+function spudSellRemote(ride, pad) calls[#calls + 1] = { ride = ride, pad = pad } return remoteTakes end
+function harvesterLoad(ride) return vtime >= drainAt and 0 or 50 end
+
+-- fulfillment: parked, the pad drains it, no key ever pressed
+resetPad() drainAt = 2.4 remoteTakes = true
+local okPad = trySellAt("ride", "Deposit_Warehouse", nil, true)
+check("fulfillment pad: the tank dropping counts as unloaded", okPad == true)
+check("fulfillment pad: no key is pressed", #keys == 0, #keys .. " key(s)")
+check("fulfillment pad: no sell call is made", #calls == 0, #calls .. " call(s)")
+check("fulfillment pad: the log says it presses nothing",
+    loggedText():lower():find("pressing nothing") ~= nil)
+
+-- sell: the captured call takes it inside the grace window, still no key
+resetPad() drainAt = 3.4 remoteTakes = true
+local okSell = trySellAt("ride", "DropOff", "padpart", false)
+check("sell pad: the remote unloads it", okSell == true)
+check("sell pad: the call carries (ride, pad)",
+    calls[1] and calls[1].ride == "ride" and calls[1].pad == "padpart")
+check("sell pad: a working remote presses no key", #keys == 0, #keys .. " key(s)")
+
+-- sell: an ignored remote falls back to Q and E, and never claims a sale
+resetPad() drainAt = 999 remoteTakes = false
+local okIgnored = trySellAt("ride", "DropOff", "padpart", false)
+local pressed = table.concat(keys, ",")
+check("sell pad: an ignored remote is not a sale", okIgnored == false)
+check("sell pad: it falls back to Q and E", pressed:find("Q") ~= nil and pressed:find("E") ~= nil, pressed)
+check("sell pad: the failure line names the pad", loggedText():find("DropOff") ~= nil)
 
 print(fails == 0 and "ALL OK" or (fails .. " FAILED"))
 """

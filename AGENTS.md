@@ -8,7 +8,7 @@ asked and fixed, and the exact loop to prove a change works.
 description — it is the long-form manual and it is kept in sync with behaviour.
 
 - Main script: [SpudFarm_Full.lua](SpudFarm_Full.lua) — one paste-and-run Luau
-  file for the Roblox game *Farming and Friends*, currently `rebuild v1.40 ·
+  file for the Roblox game *Farming and Friends*, currently `rebuild v1.41 ·
   fluent gui` (`VERSION`, line 15). ≈12.3k lines.
 - Target: Windows + Git Bash. Luau toolchain lives in
   `%LOCALAPPDATA%\Temp\opencode\luau\` (`luau.exe`, `luau-compile.exe`,
@@ -72,7 +72,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 ### 1.4 Script limits (these have broken the build before)
 
 13. **Luau's 200-local limit is real and we are 2 away from the practical
-    ceiling.** Run `python tools/local_budget.py`. As of v1.40:
+    ceiling.** Run `python tools/local_budget.py`. As of v1.41:
     `4-space locals before milkCycle: 183 (practical ceiling 185)`,
     whole body `190 / 200`, **headroom 2**. Do **not** add a `local` inside the
     main build closure. Reuse an existing local, convert the feature to a
@@ -105,7 +105,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 
 ### 1.6 Working tree state (read before editing)
 
-`HEAD` is the latest committed build (v1.40, sell + buy remotes), `main`
+`HEAD` is the latest committed build (v1.41, fulfillment auto-unload), `main`
 tracks `origin/main`, and the tree is clean. Keep it that way: make the change,
 run the gates, and commit only the files the change touches. `git add -A` is
 banned here. **Commit and push after every completed change** (owner's standing
@@ -139,10 +139,10 @@ The one command that runs everything — compile, budget, name audit and every
 harness, checking both the exit code and the text — is:
 
 ```bash
-python tools/run_all.py        # 29/29 checks on v1.40
+python tools/run_all.py        # 29/29 checks on v1.41
 ```
 
-Last full run (v1.40): **29/29 checks passed** (26 harnesses + 3 gates).
+Last full run (v1.41): **29/29 checks passed** (26 harnesses + 3 gates).
 
 | Script | What it actually proves |
 |---|---|
@@ -169,7 +169,7 @@ Last full run (v1.40): **29/29 checks passed** (26 harnesses + 3 gates).
 | `equip_remote_test.py` | The equipment remotes: the seven captured calls resolve on `Modules.Larry`; spawn/store are proven by `InStorage` (or a >100-stud move for a rebuilt spawn) and fall back to the UI when ignored; enter is proven by the seat; hitch/unhitch use the captured `Components.Hitchable` + `Chassis.HitchableSocket` pair; carry/drop are proven by the hands; three misses switch one action off for the session. |
 | `row_steer_test.py` | The row decision in the wide band: `spudRowNeedsAlign` asks for ONE snap only past `spudRowAng` (15°) or `spudRowTol` (6 studs); `spudRowSteer` presses nothing inside the band; `spudRowEase` takes a step off the throttle after three steering flips (×0.7, floor 30 %) and gives one back per steady 3 s. |
 | `foreign_respawn_test.py` | `spudMayRespawn()` is false while a Farm owner is picked, and `ensureToolNearby` then never calls `respawnTool`: a stored or far-away tool is named and the pass is skipped, while `(mine)` still respawns. |
-| `dropoff_test.py` | The full-tank gate follows the Farm tab's Drop-off pick: a full tank unloads with Fulfillment or Sell chosen, a half tank works on, an unknown/nil destination never moves; the Fulfillment pad is read from `Stores.DropOffs` (Deposit_Warehouse preferred over Withdraw_Warehouse), aimed at its top surface, and an unstreamed/empty folder returns no pad instead of a guess. |
+| `dropoff_test.py` | The full-tank gate follows the Farm tab's Drop-off pick: a full tank unloads with Fulfillment or Sell chosen, a half tank works on, an unknown/nil destination never moves; the Fulfillment pad is read from `Stores.DropOffs` (Deposit_Warehouse preferred over Withdraw_Warehouse), aimed at its top surface, and an unstreamed/empty folder returns no pad instead of a guess. `trySellAt` itself runs on a virtual clock: the Fulfillment pad drops the load while pressing **zero** keys and making **zero** calls, a working Sell call presses nothing, and an ignored Sell call falls back to Q and E without claiming a sale. |
 | `stall_probe_test.py` | The stall probe's report shape (it must name every dirt candidate and count visible stains). |
 | `test_doctor.py` | The in-script 🩺 DOCTOR report runs on stubbed world objects and reports, not crashes. |
 
@@ -503,9 +503,16 @@ values, and the full tank always ends in a real trip:
   being unstreamed/empty is logged and returns no pad — never a guessed spot.
 - **Sell** → the old `findSellSpots()` crop sell-board scan, unchanged.
 - The trip itself is the existing arc hop (`hopTo`, `SELL_HOP_SPEED`) plus
-  `trySellAt`: wait a beat, then Q (menu) / E (confirm) while watching the tank;
-  **the tank dropping is the only proof** a pad took the load. A failed trip
-  backs off 60 s and the harvest carries on with the load it has.
+  `trySellAt(ride, what, pad, autoPad)`, which differs by destination:
+  - **Fulfillment** (`autoPad = true`) presses **nothing** — user: *"the
+    fulfillment you dont gotta do anything just go to the location and it does
+    it"*. The pad unloads a parked harvester on its own; the trip only waits
+    (16 s ceiling) and logs `fulfillment pad …: parked — this pad unloads by
+    itself, pressing nothing`.
+  - **Sell** (`autoPad = false`) fires the captured `EVTSellAtStore(ride, pad)`
+    first, then falls back to Q (menu) / E (confirm) after a 3 s grace.
+  **The tank dropping is the only proof** a pad took the load, in both cases. A
+  failed trip backs off 60 s and the harvest carries on with the load it has.
 - `SpudFulfillProbe.lua` reads the game's **live** offer billboards
   (`PCGP_ContextActions.Billboards`, with key + adornee), what the character is
   standing on, everything within 30 studs, `DropOffs` by distance, and nearby
@@ -601,13 +608,14 @@ EVTRequestToCarry(draggable) / EVTRequestToDrop()
 - **Sell and buy** — `EVTSellAtStore(ride, pad)` is fired for the **Sell**
   destination (the tank dropping is the proof; Q/E after a 3 s grace), and
   `FNCRequestStorePurchase({crate})` is fired at the buy popup (balance or a
-  new crate is the proof; the menu click is the fallback). **Fulfillment** still
-  uses Q/E — its order call was never captured.
+  new crate is the proof; the menu click is the fallback). **Fulfillment**
+  makes no call and presses no key: the pad unloads a parked harvester itself
+  (v1.41), so the trip only waits on the tank.
 - **The old path always remains**: F for a mount, X for hitch/unhitch, E for a
   crate, the Equipment Manager UI for spawn/store. `spudEquipRemoteMiss` counts
   ignored calls; three switch that one action back to keys/UI for the session.
-- **Not wired yet**: cleaning a stall, milking, herding, the fulfillment pad,
-  feeders and gates. Their shapes were never
+- **Not wired yet**: cleaning a stall, milking, herding, feeders and gates.
+  Their shapes were never
   captured — `SpudRemoteProbe.lua` now has an **ACTION CALLS** section and a
   checklist for them (run it, or let one normal milk/barn cycle record while it
   runs), and `EQUIPMENT CALLS` confirms those above.
@@ -904,12 +912,23 @@ inferred sibling. The sell/buy report added two actions: a **Sell** drop-off now
 fires `EVTSellAtStore(harvester model, pad part)` before touching Q/E (the tank
 dropping is the proof), and the seed buy fires
 `FNCRequestStorePurchase({crate})` before clicking the popup (the balance or a
-new crate is the proof). Fulfillment still uses the pad's Q/E — its order call
-was never captured. The two reports also showed no clean/milk/herd/fulfill/
+new crate is the proof). The two reports also showed no clean/milk/herd/fulfill/
 feed/gate call, so those are still waiting on one targeted run.
 
-**Where it stands:** `rebuild v1.40 · fluent gui`, whole suite green (29/29),
-harness verified. **Not yet reloaded in game** after v1.22–v1.40 — the next real
+**"the furfillement you dont gotta do anytihng just go ot the location and it
+does it bro"** → v1.41. The Fulfillment pad unloads a parked harvester by
+itself, so `trySellAt` gained the `autoPad` flag and the Fulfillment trip now
+parks, logs `fulfillment pad …: parked — this pad unloads by itself, pressing
+nothing`, and watches the tank for up to 16 s **without pressing Q or E**. The
+Sell destination is unchanged (captured call, then Q/E after a 3 s grace), and
+the tank dropping is still the only proof in both cases. `dropoff_test.py`
+grew 9 checks that run `trySellAt` itself on a virtual clock: the Fulfillment
+pad drops the load with **zero** keys and **zero** calls, a working Sell call
+presses nothing, and an ignored Sell call still falls back to Q and E without
+claiming a sale.
+
+**Where it stands:** `rebuild v1.41 · fluent gui`, whole suite green (29/29),
+harness verified. **Not yet reloaded in game** after v1.22–v1.41 — the next real
 test is a live pass watching `path: … theta* N pops / N ms, min clear N`, the
 new width line (`tool … — 3-wide …; rows every 30`), the Farm owner picker
 showing ONLY that owner's fields (`Field · Miou2251`), the equipment owner
@@ -918,7 +937,8 @@ column (`· ZM80 = Tractor [spawned] · oksimba_1`), a
 being driven on W with the tractor re-centering after a drift, the
 `farm owner: teleporting to …'s plot` hop followed by
 `farm: using <tool> (<owner>)`, a full harvester taking the Drop-off trip
-(`fulfillment pad: Deposit_Warehouse at (…` → `✅ sold at …` or the honest
+(`fulfillment pad: Deposit_Warehouse at (…` → `fulfillment pad … parked —
+pressing nothing` → `✅ sold at …` or the honest
 `still full — none of the pads took the load`), the milk lines
 (`… read from here - none reports dirt`, `… cleaned in X.XXs`), the field
 remote lines (`✅ remote seed: N cell(s) in X.Xs — the field is done without
@@ -970,7 +990,10 @@ for this session`), and the equipment lines (`✅ mounted … (FNCEnterEquipment
    (sell/buy: a **Sell** drop-off must log `sell pad …: EVTSellAtStore(ride,
    pad)` and the tank must drop; a seed buy must log `✅ <seed> bought via
    FNCRequestStorePurchase` with the balance falling — otherwise the Q/E and
-   menu-click fallbacks must finish the step. Fulfillment still uses Q/E).
+   menu-click fallbacks must finish the step) and v1.41 (Fulfillment: the trip
+   must log `fulfillment pad … parked — this pad unloads by itself, pressing
+   nothing`, press **no** key, and the tank must still drop; if it does not, the
+   log must say `the pad didn't take it while parked`).
    Harness green ≠ game green.
 2. **The 24 % baseline may differ per build.** If stalls sit higher, the first
    pass logs `reads X% but the game offers no Clean there - the dirty line moves

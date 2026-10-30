@@ -12,7 +12,7 @@ local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/release
     .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
     .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.40 · fluent gui"
+local VERSION    = "rebuild v1.41 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -5836,21 +5836,24 @@ local okBuild, errBuild = pcall(function()
         return not sellMenuOpen()
     end
 
-    -- ▸ PARK, THEN ACTUALLY SELL (README mechanic: onto the elevated
-    --   platform → Q opens the sell menu → E confirms). The old version only
-    --   PARKED and watched for 8 s — it pressed nothing at all, so a full
-    --   harvester sat on the pad for ever and the sweep carried on filling a
-    --   tank that could not fill. The load dropping is still the only judge;
-    --   Q/menu/E are just the ways to make it happen.
-    local function trySellAt(ride, what, pad)
+    -- ▸ PARK, THEN WAIT (Fulfillment) or PARK + SELL + CONFIRM (Sell). User:
+    --   "the fulfillment you dont gotta do anything just go to the location
+    --   and it does it" — that pad unloads a full harvester on its own, so no
+    --   key is pressed there; the Sell pads still need Q/menu/E. Either way the
+    --   load dropping is the only judge.
+    local function trySellAt(ride, what, pad, autoPad)
         local cap0 = harvesterLoad(ride)
         local coins0 = coinBalance()
         task.wait(0.8) -- the pad needs a beat to register the vehicle
         if stopping() then return false end
-        -- ▸ the captured EVTSellAtStore(ride, pad) first — it is the call the
-        --   store's own sell action fires. The tank dropping is still the only
-        --   proof, and Q/E is the fallback after a short grace window.
-        local viaRemote = spudSellRemote(ride, pad)
+        if autoPad then
+            log("fulfillment pad " .. what
+                .. ": parked — this pad unloads by itself, pressing nothing")
+        end
+        -- ▸ the captured EVTSellAtStore(ride, pad) first (Sell pads only) — it
+        --   is the call the store's own sell action fires. The tank dropping is
+        --   still the only proof, and Q/E is the fallback after a short grace.
+        local viaRemote = (not autoPad) and spudSellRemote(ride, pad) or false
         local remoteBy = os.clock() + 3
         if viaRemote then
             log("sell pad " .. what .. ": EVTSellAtStore(ride, pad) — waiting for the tank to drop")
@@ -5867,7 +5870,10 @@ local okBuild, errBuild = pcall(function()
                 if sellMenuOpen() then closeSellMenu() end
                 return true
             end
-            if viaRemote and os.clock() < remoteBy then
+            if autoPad then
+                -- no key on the fulfillment pad: the game unloads on arrival
+                task.wait(0.5)
+            elseif viaRemote and os.clock() < remoteBy then
                 -- give the call its grace window before touching a key
                 task.wait(0.5)
             else
@@ -5894,6 +5900,11 @@ local okBuild, errBuild = pcall(function()
                 end
                 task.wait(1.0)
             end
+        end
+        if autoPad then
+            log(string.format("no unload at %s after 16 s (load %s, coins %s → %s) — the pad didn't take it while parked",
+                what, tostring(cap0), tostring(coins0), tostring(coinBalance())))
+            return false
         end
         log(string.format("no sale at %s after 16 s (load %s, coins %s → %s, sell menu %s%s)",
             what, tostring(cap0), tostring(coins0), tostring(coinBalance()),
@@ -6039,7 +6050,7 @@ local okBuild, errBuild = pcall(function()
             local ok = hopTo(ride, s.p, SELL_HOP_SPEED)
             if not ok then
                 log("couldn't hop to " .. s.what .. " (hop interrupted)")
-            elseif trySellAt(ride, s.what, sellMode and s.part or nil) then
+            elseif trySellAt(ride, s.what, sellMode and s.part or nil, not sellMode) then
                 if field and field.Parent then
                     log("arc back to " .. field.Name .. " to finish the harvest")
                     hopTo(ride, back, SELL_HOP_SPEED)

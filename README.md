@@ -75,12 +75,14 @@ Everything merged into one paste-and-run file:
   emptying, the tank dropping (sell) and the balance or crate count moving
   (buy). A call that does not land falls back to the old F/X/E/Q/UI path in the
   same step, and three misses switch that one call off for the session. The
-  **Fulfillment** drop-off still uses the pad's Q/E — its own order call was
-  never captured.
+  **Fulfillment** pad needs no call and no key: it unloads a parked harvester by
+  itself, so the trip there only waits for the tank (its own order call was
+  never captured, and it is not needed).
 - **Drop-off pick** — Farm tab → **Drop-off**: **Fulfillment** (default) or
   **Sell**. When the harvester's tank fills, it stops the row, arc-hops to the
   chosen pad, and unloads: Fulfillment is the warehouse pad
-  (`Stores.DropOffs.Deposit_Warehouse`), Sell is the old crop sell board. The
+  (`Stores.DropOffs.Deposit_Warehouse`) — parked there, pressing nothing, while
+  the pad drains it — and Sell is the old crop sell board (call, then Q/E). The
   tank dropping is the only proof a pad took the load — the console prints
   `fulfillment pad: Deposit_Warehouse at (…)`, `drop-off 1/1: …`, then
   `✅ sold at …` or an honest `still full — none of the pads took the load`,
