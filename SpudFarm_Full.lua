@@ -12,7 +12,7 @@ local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/release
     .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
     .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.37 · fluent gui"
+local VERSION    = "rebuild v1.38 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -3641,6 +3641,195 @@ local okBuild, errBuild = pcall(function()
         return cellsAtStage(field, job.stage, baseCF, baseSize)
     end
 
+    -- ▸ FIELD REMOTES — the game's own cell calls, captured with
+    --   SpudRemoteProbe while cultivating by hand (2026-10-30):
+    --     EVTCultivateFieldCell:FireServer(<field model>, { <cellId> },
+    --                                      { <tool raycast attachment> })
+    --     FNCFillSeeder:InvokeServer(<seeder model>)
+    --   cellId is the FieldHelper.GetCells dict key (x*128+y — the same key
+    --   cellsAtStage already decodes), and the attachment is the hitched
+    --   tool's own RaycastPart attachment. Plow/seed/harvest are the sibling
+    --   calls (EVTPlowFieldCell, FNCSeedFieldCell, FNCHarvestFieldCell) on
+    --   the same path; only cultivate was captured, so every job is VERIFIED
+    --   by re-reading the stages and self-disables on a job the server
+    --   ignores. The drive-over pass is always the fallback.
+    spudFieldRemoteState = { kit = nil, off = {} }
+
+    function spudFieldRemoteKit()
+        local state = spudFieldRemoteState
+        if state.kit then return state.kit end
+        local rs = game:GetService("ReplicatedStorage")
+        local mods = rs:FindFirstChild("Modules")
+        local larry = mods and mods:FindFirstChild("Larry")
+        if not larry then return nil end
+        local specs = {
+            plow = { "EVTPlowFieldCell", "FireServer" },
+            cultivate = { "EVTCultivateFieldCell", "FireServer" },
+            seed = { "FNCSeedFieldCell", "InvokeServer" },
+            harvest = { "FNCHarvestFieldCell", "InvokeServer" },
+            fillSeeder = { "FNCFillSeeder", "InvokeServer" },
+        }
+        local kit = {}
+        for key, spec in pairs(specs) do
+            local ev = larry:FindFirstChild(spec[1])
+            local want = spec[2] == "FireServer" and "RemoteEvent" or "RemoteFunction"
+            if ev and ev:IsA(want) then
+                kit[key] = { remote = ev, method = spec[2] }
+            end
+        end
+        state.kit = kit
+        return kit
+    end
+
+    -- the ids of every cell at `stage` (string) or matching `stage(s)` — the
+    -- same dict cellsAtStage walks, keyed by the game's own cell id
+    function spudFieldCellIds(field, stage)
+        local ok, out = pcall(function()
+            local mods = game:GetService("ReplicatedStorage"):FindFirstChild("Modules")
+            local F = mods and mods:FindFirstChild("FieldHelper")
+            assert(F, "FieldHelper missing")
+            F = require(F)
+            assert(type(F.GetCells) == "function", "GetCells missing")
+            local cells = F.GetCells(field)
+            assert(type(cells) == "table", "GetCells returned no table")
+            local ids = {}
+            for k, cell in pairs(cells) do
+                if type(cell) == "table" then
+                    local s = tostring(cell.Stage or "?")
+                    local hit = (type(stage) == "function" and stage(s)) or s == stage
+                    local id = tonumber(k)
+                    if hit and id then ids[#ids + 1] = id end
+                end
+            end
+            table.sort(ids)
+            return ids
+        end)
+        if ok then return out end
+        return nil
+    end
+
+    -- the tool's own raycast attachment (the captured call's third argument:
+    -- <tool>.Components.<part>.RaycastPart.Attachment). Seeding tools may name
+    -- it Seed/Detect, so that is the fallback; none = drive instead.
+    function spudToolAttachment(impl)
+        if not impl then return nil end
+        local ok, found = pcall(function()
+            local loose
+            for _, d in ipairs(impl:GetDescendants()) do
+                if d:IsA("Attachment") then
+                    local p = d.Parent
+                    local pn = p and tostring(p.Name):lower() or ""
+                    if pn:find("raycast", 1, true) then return d end
+                    if not loose and (pn:find("seed", 1, true)
+                        or pn:find("detect", 1, true)) then
+                        loose = d
+                    end
+                end
+            end
+            return loose
+        end)
+        if ok then return found end
+        return nil
+    end
+
+    function spudFieldRemoteCall(key, field, id, att)
+        local entry = (spudFieldRemoteKit() or {})[key]
+        if not entry then return false end
+        local ok = pcall(function()
+            if entry.method == "FireServer" then
+                entry.remote:FireServer(field, { id }, { att })
+            else
+                entry.remote:InvokeServer(field, { id }, { att })
+            end
+        end)
+        return ok
+    end
+
+    -- fire the game's own call for every cell still needing `job`, then
+    -- re-read the field. Returns done, left:
+    --   true, 0  = every cell took the call (the sweep is not driven)
+    --   true, n  = n cells took it, the rest still need driving
+    --   false, n = the server ignored the batch (drive instead)
+    function spudFieldRemotePass(job, field, impl)
+        local state = spudFieldRemoteState
+        if state.off[job.verb] then return false, nil end
+        local kit = spudFieldRemoteKit()
+        if not (kit and kit[job.verb]) then
+            state.off[job.verb] = true
+            log(string.format("remote %s: %s isn't in Modules.Larry here — driving instead",
+                job.verb, tostring(job.remote)))
+            return false, nil
+        end
+        local att = spudToolAttachment(impl)
+        if not att then
+            state.off[job.verb] = true
+            log(string.format("remote %s: no raycast attachment on %s — driving instead",
+                job.verb, tostring(impl and impl.Name or "?")))
+            return false, nil
+        end
+        local stage = job.grown and grownStage or job.stage
+        local ids = spudFieldCellIds(field, stage)
+        if not ids or #ids == 0 then return false, nil end
+        local before = #ids
+        local sent, threw = 0, 0
+        local t0 = os.clock()
+        for _, id in ipairs(ids) do
+            if stopping() then break end
+            if spudFieldRemoteCall(job.verb, field, id, att) then
+                sent += 1
+            else
+                threw += 1
+            end
+            task.wait(0.04)
+        end
+        local timer = os.clock() - t0
+        -- the server applies each call on its own frame: poll for the count to
+        -- fall instead of trusting the fire to have landed. The full window is
+        -- waited even when nothing moved yet — a false "ignored" would switch
+        -- the fast path off for the whole session.
+        local left = nil
+        local deadline = os.clock() + 1.2
+        while true do
+            local now = spudFieldCellIds(field, stage)
+            if not now then break end
+            left = #now
+            if left == 0 or os.clock() >= deadline then break end
+            task.wait(0.1)
+        end
+        if left == nil then
+            log(string.format("remote %s: %d call(s) sent in %.1fs but the field couldn't be re-read — driving",
+                job.verb, sent, timer))
+            return false, nil
+        end
+        if left == 0 then
+            log(string.format("✅ remote %s: %d cell(s) in %.1fs — the field is done without driving",
+                job.verb, sent, timer))
+            return true, 0
+        end
+        if left < before then
+            log(string.format("remote %s: %d of %d cell(s) took the call in %.1fs — driving the last %d",
+                job.verb, before - left, before, timer, left))
+            return true, left
+        end
+        state.off[job.verb] = true
+        log(string.format("remote %s: the game ignored %d call(s) in %.1fs (%d cell(s) still need it) — driving for this session",
+            job.verb, sent, timer, left))
+        return false, left
+    end
+
+    -- FNCFillSeeder(seeder) is the captured fast path for the V press. It
+    -- returns true only when the call actually went out; the caller confirms
+    -- the seed count rose and presses V if it did not.
+    function spudFillSeederRemote(seeder)
+        local entry = (spudFieldRemoteKit() or {}).fillSeeder
+        if not entry or not seeder then return false end
+        local ok, refused = pcall(function()
+            return entry.remote:InvokeServer(seeder)
+        end)
+        if not ok or refused == false then return false end
+        return true
+    end
+
     -- scan every field of mine ONCE (nearest-first) and say what work is
     -- left: any bare cells (the PLOW's job) and any Plowed cells (the
     -- CULTIVATOR's job). Every field's real state is logged. A failed
@@ -4417,16 +4606,29 @@ local okBuild, errBuild = pcall(function()
         log(string.format("seeder fill: at the %s — the crate is %.0f studs away (%s)",
             seeder.Name, cD, cD >= 0 and (cD < 15 and "it came with us" or "it did NOT follow") or "gone"))
         local n0 = seederSeedState(seeder)
-        log("seeder fill: V (FillSeeder) — the seeder had " .. tostring(n0) .. " seeds")
-        pressKey(Enum.KeyCode.V)
+        -- ▸ the captured FillSeeder call first (FNCFillSeeder(<seeder>)), the
+        --   V press kept as the fallback: the remote is only counted as a
+        --   fill once the seeder's own seed count rises.
+        local viaRemote = spudFillSeederRemote(seeder)
+        log(string.format("seeder fill: %s — the seeder had %s seeds",
+            viaRemote and "FNCFillSeeder(seeder)" or "V (FillSeeder)", tostring(n0)))
+        if not viaRemote then pressKey(Enum.KeyCode.V) end
         task.wait(1.0)
         if stopping() then return false end
         local n1, cap1, kind1
-        for _ = 1, 8 do -- ~4 s
-            if stopping() then break end
-            n1, cap1, kind1 = seederSeedState(seeder)
-            if n1 and n0 and n1 > n0 then break end
-            task.wait(0.5)
+        local function readFill(tries)
+            for _ = 1, tries do
+                if stopping() then break end
+                n1, cap1, kind1 = seederSeedState(seeder)
+                if n1 and n0 and n1 > n0 then break end
+                task.wait(0.5)
+            end
+        end
+        readFill(8) -- ~4 s
+        if viaRemote and not (n1 and n0 and n1 > n0) then
+            log("seeder fill: the remote didn't move the count — pressing V once")
+            pressKey(Enum.KeyCode.V)
+            readFill(4)
         end
         if n1 and n0 and n1 > n0 then
             log(string.format("✅ seeder now holds %d%s seeds%s — the planting pass takes it from here",
@@ -5654,6 +5856,22 @@ local okBuild, errBuild = pcall(function()
         end
         local st0 = countStages(field)
         local need0 = st0 and whichNeed(job, st0) or nil
+        -- ▸ REMOTES FIRST — the ride is at the field and the tool is hitched,
+        --   which is exactly the state the game fires these calls from. One
+        --   call per remaining cell id is verified by re-reading the stages;
+        --   any cell the server did not take is still driven by the sweep
+        --   below, so this can only add speed, never skip work.
+        if need0 and need0 > 0 then
+            local done, left = spudFieldRemotePass(job, field, impl)
+            st0 = countStages(field) or st0
+            need0 = st0 and whichNeed(job, st0) or need0
+            if done and left == 0 then
+                if job.selfPropelled then
+                    harvestSellIfFull(tr, seat, field, "after the remote pass")
+                end
+                return true
+            end
+        end
         log(string.format("%s: 1 headland lap + %d skip-row pass(es)  (%s)", job.verb, #lines,
             st0 and string.format("%d/%d cells still need %s", need0, st0.total, job.prog)
                 or "cell read unavailable"))

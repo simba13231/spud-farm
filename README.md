@@ -48,6 +48,19 @@ Everything merged into one paste-and-run file:
   (never below 30 %), and every steady 3 s gives a step back — so a wobbling row
   settles into a slow straight pass. If W can't finish a leg, the align mover
   takes over. Travel between fields is **34 studs/s**.
+- **Field work on the game's own remotes** — before a pass drives a single row
+  it fires the call the game itself fires on drive-over, once per cell still at
+  the job's stage: `EVTPlowFieldCell` / `EVTCultivateFieldCell`
+  (`FireServer(field, {cellId}, {raycastAttachment})`) and
+  `FNCSeedFieldCell` / `FNCHarvestFieldCell` (`InvokeServer`, same arguments).
+  The ids are the `FieldHelper.GetCells` keys the script already reads, and the
+  attachment is the hitched tool's own RaycastPart. The stage re-read is the
+  proof: a full batch logs
+  `✅ remote seed: 50 cell(s) in 2.4s — the field is done without driving`, a
+  partial batch drives the rest, and a batch the server ignores logs it and
+  puts that job back on driving for the session. The seeder fill uses the
+  captured `FNCFillSeeder(seeder)` first and presses V only when the seed count
+  does not rise.
 - **Drop-off pick** — Farm tab → **Drop-off**: **Fulfillment** (default) or
   **Sell**. When the harvester's tank fills, it stops the row, arc-hops to the
   chosen pad, and unloads: Fulfillment is the warehouse pad
@@ -378,11 +391,15 @@ Roblox detection has three layers. **No Luau script can affect layer 1:**
    snap teleport, fast; the default) or Tween (slow stepped glide, safer) —
    Walkspeed/Jump clamps, NoClip force-blocked in stealth, all actions via
    real context-key binds (F/X/E/V) via virtual input (no RemoteEvent guessing =
-   no honeypot risk). **One exception:** the milk store step fires two remotes
+   no honeypot risk). **Two exceptions:** the milk store step fires two remotes
    *recorded from the game itself* (`EVTRequestToCarry`, `EVTFillLiquidCarrier`)
-   to skip the context-button wait. Nothing is trusted: a jug only counts once
-   it is in `CarryLinks`, a fill only once the tank rises, three ignored calls
-   put the key path back for the session.
+   to skip the context-button wait, and the field passes replay the game's own
+   cell calls (`EVTCultivateFieldCell` was recorded verbatim; the plow/seed/
+   harvest siblings use the same shape on the same captured path). Nothing is
+   trusted: a jug only counts once it is in `CarryLinks`, a fill only once the
+   tank rises, three ignored calls put the key path back for the session, and
+   every field batch is re-read after firing — a job the server ignores is
+   logged and goes back to driving for the rest of the session.
 3. **Behavioral/ML scoring** — flags robotic timing, 24/7 sessions, crowded-server
    play. Mitigations built in: ±40% timing jitter, random micro-pauses, session
    limiter (auto-break, default 45 min on / 4 min off).
@@ -463,14 +480,15 @@ uses: `EVTFillLiquidCarrier(<carrier>)` and `EVTRequestToCarry(<jug>)` are fired
 as a fast path, with the key presses kept as the fallback whenever the world does
 not confirm the result.
 
-The same run also captures **field** calls, which is what a remote-driven
-seeding/planting pass needs: drive over **one** cell with any of the plow,
-cultivator, planter or harvester, and/or press V at the seeder holding a seed
-crate. The report gains a **FIELD CALLS** section with the exact arguments for
+The same run also captures **field** calls, which is what the remote-driven
+field pass uses: drive over **one** cell with any of the plow, cultivator,
+planter or harvester, and/or press V at the seeder holding a seed crate. The
+report gains a **FIELD CALLS** section with the exact arguments for
 `EVTPlowFieldCell`, `EVTCultivateFieldCell`, `FNCSeedFieldCell`,
-`FNCHarvestFieldCell` and `FNCFillSeeder` (plus the remote's full path). One
-cell per tool is enough; the farm loop keeps driving over cells until those
-shapes are captured.
+`FNCHarvestFieldCell` and `FNCFillSeeder` (plus the remote's full path). The
+captured cultivate call and `FNCFillSeeder(seeder)` are what the field pass now
+fires; the plow/seed/harvest siblings share that shape and switch themselves
+back to driving if the server ignores them.
 
 ### `SpudBoot.lua` — loader that shows its own errors
 A tiny (~8 KB) launcher for when the executor console is not visible: it
