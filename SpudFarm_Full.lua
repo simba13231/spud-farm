@@ -12,7 +12,7 @@ local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/release
     .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
     .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.49 · fluent gui"
+local VERSION    = "rebuild v1.50 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -3846,7 +3846,24 @@ local okBuild, errBuild = pcall(function()
         local stage = job.grown and grownStage or job.stage
         local ids = spudFieldCellIds(field, stage)
         if not ids or #ids == 0 then return false, nil end
+        -- ▸ A SEEDER CAN ONLY SEED WHAT IT HOLDS (live: 7 of 48 calls took, the
+        --   seeder ran dry at 7). Seed calls are capped by its own Capacity, so
+        --   an empty seeder costs no calls at all and the planting stage refills
+        --   and comes back for the rest instead of driving a field blind.
+        local budget, dry = nil, false
+        if job.verb == "seed" then
+            pcall(function()
+                local conf = impl and impl:FindFirstChild("Configurations")
+                local c = conf and conf:FindFirstChild("Capacity")
+                if c and c:IsA("IntValue") then budget = tonumber(c.Value) end
+            end)
+        end
         local before = #ids
+        if budget == 0 then
+            log(string.format("remote %s: the seeder is empty — %d cell(s) need seed; the planting stage refills first",
+                job.verb, before))
+            return true, before, true
+        end
         local sent, threw, batchDone = 0, 0, 0
         local t0 = os.clock()
         -- ▸ TESTS · BATCH (Tests tab, off by default). One call with every id;
@@ -3883,6 +3900,10 @@ local okBuild, errBuild = pcall(function()
         end
         for _, id in ipairs(ids) do
             if stopping() then break end
+            if budget and (sent + threw) >= budget then
+                dry = true
+                break
+            end
             if spudFieldRemoteCall(job.verb, field, id, att) then
                 sent += 1
             else
@@ -3913,6 +3934,11 @@ local okBuild, errBuild = pcall(function()
             log(string.format("✅ remote %s: %d cell(s) in %.1fs — the field is done without driving",
                 job.verb, sent + batchDone, timer))
             return true, 0
+        end
+        if dry then
+            log(string.format("remote %s: the seeder holds %d seed(s) — %d call(s) sent, %d cell(s) still need it; the planting stage refills and comes back",
+                job.verb, budget or 0, sent + threw, left))
+            return true, left, true
         end
         if left < before then
             log(string.format("remote %s: %d of %d cell(s) took the call in %.1fs — driving the last %d",
@@ -6729,13 +6755,20 @@ local okBuild, errBuild = pcall(function()
         --   any cell the server did not take is still driven by the sweep
         --   below, so this can only add speed, never skip work.
         if need0 and need0 > 0 then
-            local done, left = spudFieldRemotePass(job, field, impl)
+            local done, left, dry = spudFieldRemotePass(job, field, impl)
             st0 = countStages(field) or st0
             need0 = st0 and whichNeed(job, st0) or need0
             if done and left == 0 then
                 if job.selfPropelled then
                     harvestSellIfFull(tr, seat, field, "after the remote pass")
                 end
+                return true
+            end
+            -- ▸ the seeder ran dry mid-field: driving would plant nothing, so
+            --   hand this field back and let the planting stage refill it.
+            if dry then
+                log(string.format("%s: seeder empty with %d cell(s) still to seed here — refilling before driving",
+                    job.verb, need0 or 0))
                 return true
             end
         end
@@ -7632,6 +7665,7 @@ local okBuild, errBuild = pcall(function()
             --   ran empty (logged honestly — it needs a refill) · a pass
             --   changed nothing (so it can never ping-pong) · 6 rounds.
             local rounds = 0
+            local refills = 0
             while true do
                 rounds += 1
                 if stopping() then return end
@@ -7647,18 +7681,38 @@ local okBuild, errBuild = pcall(function()
                 end
                 local seeds = seederSeeds(tr)
                 if not seeds or seeds <= 0 then
-                    log(string.format("seeder is EMPTY and %d cell(s) across %d field(s) still need seeding — refill it (Fill Seeder), then run the loop again", after, afields))
-                    break
-                end
-                if rounds >= 6 then
+                    -- ▸ SEED THE WHOLE FIELD (user: "make it seed the who[l]e
+                    --   fields"): a 50-seed seeder cannot finish a bigger
+                    --   field, and the old code stopped here and asked the
+                    --   user to refill by hand. Buy + fill (the same shop trip
+                    --   the plant stage already uses) and carry on, at most 3
+                    --   refills per pass; a refill that puts nothing in the
+                    --   seeder stops it instead of spending coins in a loop.
+                    if refills >= 3 then
+                        log(string.format("still %d cell(s) across %d field(s) need seed after %d refill(s) — stopping this pass",
+                            after, afields, refills))
+                        break
+                    end
+                    refills += 1
+                    log(string.format("seeder EMPTY with %d cell(s) across %d field(s) still to seed — refill %d/3: buying %s and filling",
+                        after, afields, refills, tostring(seedChoice)))
+                    seedCheck(tr, hum, true)
+                    if stopping() then return end
+                    local filled = seederSeeds(tr)
+                    if not filled or filled <= 0 then
+                        log("the refill put no seeds in the seeder — stopping this pass (check the coins and the seed pick)")
+                        break
+                    end
+                    log(string.format("seeder refilled to %d seed(s) — carrying on with the field", filled))
+                elseif rounds >= 6 then
                     log(string.format("re-seeded %d times and %d cell(s) still need seed — stopping instead of looping", rounds, after))
                     break
-                end
-                if before and after >= before then
+                elseif before and after >= before then
                     log(string.format("the seeding pass didn't change the fields (%d cell(s) still need it) — stopping instead of looping", after))
                     break
+                else
+                    log(string.format("seeder still has %d seed(s) and %d cell(s) across %d field(s) still need seeding — going back to seed them", seeds, after, afields))
                 end
-                log(string.format("seeder still has %d seed(s) and %d cell(s) across %d field(s) still need seeding — going back to seed them", seeds, after, afields))
             end
         end
         seedPasses()

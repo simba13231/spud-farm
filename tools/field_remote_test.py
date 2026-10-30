@@ -319,6 +319,40 @@ check("missing remote -> drive, no calls",
     done == false and spudFieldRemoteState.off.seed == true)
 seedRemote.Name = "FNCSeedFieldCell"
 
+-- 6b. a seeder only fires as many calls as it holds seeds
+local capConf = adopt(tool, newInst("Configurations", "Folder"))
+local capVal = adopt(capConf, newInst("Capacity", "IntValue"))
+capVal.Value = 0
+resetCells()
+resetState()
+mode.seed = "all"
+local d0 = seedRemote.invokeCalls
+local dry
+done, left, dry = spudFieldRemotePass(seedJob, field, tool)
+check("empty seeder: not one seed call is fired", seedRemote.invokeCalls == d0,
+    (seedRemote.invokeCalls - d0) .. " call(s)")
+check("empty seeder: the pass hands the field back (dry)",
+    done == true and left == 2 and dry == true,
+    string.format("%s,%s,%s", tostring(done), tostring(left), tostring(dry)))
+check("empty seeder: the job stays on", spudFieldRemoteState.off.seed ~= true)
+capVal.Value = 1
+resetCells()
+resetState()
+d0 = seedRemote.invokeCalls
+done, left, dry = spudFieldRemotePass(seedJob, field, tool)
+check("one seed: exactly one call", seedRemote.invokeCalls - d0 == 1,
+    (seedRemote.invokeCalls - d0) .. " call(s)")
+check("one seed: dry with one cell left", dry == true and left == 1,
+    string.format("%s,%s", tostring(left), tostring(dry)))
+capVal.Value = 50
+resetCells()
+resetState()
+d0 = seedRemote.invokeCalls
+done, left, dry = spudFieldRemotePass(seedJob, field, tool)
+check("a full seeder: the whole field in one pass",
+    done == true and left == 0 and not dry and seedRemote.invokeCalls - d0 == 2,
+    string.format("%s,%s", tostring(done), tostring(left)))
+
 -- 8. the harvest sibling is a RemoteFunction on the grown predicate
 resetCells()
 fieldState[field][700] = { Stage = "Grown" }
