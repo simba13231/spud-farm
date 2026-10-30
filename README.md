@@ -70,15 +70,20 @@ Everything merged into one paste-and-run file:
   one call per cell (`batch test: N of M cell(s) took the id list`), and a
   server that validates one id per call ignores it (`batch test: the server
   ignored the id list … — one call per cell`) and the job stays on.
-  **Bug finder** — four buttons that each fire **one** captured call on one of
-  your own cells and let the field's own stage answer, logged as `test:` lines
-  and shown in the tab: **From here** (a cell call with nobody seated, no
-  hitch, tool sitting nearby — does the server need the ride?), **Wrong stage**
-  (seed a cell that is not cultivated — is the stage checked?), **No
-  attachment** (the same call with an empty attachment table — is the tool
-  checked?) and **All at once** (every id back-to-back, no 40 ms spacing — how
-  many land without the pacing?). Nothing touches money, animals or another
-  player's plot, and the tests refuse to run while a farm pass is going.
+  **Bug finder** — buttons that each fire **one** captured call and let the
+  game's own state answer, logged as `test:` lines, shown in the tab and
+  copyable with **Copy report** (place id, build, player + every line):
+  **From here** (a cell call with nobody seated, no hitch — does the server
+  need the ride?), **Wrong stage** (seed a cell that is not cultivated — is the
+  stage checked?), **No attachment** (empty attachment table — is the tool
+  checked?), **All at once** (every id back-to-back — how many land without the
+  40 ms pacing?), **Sell abuse** (fire `EVTSellAtStore` twice from off the pad
+  and again on the empty tank — distance check and double-sell), **Grab from
+  afar** (carry a seed box from across the map, then drop it back), **Spawn from
+  afar** (spawn a stored machine from where you stand) and **Fill from afar**
+  (`FNCFillSeeder` on a distant seeder — does it refill, and does it charge?).
+  **Run all** runs the whole set. Nothing touches animals or another player's
+  plot, and the tests refuse to run while a farm pass is going.
 - **Equipment on the game's own remotes** — the same capture pass recorded the
   equipment calls, so the script fires them instead of pressing keys or driving
   the Equipment Manager UI: `FNCEnterEquipment(vehicle, seat)` to mount,
