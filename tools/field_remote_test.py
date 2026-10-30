@@ -109,6 +109,7 @@ local function newRemote(name, class, handler)
 end
 
 local mode = { seed = "all", fill = "ok" }
+local tries = {}
 spudBatchRemotes = false
 
 local function seedHandler(field, ids)
@@ -120,7 +121,10 @@ local function seedHandler(field, ids)
         local cell = cells and cells[id]
         if cell and cell.Stage == "Cultivated" then
             local take
-            if mode.seed == "all" or mode.seed == "oneOnly" then
+            if mode.seed == "retryOnce" then
+                tries[id] = (tries[id] or 0) + 1
+                take = tries[id] >= 2
+            elseif mode.seed == "all" or mode.seed == "oneOnly" then
                 take = true
             elseif mode.seed == "first" then
                 take = (id == 641)
@@ -165,6 +169,7 @@ game = { GetService = function(_, name) return rs end }
 
 local field = newInst("Field", "Model")
 local function resetCells()
+    tries = {}
     fieldState[field] = {
         [641] = { Stage = "Cultivated" },
         [642] = { Stage = "Cultivated" },
@@ -367,6 +372,53 @@ check("harvest uses InvokeServer, not FireServer",
     tostring(harvestRemote.invokeCalls - hv0))
 check("harvest batch reports done", done == true and left == 0,
     tostring(done) .. "," .. tostring(left))
+
+-- 8b. a harvester only takes what its tank has room for, and the tail is
+--     retried once before a single row is driven
+local maxVal = adopt(capConf, newInst("MaxCapacity", "IntValue"))
+capVal.Value = 49
+maxVal.Value = 50
+fieldState[field][701] = { Stage = "Grown" }
+resetCells()
+fieldState[field][700] = { Stage = "Grown" }
+fieldState[field][701] = { Stage = "Grown" }
+resetState()
+hv0 = harvestRemote.invokeCalls
+capVal.Value = 50 -- tank full
+done, left, dry = spudFieldRemotePass(harvestJob, field, tool)
+check("full tank: no harvest call is fired", harvestRemote.invokeCalls == hv0,
+    (harvestRemote.invokeCalls - hv0) .. " call(s)")
+check("full tank: the pass hands the field back (dry)",
+    done == true and left == 2 and dry == true,
+    string.format("%s,%s,%s", tostring(done), tostring(left), tostring(dry)))
+capVal.Value = 49 -- room for exactly one
+resetCells()
+fieldState[field][700] = { Stage = "Grown" }
+fieldState[field][701] = { Stage = "Grown" }
+resetState()
+hv0 = harvestRemote.invokeCalls
+done, left, dry = spudFieldRemotePass(harvestJob, field, tool)
+check("one slot: exactly one harvest call", harvestRemote.invokeCalls - hv0 == 1,
+    (harvestRemote.invokeCalls - hv0) .. " call(s)")
+check("one slot: dry with one cell standing", dry == true and left == 1,
+    string.format("%s,%s", tostring(left), tostring(dry)))
+
+-- 8c. a refused tail is retried once, and a full seeder still needs no rows
+capVal.Value = 50
+maxVal.Value = 50
+resetCells()
+resetState()
+mode.seed = "retryOnce"
+d0 = seedRemote.invokeCalls
+done, left, dry = spudFieldRemotePass(seedJob, field, tool)
+check("retry: the refused tail is fired again", seedRemote.invokeCalls - d0 == 4,
+    (seedRemote.invokeCalls - d0) .. " call(s)")
+check("retry: the field finishes with no row",
+    done == true and left == 0 and not dry,
+    string.format("%s,%s", tostring(done), tostring(left)))
+check("retry: the log says the retry finished it",
+    loggedText():find("the retry finished the field") ~= nil)
+mode.seed = "all"
 
 -- 9. FillSeeder: fired with the seeder, refusal falls back to V
 resetState()

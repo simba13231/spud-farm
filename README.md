@@ -60,10 +60,13 @@ Everything merged into one paste-and-run file:
   partial batch drives the rest, and a batch the server ignores logs it and
   puts that job back on driving for the session. The seeder fill uses the
   captured `FNCFillSeeder(seeder)` first and presses V only when the seed count
-  does not rise. Seed calls are capped by the seeder's own load
-  (`Capacity`): an empty seeder fires nothing and the planting stage buys and
-  fills (the same shop trip), then carries on — up to 3 refills per pass — so a
-  50-seed seeder can finish a whole field instead of driving over it empty.
+  does not rise. Every job is capped by the machine's own load and hands the
+  field back when that runs out instead of driving: the seeder fires at most
+  its `Capacity` (empty = no call), the harvester at most its free tank space
+  (`MaxCapacity − Capacity`, full = no call), and the planting stage buys and
+  fills (up to 3 refills) or the harvest loop sells and comes back. A refused
+  tail gets one retry, so a field can be plowed, cultivated, seeded and
+  harvested without a single row being driven.
 - **Tests tab** — experiments, off by default, none of them a dependency of a
   normal pass. **Batch field remote** tries the abuse the captured shape allows:
   that call already carries a *list* of ids (`{cellId}`), so with the toggle on

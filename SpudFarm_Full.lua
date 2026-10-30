@@ -12,7 +12,7 @@ local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/release
     .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
     .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.50 · fluent gui"
+local VERSION    = "rebuild v1.51 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -3847,9 +3847,10 @@ local okBuild, errBuild = pcall(function()
         local ids = spudFieldCellIds(field, stage)
         if not ids or #ids == 0 then return false, nil end
         -- ▸ A SEEDER CAN ONLY SEED WHAT IT HOLDS (live: 7 of 48 calls took, the
-        --   seeder ran dry at 7). Seed calls are capped by its own Capacity, so
-        --   an empty seeder costs no calls at all and the planting stage refills
-        --   and comes back for the rest instead of driving a field blind.
+        --   seeder ran dry at 7), and a harvester can only take what its tank
+        --   has room for. Both are capped by the machine's own Capacity pair,
+        --   so an empty seeder / full tank costs no calls at all and the pass
+        --   hands the field back for a refill or a sell.
         local budget, dry = nil, false
         if job.verb == "seed" then
             pcall(function()
@@ -3857,11 +3858,25 @@ local okBuild, errBuild = pcall(function()
                 local c = conf and conf:FindFirstChild("Capacity")
                 if c and c:IsA("IntValue") then budget = tonumber(c.Value) end
             end)
+        elseif job.verb == "harvest" then
+            pcall(function()
+                local conf = impl and impl:FindFirstChild("Configurations")
+                local c = conf and conf:FindFirstChild("Capacity")
+                local m = conf and conf:FindFirstChild("MaxCapacity")
+                if c and c:IsA("IntValue") and m and m:IsA("IntValue") then
+                    budget = math.max(0, m.Value - c.Value)
+                end
+            end)
         end
         local before = #ids
         if budget == 0 then
-            log(string.format("remote %s: the seeder is empty — %d cell(s) need seed; the planting stage refills first",
-                job.verb, before))
+            if job.verb == "harvest" then
+                log(string.format("remote harvest: the tank is full — %d cell(s) still standing; the sell trip runs before the rest",
+                    before))
+            else
+                log(string.format("remote %s: the seeder is empty — %d cell(s) need seed; the planting stage refills first",
+                    job.verb, before))
+            end
             return true, before, true
         end
         local sent, threw, batchDone = 0, 0, 0
@@ -3934,6 +3949,39 @@ local okBuild, errBuild = pcall(function()
             log(string.format("✅ remote %s: %d cell(s) in %.1fs — the field is done without driving",
                 job.verb, sent + batchDone, timer))
             return true, 0
+        end
+        -- ▸ ONE RETRY OF JUST THE LEFTOVERS (never when a budget ran out): the
+        --   server applies each call on its own frame, so a long batch can
+        --   leave a tail behind. The field finishing without a single row is
+        --   the point, so the remaining ids get one more honest attempt.
+        if left and left > 0 and not dry then
+            local again = spudFieldCellIds(field, stage)
+            if again and #again > 0 then
+                log(string.format("remote %s: %d cell(s) still need it — one retry of just those",
+                    job.verb, #again))
+                for _, id in ipairs(again) do
+                    if stopping() then break end
+                    if spudFieldRemoteCall(job.verb, field, id, att) then
+                        sent += 1
+                    else
+                        threw += 1
+                    end
+                    task.wait(0.04)
+                end
+                left = nil
+                local deadline2 = os.clock() + 1.0
+                while true do
+                    local now2 = spudFieldCellIds(field, stage)
+                    if not now2 then break end
+                    left = #now2
+                    if left == 0 or os.clock() >= deadline2 then break end
+                    task.wait(0.1)
+                end
+                if left == 0 then
+                    log(string.format("✅ remote %s: the retry finished the field — no row needed", job.verb))
+                    return true, 0
+                end
+            end
         end
         if dry then
             log(string.format("remote %s: the seeder holds %d seed(s) — %d call(s) sent, %d cell(s) still need it; the planting stage refills and comes back",
@@ -6766,9 +6814,18 @@ local okBuild, errBuild = pcall(function()
             end
             -- ▸ the seeder ran dry mid-field: driving would plant nothing, so
             --   hand this field back and let the planting stage refill it.
+            --   The harvester is the mirror image: it ran out of TANK, so the
+            --   sell trip runs now and the harvest loop brings it back for
+            --   the cells still standing.
             if dry then
-                log(string.format("%s: seeder empty with %d cell(s) still to seed here — refilling before driving",
-                    job.verb, need0 or 0))
+                if job.selfPropelled then
+                    log(string.format("%s: tank full with %d cell(s) still standing here — selling, then coming back",
+                        job.verb, need0 or 0))
+                    harvestSellIfFull(tr, seat, field, "after the remote pass")
+                else
+                    log(string.format("%s: seeder empty with %d cell(s) still to seed here — refilling before driving",
+                        job.verb, need0 or 0))
+                end
                 return true
             end
         end
