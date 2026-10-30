@@ -8,7 +8,7 @@ asked and fixed, and the exact loop to prove a change works.
 description — it is the long-form manual and it is kept in sync with behaviour.
 
 - Main script: [SpudFarm_Full.lua](SpudFarm_Full.lua) — one paste-and-run Luau
-  file for the Roblox game *Farming and Friends*, currently `rebuild v1.55 ·
+  file for the Roblox game *Farming and Friends*, currently `rebuild v1.56 ·
   fluent gui` (`VERSION`, line 15). ≈12.3k lines.
 - Target: Windows + Git Bash. Luau toolchain lives in
   `%LOCALAPPDATA%\Temp\opencode\luau\` (`luau.exe`, `luau-compile.exe`,
@@ -72,7 +72,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 ### 1.4 Script limits (these have broken the build before)
 
 13. **Luau's 200-local limit is real and we are 2 away from the practical
-    ceiling.** Run `python tools/local_budget.py`. As of v1.55:
+    ceiling.** Run `python tools/local_budget.py`. As of v1.56:
     `4-space locals before milkCycle: 183 (practical ceiling 185)`,
     whole body `190 / 200`, **headroom 2**. Do **not** add a `local` inside the
     main build closure. Reuse an existing local, convert the feature to a
@@ -105,7 +105,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 
 ### 1.6 Working tree state (read before editing)
 
-`HEAD` is the latest committed build (v1.55, close fire + wide burst),
+`HEAD` is the latest committed build (v1.56, field API + force-a-tile tests),
 `main`
 tracks `origin/main`, and the tree is clean. Keep it that way: make the change,
 run the gates, and commit only the files the change touches. `git add -A` is
@@ -140,10 +140,10 @@ The one command that runs everything — compile, budget, name audit and every
 harness, checking both the exit code and the text — is:
 
 ```bash
-python tools/run_all.py        # 30/30 checks on v1.55
+python tools/run_all.py        # 30/30 checks on v1.56
 ```
 
-Last full run (v1.55): **30/30 checks passed** (27 harnesses + 3 gates).
+Last full run (v1.56): **30/30 checks passed** (27 harnesses + 3 gates).
 
 | Script | What it actually proves |
 |---|---|
@@ -644,6 +644,18 @@ ReplicatedStorage.Modules.Larry.FNCFillSeeder:InvokeServer(Workspace.Objects.Equ
     proves it, then `EVTRequestToDrop` puts it back.
   - **Spawn from afar** — `FNCSpawnEquipment` on a stored machine of mine;
     `InStorage` flipping (or a >100-stud rebuild) is the proof.
+  - **Field API** (v1.56, user: *"isnt there a way we can force a tile to
+    become tiles"*) — read-only. Lists `FieldHelper`'s exports and children,
+    what one `GetCells` entry actually holds (key = value + typeof) and whether
+    any export looks like a cell setter. It is the one place a "set the tile"
+    helper could hide.
+  - **Force a tile** — finds an **Empty** cell, writes `Stage = "Cultivated"`
+    into the client mirror (`GetCells`' table) and any instance the entry
+    points at, waits 2 s and re-reads. A rewritten mirror ends the test with
+    `nothing fired — a rewritten mirror cannot fool the call`; a sticky one
+    fires `FNCSeedFieldCell` on it and reports `TAKEN: the server trusted the
+    forced stage` or `IGNORED: the server keeps its own stage, the blade is the
+    only door`. The forged value is restored afterwards.
   - **Fill from afar** — `FNCFillSeeder` on a distant seeder; the seeder's
     `Capacity`/`MaxCapacity` pair (the live dump: `Capacity=0, MaxCapacity=50`,
     the same fields the harvester uses for its tank) and `coinBalance` show
@@ -654,6 +666,11 @@ ReplicatedStorage.Modules.Larry.FNCFillSeeder:InvokeServer(Workspace.Objects.Equ
   reverts nothing and touches no animals or other plots; it refuses while
   `loopThread` is live. There is **no harness** for these — they are manual
   experiments whose only verdict is the live read.
+
+**Is a tile forceable?** The server keeps the stage (the Wrong-stage test
+answered IGNORED), so the client mirror is only a copy; Tests → **Field API**
+/ **Force a tile** are what settle whether any build disagrees. `spudSweepCells`
+therefore forces *position*, not state — the only input the server accepts.
 
 `field_remote_test.py` pins the ids, the attachment pick, the call shape, the
 full/partial/ignored outcomes, the session switch-off, the fill fallback, the
@@ -1132,7 +1149,17 @@ with a **14-stud** catch range, and the second lap slows to 70 % to aim; a
 whole field crosses in 5–7 s. Same verification: the server decides, the hop
 and the drive still take whatever it refuses.
 
-**Where it stands:** `rebuild v1.53 · fluent gui`, whole suite green (30/30),
+**"isnt there a way we can force a tile to become tiles and stuff"** → v1.56.
+The stage lives on the server — the owner's own Wrong-stage test answered
+IGNORED — so writing `Stage` in `FieldHelper.GetCells` only edits a local
+copy. Two Tests entries settle it for any build: **Field API** (read-only:
+`FieldHelper`'s exports, what one cell holds, whether an export is a setter)
+and **Force a tile** (forge an Empty cell to Cultivated, re-read after 2 s,
+then fire seed on it — TAKEN would mean the server trusts the mirror). The
+sweep therefore forces *position*, not state, since position is the only input
+the server checks.
+
+**Where it stands:** `rebuild v1.56 · fluent gui`, whole suite green (30/30),
 harness verified. **Not yet reloaded in game** after v1.22–v1.46 — the next real
 test is a live pass watching `path: … theta* N pops / N ms, min clear N`, the
 new width line (`tool … — 3-wide …; rows every 30`), the Farm owner picker
@@ -1237,7 +1264,11 @@ for this session`), and the equipment lines (`✅ mounted … (FNCEnterEquipment
    driven), v1.54 (the sweep must cross a field in ~5–7 s and catch cells
    well off the row; anything the server refuses must still be hopped) and
    v1.55 (a plow field must finish on the sweep: watch that its leftovers are
-   not a row of missed cells, and that the log's `took` is close to `swept`).
+   not a row of missed cells, and that the log's `took` is close to `swept`)
+   and v1.56 (Tests → **Field API** then **Force a tile**: paste the export
+   list and the force verdict — a sticky mirror means the client stage is
+   writable, `TAKEN` means the server reads it and a whole field could be
+   forced; anything else confirms the blade is the only door).
    Harness green ≠ game green.
 2. **The 24 % baseline may differ per build.** If stalls sit higher, the first
    pass logs `reads X% but the game offers no Clean there - the dirty line moves

@@ -12,7 +12,7 @@ local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/release
     .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
     .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.55 · fluent gui"
+local VERSION    = "rebuild v1.56 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -6351,7 +6351,8 @@ local okBuild, errBuild = pcall(function()
     end
 
     function spudTestRunAll()
-        for _, k in ipairs({ "ride", "stage", "tool", "burst", "carry", "spawn", "fill", "sell" }) do
+        for _, k in ipairs({ "ride", "stage", "tool", "burst", "carry", "spawn", "fill", "sell",
+            "fieldapi", "force" }) do
             spudTestRun(k)
             task.wait(0.3)
         end
@@ -6705,6 +6706,140 @@ local okBuild, errBuild = pcall(function()
             spudTestSay(string.format("fill: seeds %s/%s → %s/%s, coins %s → %s — %s",
                 tostring(s0), tostring(m0), tostring(s1), tostring(m1),
                 tostring(c0), tostring(c1), verdict))
+            return
+        end
+
+        -- ▸ FIELD API — read-only. The ONE place a "set this tile" helper could
+        --   hide is the game's own field module, so this lists what it exports
+        --   (functions/constants), what a cell actually holds, and whether any
+        --   export looks like a cell setter. It writes nothing.
+        if kind == "fieldapi" then
+            local ok, err = pcall(function()
+                local mods = game:GetService("ReplicatedStorage"):FindFirstChild("Modules")
+                local F = mods and mods:FindFirstChild("FieldHelper")
+                if not F then spudTestSay("fieldapi: no Modules.FieldHelper") return end
+                local M = require(F)
+                local api = {}
+                for k, v in pairs(M) do
+                    api[#api + 1] = string.format("%s(%s)", tostring(k), type(v))
+                end
+                table.sort(api)
+                spudTestSay("fieldapi: FieldHelper exports: "
+                    .. (#api > 0 and table.concat(api, ", ") or "nothing"))
+                local kids = {}
+                for _, v in ipairs(F:GetChildren()) do
+                    kids[#kids + 1] = v.Name .. "(" .. v.ClassName .. ")"
+                end
+                if #kids > 0 then
+                    spudTestSay("fieldapi: FieldHelper children: " .. table.concat(kids, ", "))
+                end
+                local f = fields[1]
+                if not f then spudTestSay("fieldapi: no field of ours is streamed") return end
+                local cells = M.GetCells(f.d)
+                local n, sample = 0, nil
+                for _, c in pairs(cells or {}) do
+                    n += 1
+                    if not sample and type(c) == "table" then sample = c end
+                end
+                spudTestSay(string.format("fieldapi: %s — %d cell(s) in GetCells",
+                    f.d.Name, n))
+                if sample then
+                    local ks = {}
+                    for k, v in pairs(sample) do
+                        ks[#ks + 1] = string.format("%s=%s(%s)", tostring(k),
+                            tostring(v), typeof(v))
+                    end
+                    table.sort(ks)
+                    spudTestSay("fieldapi: one cell holds: " .. table.concat(ks, ", "))
+                else
+                    spudTestSay("fieldapi: the cells are not tables — GetCells returns "
+                        .. tostring(typeof(cells)))
+                end
+                local setter
+                for k in pairs(M) do
+                    local s = tostring(k):lower()
+                    if s:find("set", 1, true) and s:find("cell", 1, true) then
+                        setter = tostring(k)
+                    end
+                end
+                spudTestSay(setter and ("fieldapi: an export looks like a cell setter — " .. setter)
+                    or "fieldapi: no cell setter on FieldHelper (the stage is server-owned)")
+            end)
+            if not ok then spudTestSay("fieldapi: crashed — " .. tostring(err)) end
+            return
+        end
+
+        -- ▸ FORCE A TILE — the owner's question ("isnt there a way we can force
+        --   a tile to become tiles"). It forges a cell that is really EMPTY in
+        --   the client mirror (GetCells' Stage) and fires the seed call on it:
+        --   a TAKEN answer means the server read the client's stage (a real
+        --   abuse); IGNORED means it keeps its own (what the Wrong-stage test
+        --   already suggested). The forged value is put back afterwards.
+        if kind == "force" then
+            local f = fields[1]
+            if not f then spudTestSay("force: no field of ours is streamed") return end
+            local seeder = findImplement("Planter", here)
+            local att = seeder and spudToolAttachment(seeder) or nil
+            if not att then
+                spudTestSay("force: no seeder with an attachment nearby — bring the KADL close")
+                return
+            end
+            local mods = game:GetService("ReplicatedStorage"):FindFirstChild("Modules")
+            local F = mods and mods:FindFirstChild("FieldHelper")
+            local M = F and require(F)
+            if not (M and M.GetCells) then spudTestSay("force: FieldHelper.GetCells is missing") return end
+            local cells = M.GetCells(f.d)
+            local id, cell, real
+            if cells then
+                for k, c in pairs(cells) do
+                    if type(c) == "table" and type(k) == "number"
+                        and tostring(c.Stage or "?") == "Empty" then
+                        id, cell, real = k, c, "Empty"
+                        break
+                    end
+                end
+            end
+            if not id then
+                spudTestSay("force: no Empty cell in " .. f.d.Name
+                    .. " — plow/clear one first (the test needs a cell the server would refuse)")
+                return
+            end
+            spudTestSay(string.format("force: %s cell %d is %s; writing the mirror to Cultivated",
+                f.d.Name, id, real))
+            local wrote = pcall(function() cell.Stage = "Cultivated" end)
+            -- some builds keep the stage on an instance or an attribute behind
+            -- the table: write that too when the cell points at one
+            local wrote2 = false
+            pcall(function()
+                for _, v in pairs(cell) do
+                    if typeof(v) == "Instance" then
+                        v:SetAttribute("Stage", "Cultivated")
+                        wrote2 = true
+                    end
+                end
+            end)
+            task.wait(2.0)
+            local after = cellStage(f.d, id)
+            spudTestSay(string.format(
+                "force: 2s later the game reads %s — %s",
+                tostring(after),
+                after == "Cultivated" and "THE WRITE STUCK (client mirror is writable)"
+                    or "the game rewrote it (the stage lives on the server)"))
+            if after ~= "Cultivated" then
+                pcall(function() cell.Stage = real end)
+                spudTestSay("force: nothing fired — a rewritten mirror cannot fool the call")
+                return
+            end
+            spudTestSay(string.format(
+                "force: firing FNCSeedFieldCell on the forged cell (really %s)%s",
+                real, wrote2 and ", an attribute write also went in" or ""))
+            spudFieldRemoteCall("seed", f.d, id, att)
+            local to = waitCell(f.d, id, real, 2.0)
+            local taken = to ~= real
+            spudTestSay(string.format("force: stage %s → %s — %s", real, tostring(to),
+                taken and "TAKEN: the server trusted the forced stage"
+                    or "IGNORED: the server keeps its own stage, the blade is the only door"))
+            pcall(function() cell.Stage = real end)
             return
         end
 
@@ -8427,6 +8562,12 @@ local okBuild, errBuild = pcall(function()
     end })
     Tabs.Tests:CreateButton({ Title = "Fill from afar", Callback = function()
         task.spawn(function() spudTestRun("fill") end)
+    end })
+    Tabs.Tests:CreateButton({ Title = "Field API", Callback = function()
+        task.spawn(function() spudTestRun("fieldapi") end)
+    end })
+    Tabs.Tests:CreateButton({ Title = "Force a tile", Callback = function()
+        task.spawn(function() spudTestRun("force") end)
     end })
     Tabs.Tests:CreateButton({ Title = "Run all", Callback = function()
         task.spawn(function() spudTestRunAll() end)

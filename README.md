@@ -99,8 +99,13 @@ Everything merged into one paste-and-run file:
   40 ms pacing?), **Sell abuse** (fire `EVTSellAtStore` twice from off the pad
   and again on the empty tank — distance check and double-sell), **Grab from
   afar** (carry a seed box from across the map, then drop it back), **Spawn from
-  afar** (spawn a stored machine from where you stand) and **Fill from afar**
-  (`FNCFillSeeder` on a distant seeder — does it refill, and does it charge?).
+  afar** (spawn a stored machine from where you stand), **Fill from afar**
+  (`FNCFillSeeder` on a distant seeder — does it refill, and does it charge?),
+  **Field API** (read-only: what `FieldHelper` exports, what one cell actually
+  holds, and whether any export is a cell setter) and **Force a tile** (forges
+  an **Empty** cell's stage in the client mirror, waits 2 s and re-reads it,
+  then fires the seed call on it — `TAKEN` would mean the server trusts the
+  client's stage, `IGNORED` means the blade is still the only door).
   **Run all** runs the whole set. Nothing touches animals or another player's
   plot, and the tests refuse to run while a farm pass is going. Sell takes its
   pad from the sell board, then the fulfillment pad, then a raw scan of both
