@@ -67,14 +67,15 @@ Everything merged into one paste-and-run file:
   fills (up to 3 refills) or the harvest loop sells and comes back. A refused
   tail gets one retry, and a call only lands where the blade is — so after the
   call pass the ride is **swept across the field in one serpentine tween**
-  (20 studs/s, rows 10 studs apart) firing a burst **every 0.5 s** at the cells
-  the blade is passing: a whole field is covered in about **12–15 s**, and a
-  cell a burst skipped gets a **second lap** offset by half a row. Anything
+  (**45 studs/s**, rows 10 studs apart) firing a burst **every 0.5 s** at every
+  remaining cell within **14 studs** of the blade: a whole field is covered in
+  about **5–7 s**, and a cell a burst skipped gets a **second lap** offset by
+  half a row and driven slower. Anything
   still standing after the sweep is **hopped** onto cell by cell with the
   tool's attachment lined up and that single id fired (`remote plow: hopped the
   ride over 46 cell(s) — 46 took`), and only then is the field driven — so the
   remotes can only add speed, never skip work. The sweep logs
-  `remote seed: swept 46 cell(s) in 12.4s firing every 0.5s — 44 took, 2 left`.
+  `remote seed: swept 46 cell(s) in 6.1s at 45 studs/s, range 14 — 44 took, 2 left`.
 - **Tests tab** — experiments, off by default, none of them a dependency of a
   normal pass. **Batch field remote** tries the abuse the captured shape allows:
   that call already carries a *list* of ids (`{cellId}`), so with the toggle on

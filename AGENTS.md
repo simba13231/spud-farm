@@ -8,7 +8,7 @@ asked and fixed, and the exact loop to prove a change works.
 description — it is the long-form manual and it is kept in sync with behaviour.
 
 - Main script: [SpudFarm_Full.lua](SpudFarm_Full.lua) — one paste-and-run Luau
-  file for the Roblox game *Farming and Friends*, currently `rebuild v1.53 ·
+  file for the Roblox game *Farming and Friends*, currently `rebuild v1.54 ·
   fluent gui` (`VERSION`, line 15). ≈12.3k lines.
 - Target: Windows + Git Bash. Luau toolchain lives in
   `%LOCALAPPDATA%\Temp\opencode\luau\` (`luau.exe`, `luau-compile.exe`,
@@ -72,7 +72,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 ### 1.4 Script limits (these have broken the build before)
 
 13. **Luau's 200-local limit is real and we are 2 away from the practical
-    ceiling.** Run `python tools/local_budget.py`. As of v1.53:
+    ceiling.** Run `python tools/local_budget.py`. As of v1.54:
     `4-space locals before milkCycle: 183 (practical ceiling 185)`,
     whole body `190 / 200`, **headroom 2**. Do **not** add a `local` inside the
     main build closure. Reuse an existing local, convert the feature to a
@@ -105,7 +105,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 
 ### 1.6 Working tree state (read before editing)
 
-`HEAD` is the latest committed build (v1.53, sweep the field firing per cell),
+`HEAD` is the latest committed build (v1.54, fast wide sweep),
 `main`
 tracks `origin/main`, and the tree is clean. Keep it that way: make the change,
 run the gates, and commit only the files the change touches. `git add -A` is
@@ -140,10 +140,10 @@ The one command that runs everything — compile, budget, name audit and every
 harness, checking both the exit code and the text — is:
 
 ```bash
-python tools/run_all.py        # 30/30 checks on v1.53
+python tools/run_all.py        # 30/30 checks on v1.54
 ```
 
-Last full run (v1.53): **30/30 checks passed** (27 harnesses + 3 gates).
+Last full run (v1.54): **30/30 checks passed** (27 harnesses + 3 gates).
 
 | Script | What it actually proves |
 |---|---|
@@ -584,14 +584,16 @@ ReplicatedStorage.Modules.Larry.FNCFillSeeder:InvokeServer(Workspace.Objects.Equ
   Hopping cell→cell is a teleport per id, so after the call pass
   `spudSweepCells(job, field, ride, impl, stage, baseCF, baseSize, att)` builds a
   serpentine over the remaining cells (rows 10 studs apart, starting at the
-  nearest corner), tweens the ride along it at **20 studs/s** (the attachment
-  lined up with the cell plane), and **every 0.5 s** — 10 studs at that speed —
-  fires each unfired id within **6 studs** of the blade. Re-reads the stages,
-  then runs a **second lap offset by half a row** for whatever is left; the
+  nearest corner), tweens the ride along it at **45 studs/s** (the attachment
+  lined up with the cell plane), and **every 0.5 s** — 22 studs at that speed —
+  fires each unfired id within **14 studs** of the blade (v1.54: the owner's
+  *"that tween NEEDS to be faster, and have more range like before"* — the old
+  per-cell pass fired at any distance). Re-reads the stages, then runs a
+  **second lap offset by half a row at 70 % speed** for whatever is left; the
   seeder/tank budget caps the calls (dry = hand the field back). The rest is
   `spudHopCells`' job, then the drive's, so the sweep can only add speed.
-  Logs `remote seed: swept 46 cell(s) in 12.4s firing every 0.5s — 44 took,
-  2 left`.
+  Logs `remote seed: swept 46 cell(s) in 6.1s at 45 studs/s, range 14 — 44
+  took, 2 left`.
 - **It runs from the field, hitched and seated** — the same state the game fires
   the call from: the attempt sits at the top of `sweepField`, after the ride has
   arrived and the tool is hitched.
@@ -1106,6 +1108,14 @@ a burst skipped, then the hop for whatever is still standing, then the drive.
 The seed/tank budget is enforced inside the sweep too (dry hands the field
 back). `field_remote_test.py` gained the sweep checks; suite **30/30**.
 
+**"that tween NEEDS to be faster, and have more range like before bro"** →
+v1.54. The sweep ran at 20 studs/s and only fired at cells within 6 studs —
+the old per-cell pass had fired at every id whatever the distance, so the
+field took 12–15 s and skipped cells off the row. It now runs at **45 studs/s**
+with a **14-stud** catch range, and the second lap slows to 70 % to aim; a
+whole field crosses in 5–7 s. Same verification: the server decides, the hop
+and the drive still take whatever it refuses.
+
 **Where it stands:** `rebuild v1.53 · fluent gui`, whole suite green (30/30),
 harness verified. **Not yet reloaded in game** after v1.22–v1.46 — the next real
 test is a live pass watching `path: … theta* N pops / N ms, min clear N`, the
@@ -1205,9 +1215,11 @@ for this session`), and the equipment lines (`✅ mounted … (FNCEnterEquipment
    (a field after the call pass must log `remote <job>: hopped the ride over N
    cell(s) — N took`; if the count reaches 0 the field ends with **no row
    driven**, otherwise the drive starts from the last hopped cell).
-   and v1.53 (a field job must log `remote <job>: swept N cell(s) in X.Xs
-   firing every 0.5s — N took, N left`; a taken sweep finishes the field with
-   **no row driven**, and any leftover must still be hopped and then driven).
+   and v1.53 (a field job must log `remote <job>: swept N cell(s) in X.Xs at
+   45 studs/s, range 14 — N took, N left`; a taken sweep finishes the field
+   with **no row driven**, and any leftover must still be hopped and then
+   driven) and v1.54 (the sweep must cross a field in ~5–7 s and catch cells
+   well off the row; anything the server refuses must still be hopped).
    Harness green ≠ game green.
 2. **The 24 % baseline may differ per build.** If stalls sit higher, the first
    pass logs `reads X% but the game offers no Clean there - the dirty line moves

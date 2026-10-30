@@ -537,7 +537,7 @@ end
 
 mode.seed = "all"
 mode.atCell = true
-acceptR = 8
+acceptR = 14 -- the blade's catch range: what the sweep fires at, it takes
 capVal.Value = 50
 sweepGrid()
 resetState()
@@ -554,7 +554,8 @@ check("sweep: a full seeder means not dry", dryS == false, tostring(dryS))
 check("sweep: the ride is tweened, not teleported", rides - r0 > 50,
     (rides - r0) .. " pivot(s)")
 check("sweep: the log says what the sweep did",
-    loggedText():find("swept 15 cell") ~= nil)
+    loggedText():find("swept 15 cell") ~= nil
+        and loggedText():find("at 45 studs/s, range 14") ~= nil)
 
 -- a seeder can only fire as many calls as it holds seeds
 capVal.Value = 3

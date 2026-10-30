@@ -12,7 +12,7 @@ local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/release
     .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
     .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.53 · fluent gui"
+local VERSION    = "rebuild v1.54 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -6840,10 +6840,15 @@ local okBuild, errBuild = pcall(function()
                 end
             end)
         end
-        local spd = speed or 20          -- studs/s: 10 studs between bursts
+        -- ▸ FAST + WIDE (owner, 2026-10-30: "that tween NEEDS to be faster,
+        --   and have more range like before"): the old per-cell pass fired at
+        --   every remaining id whatever the distance, so the burst now reaches
+        --   14 studs instead of 6 and the ride runs at 45 studs/s. The server
+        --   decides what it takes; anything it refuses is still hopped/driven.
+        local spd = speed or 45          -- studs/s: 22 studs between bursts
         local fireEvery = 0.5            -- the owner's cadence
         local gap = spd * fireEvery
-        local radius = 6                 -- the tool is 10 wide: half + 1
+        local radius = 14                -- catch range around the blade
         local tick = 0.03
         local rowGap = 10                -- the field's own grid
         local fired, took = 0, 0
@@ -6907,10 +6912,11 @@ local okBuild, errBuild = pcall(function()
                 return a.X + (b.X - a.X) * t, a.Y + (b.Y - a.Y) * t, a.Z + (b.Z - a.Z) * t
             end
             local stopped = false
+            local lapSpeed = lap == 1 and spd or spd * 0.7 -- the second lap slows to aim
             local travelled, lastFire = 0, -1e9
             while travelled < total do
                 if stopping() then stopped = true break end
-                travelled = math.min(total, travelled + spd * tick)
+                travelled = math.min(total, travelled + lapSpeed * tick)
                 local px, py, pz = pointAt(travelled)
                 local cf = ride:GetPivot()
                 local rot = cf - cf.Position
@@ -6954,8 +6960,8 @@ local okBuild, errBuild = pcall(function()
             pts = keep
         end
         took = left and math.max(0, before - left) or 0
-        log(string.format("remote %s: swept %d cell(s) in %.1fs firing every %.1fs — %d took, %s left",
-            job.verb, fired, os.clock() - t0, fireEvery, took,
+        log(string.format("remote %s: swept %d cell(s) in %.1fs at %.0f studs/s, range %.0f — %d took, %s left",
+            job.verb, fired, os.clock() - t0, spd, radius, took,
             left and tostring(left) or "unreadable"))
         return took, dry
     end
