@@ -8,7 +8,7 @@ asked and fixed, and the exact loop to prove a change works.
 description — it is the long-form manual and it is kept in sync with behaviour.
 
 - Main script: [SpudFarm_Full.lua](SpudFarm_Full.lua) — one paste-and-run Luau
-  file for the Roblox game *Farming and Friends*, currently `rebuild v1.62 ·
+  file for the Roblox game *Farming and Friends*, currently `rebuild v1.63 ·
   fluent gui` (`VERSION`, line 15). ≈12.3k lines.
 - Target: Windows + Git Bash. Luau toolchain lives in
   `%LOCALAPPDATA%\Temp\opencode\luau\` (`luau.exe`, `luau-compile.exe`,
@@ -72,7 +72,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 ### 1.4 Script limits (these have broken the build before)
 
 13. **Luau's 200-local limit is real and we are 2 away from the practical
-    ceiling.** Run `python tools/local_budget.py`. As of v1.62:
+    ceiling.** Run `python tools/local_budget.py`. As of v1.63:
     `4-space locals before milkCycle: 183 (practical ceiling 185)`,
     whole body `190 / 200`, **headroom 2**. Do **not** add a `local` inside the
     main build closure. Reuse an existing local, convert the feature to a
@@ -105,7 +105,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 
 ### 1.6 Working tree state (read before editing)
 
-`HEAD` is the latest committed build (v1.62, forge-packet test),
+`HEAD` is the latest committed build (v1.63, patched-packet test),
 `main`
 tracks `origin/main`, and the tree is clean. Keep it that way: make the change,
 run the gates, and commit only the files the change touches. `git add -A` is
@@ -140,10 +140,10 @@ The one command that runs everything — compile, budget, name audit and every
 harness, checking both the exit code and the text — is:
 
 ```bash
-python tools/run_all.py        # 30/30 checks on v1.62
+python tools/run_all.py        # 30/30 checks on v1.63
 ```
 
-Last full run (v1.62): **30/30 checks passed** (27 harnesses + 3 gates).
+Last full run (v1.63): **30/30 checks passed** (27 harnesses + 3 gates).
 
 | Script | What it actually proves |
 |---|---|
@@ -640,13 +640,14 @@ ReplicatedStorage.Modules.Larry.FNCFillSeeder:InvokeServer(Workspace.Objects.Equ
     nothing) and prints each packet's argument shape (`buffer(48)`,
     `table{…}`, instance names). A forged packet is the next experiment, and it
     needs this shape first.
-  - **Forge packet** (v1.62) — the watch captured `EVTFieldPacket(buffer(10))`,
-    one cell's worth, and FieldHelper exposes `CellToBuffer`. This sets a cell's
-    mirror stage, builds the buffer (`CellToBuffer(field, cell)` /
-    `CellToBuffer(cell)` / `SerializeForReplication(field)`, first that returns a
-    buffer), dumps it as hex, fires it back and resets the mirror: the forged
-    stage **coming back** means the server read the packet; staying at the real
-    stage means the event is server→client only.
+  - **Forge packet** (v1.62, sharpened in v1.63) — the watch captured
+    `buffer(10)` and `buffer(22)` while `CellToBuffer` makes **6 bytes per
+    cell**, so a packet is a **4-byte header + 6-byte cell records** (v1.62 sent
+    a bare record, which is why it changed nothing). v1.63 captures a **real**
+    packet, locates the stage byte by building two `CellToBuffer` records for
+    the same cell at different stages, keeps the real header and swaps in the
+    forged record, fires it, resets the mirror and reports whether the forged
+    stage comes back.
   - **Wrong tool** — isolates the one check still untested: does the server
     care *which* tool the attachment belongs to, or only *where* the blade is?
     It reads the hitched implement (`hitchedImplementName`), works out its own
@@ -1287,10 +1288,10 @@ for this session`), and the equipment lines (`✅ mounted … (FNCEnterEquipment
    well off the row; anything the server refuses must still be hopped) and
    v1.55 (a plow field must finish on the sweep: watch that its leftovers are
    not a row of missed cells, and that the log's `took` is close to `swept`)
-   and v1.61/v1.62 (Tests → **Packet watch** then **Forge packet**: the live
-   watch captured `buffer(10)` for one cell, so the forge test sends one back —
-   `TAKEN` means a field can be set in a single packet, `IGNORED` closes the
-   bulk door and leaves the blade as the only input) and v1.59 (Tests → **Remote list** then **Wrong tool**: paste both. A
+   and v1.61–v1.63 (Tests → **Packet watch** then **Forge packet**: the live
+   packets are 4-byte header + 6-byte records; the forge test patches a real
+   one — `TAKEN` means a field can be set in a single packet, `IGNORED` closes
+   the bulk door and leaves the blade as the only input) and v1.59 (Tests → **Remote list** then **Wrong tool**: paste both. A
    remote that looks like a field/bulk door names the next experiment; a
    `TAKEN` wrong-tool verdict means one hitched tool can run every stage in a
    single sweep) and v1.57/v1.58 (Tests → **Force a tile**: the live FieldHelper dump has

@@ -93,10 +93,11 @@ Everything merged into one paste-and-run file:
   belongs to, and one tool could plow, cultivate and seed in one sweep.
   **Packet watch** listens 12 s for `EVTFieldPacket` — the one remote that could
   carry a whole field at once — and prints the argument shape it actually sends
-  (read-only; it fires nothing). **Forge packet** builds a buffer from a forged
-  cell with `FieldHelper.CellToBuffer` / `SerializeForReplication`, fires it at
-  `EVTFieldPacket` and resets the mirror — if the forged stage comes back the
-  server read the packet; if it stays, the event is server→client only. Every
+  (read-only; it fires nothing). **Forge packet** patches a **real** packet:
+  `CellToBuffer` is 6 bytes per cell while the live packets are 4-byte header +
+  6-byte records, so it keeps the captured header, swaps in a record forged to
+  the next stage, fires it and resets the mirror — if the forged stage comes
+  back the server read the packet; if it stays, the event is server→client only. Every
   line is logged as `test:` and **Copy report** puts place id, build, player
   and the whole run on the clipboard. Nothing touches animals or another
   player's plot, and the tests refuse to run while a farm pass is going.
