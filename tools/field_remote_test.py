@@ -35,6 +35,7 @@ WANTED = [
     "spudFieldCellIds",
     "spudToolAttachment",
     "spudFieldRemoteCall",
+    "spudFieldRemoteCallMany",
     "spudFieldRemotePass",
     "spudFillSeederRemote",
 ]
@@ -71,6 +72,7 @@ end
 
 local logs = {}
 function log(msg) logs[#logs + 1] = tostring(msg) end
+function loggedText() return table.concat(logs, "|") end
 function stopping() return false end
 task = task or {}
 task.wait = function(_) end
@@ -107,16 +109,26 @@ local function newRemote(name, class, handler)
 end
 
 local mode = { seed = "all", fill = "ok" }
+spudBatchRemotes = false
 
 local function seedHandler(field, ids)
     if mode.seed == "none" then return end
+    -- a server that validates ONE id per call ignores a longer list
+    if mode.seed == "oneOnly" and #ids ~= 1 then return end
     local cells = fieldState[field]
     for _, id in ipairs(ids) do
         local cell = cells and cells[id]
         if cell and cell.Stage == "Cultivated" then
-            if mode.seed == "all" or (mode.seed == "first" and id == 641) then
-                cell.Stage = "Seeded"
+            local take
+            if mode.seed == "all" or mode.seed == "oneOnly" then
+                take = true
+            elseif mode.seed == "first" then
+                take = (id == 641)
+            elseif mode.seed == "firstBatch" then
+                -- takes the first id of a list, but any single-id call
+                take = (id == 641) or (#ids == 1)
             end
+            if take then cell.Stage = "Seeded" end
         end
     end
 end
@@ -248,10 +260,52 @@ local calls = seedRemote.invokeCalls
 spudFieldRemotePass(seedJob, field, tool)
 check("a job switched off fires nothing", seedRemote.invokeCalls == calls)
 
--- 6. no attachment / no remote -> no calls, drive instead
+-- 6. TESTS · batch field remote (off by default): one call with every id
+spudBatchRemotes = true
 resetCells()
 resetState()
 mode.seed = "all"
+local b0 = seedRemote.invokeCalls
+done, left = spudFieldRemotePass(seedJob, field, tool)
+check("batch test: one call finishes the field", done == true and left == 0,
+    tostring(done) .. "," .. tostring(left))
+check("batch test: exactly one call was made", seedRemote.invokeCalls - b0 == 1,
+    tostring(seedRemote.invokeCalls - b0))
+check("batch test: the call carries every id",
+    seedRemote.lastId == 642 and seedRemote.lastAtt == att)
+check("batch test: it says the whole field took the list",
+    loggedText():find("✅ batch test") ~= nil)
+
+resetCells()
+resetState()
+mode.seed = "firstBatch"
+b0 = seedRemote.invokeCalls
+done, left = spudFieldRemotePass(seedJob, field, tool)
+check("batch test: a partial list still finishes the field",
+    done == true and left == 0, tostring(done) .. "," .. tostring(left))
+check("batch test: the rest go one call per cell", seedRemote.invokeCalls - b0 == 2,
+    tostring(seedRemote.invokeCalls - b0))
+check("batch test: the log names the partial take",
+    loggedText():find("took the id list") ~= nil)
+
+resetCells()
+resetState()
+mode.seed = "oneOnly"
+b0 = seedRemote.invokeCalls
+done, left = spudFieldRemotePass(seedJob, field, tool)
+check("batch test: an ignored list falls back to per-cell",
+    done == true and left == 0, tostring(done) .. "," .. tostring(left))
+check("batch test: an ignored list never switches the job off",
+    spudFieldRemoteState.off.seed ~= true)
+check("batch test: the log names the ignored list",
+    loggedText():find("ignored the id list") ~= nil)
+spudBatchRemotes = false
+
+-- 7. no attachment / no remote -> no calls, drive instead
+resetCells()
+resetState()
+mode.seed = "all"
+calls = seedRemote.invokeCalls
 done, left = spudFieldRemotePass(seedJob, field, noAttTool)
 check("no attachment -> drive, no calls",
     done == false and seedRemote.invokeCalls == calls)
@@ -265,7 +319,7 @@ check("missing remote -> drive, no calls",
     done == false and spudFieldRemoteState.off.seed == true)
 seedRemote.Name = "FNCSeedFieldCell"
 
--- 7. the harvest sibling is a RemoteFunction on the grown predicate
+-- 8. the harvest sibling is a RemoteFunction on the grown predicate
 resetCells()
 fieldState[field][700] = { Stage = "Grown" }
 resetState()
@@ -280,7 +334,7 @@ check("harvest uses InvokeServer, not FireServer",
 check("harvest batch reports done", done == true and left == 0,
     tostring(done) .. "," .. tostring(left))
 
--- 8. FillSeeder: fired with the seeder, refusal falls back to V
+-- 9. FillSeeder: fired with the seeder, refusal falls back to V
 resetState()
 mode.fill = "ok"
 local f0 = fillRemote.invokeCalls
@@ -293,7 +347,7 @@ mode.fill = "no"
 check("a refused FillSeeder reports false (V is the fallback)",
     spudFillSeederRemote(tool) == false)
 
--- 9. the kit goes away with the module folder
+-- 10. the kit goes away with the module folder
 resetState()
 larry.Name = "LarryX"
 check("no Modules.Larry -> no kit", spudFieldRemoteKit() == nil)

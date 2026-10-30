@@ -61,6 +61,15 @@ Everything merged into one paste-and-run file:
   puts that job back on driving for the session. The seeder fill uses the
   captured `FNCFillSeeder(seeder)` first and presses V only when the seed count
   does not rise.
+- **Tests tab** — experiments, off by default, none of them a dependency of a
+  normal pass. **Batch field remote** tries the abuse the captured shape allows:
+  that call already carries a *list* of ids (`{cellId}`), so with the toggle on
+  a field job fires **one call with every remaining id**. The stage re-read is
+  the proof — a server that loops the list finishes the whole field in one call
+  (`✅ batch test: 50 cell(s) in ONE call`), a partial take sends only the rest
+  one call per cell (`batch test: N of M cell(s) took the id list`), and a
+  server that validates one id per call ignores it (`batch test: the server
+  ignored the id list … — one call per cell`) and the job stays on.
 - **Equipment on the game's own remotes** — the same capture pass recorded the
   equipment calls, so the script fires them instead of pressing keys or driving
   the Equipment Manager UI: `FNCEnterEquipment(vehicle, seat)` to mount,

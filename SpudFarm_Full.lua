@@ -12,7 +12,7 @@ local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/release
     .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
     .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.42 · fluent gui"
+local VERSION    = "rebuild v1.43 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -841,6 +841,10 @@ local okBuild, errBuild = pcall(function()
         Milk     = Window:CreateTab({ Title = "Milk", Icon = "droplet" }),
         Player   = Window:CreateTab({ Title = "Player", Icon = "user" }),
         Console  = Window:CreateTab({ Title = "Console", Icon = "terminal" }),
+        -- ▸ TESTS (user: "add it in a new section called 'Tests'"): experiments
+        --   that are never a dependency of a normal pass. Everything here is
+        --   off by default and has to prove itself on the game's own reads.
+        Tests    = Window:CreateTab({ Title = "Tests", Icon = "wrench" }),
         Settings = Window:CreateTab({ Title = "Settings", Icon = "settings" }),
     }
 
@@ -3704,6 +3708,12 @@ local okBuild, errBuild = pcall(function()
     --   by re-reading the stages and self-disables on a job the server
     --   ignores. The drive-over pass is always the fallback.
     spudFieldRemoteState = { kit = nil, off = {} }
+    -- ▸ TESTS · the captured shape is a LIST of one id ({1=129}), so the server
+    --   may loop the list. With this on (Tests tab), a field job first fires
+    --   ONE call carrying every remaining id; the stage re-read is the only
+    --   proof, and anything it did not take still goes one call per cell.
+    --   Off by default: it is an experiment, never a dependency.
+    spudBatchRemotes = false
 
     function spudFieldRemoteKit()
         local state = spudFieldRemoteState
@@ -3795,6 +3805,22 @@ local okBuild, errBuild = pcall(function()
         return ok
     end
 
+    -- the TESTS-tab experiment: the same call with the WHOLE id list in the one
+    -- array the captured shape already carries. Never trusted — the caller
+    -- re-reads the stages to see whether the server looped it.
+    function spudFieldRemoteCallMany(key, field, ids, att)
+        local entry = (spudFieldRemoteKit() or {})[key]
+        if not entry then return false end
+        local ok = pcall(function()
+            if entry.method == "FireServer" then
+                entry.remote:FireServer(field, ids, { att })
+            else
+                entry.remote:InvokeServer(field, ids, { att })
+            end
+        end)
+        return ok
+    end
+
     -- fire the game's own call for every cell still needing `job`, then
     -- re-read the field. Returns done, left:
     --   true, 0  = every cell took the call (the sweep is not driven)
@@ -3821,8 +3847,40 @@ local okBuild, errBuild = pcall(function()
         local ids = spudFieldCellIds(field, stage)
         if not ids or #ids == 0 then return false, nil end
         local before = #ids
-        local sent, threw = 0, 0
+        local sent, threw, batchDone = 0, 0, 0
         local t0 = os.clock()
+        -- ▸ TESTS · BATCH (Tests tab, off by default). One call with every id;
+        --   the re-read decides. A list the server does not loop is ignored
+        --   here and costs one call — the per-cell path below still runs, and
+        --   nothing is switched off for the session on its account.
+        if spudBatchRemotes then
+            if spudFieldRemoteCallMany(job.verb, field, ids, att) then
+                log(string.format("batch test: %d cell id(s) in ONE call — watching the field", #ids))
+                local leftB, deadlineB = nil, os.clock() + 1.2
+                while true do
+                    local nowB = spudFieldCellIds(field, stage)
+                    if not nowB then break end
+                    leftB = #nowB
+                    if leftB == 0 or os.clock() >= deadlineB then break end
+                    task.wait(0.1)
+                end
+                if leftB == 0 then
+                    log(string.format("✅ batch test: %d cell(s) in ONE call — the whole field took the id list", before))
+                    return true, 0
+                elseif leftB and leftB < before then
+                    batchDone = before - leftB
+                    log(string.format("batch test: %d of %d cell(s) took the id list — the rest go one call per cell",
+                        batchDone, before))
+                elseif leftB then
+                    log(string.format("batch test: the server ignored the id list (%d still need it) — one call per cell", leftB))
+                end
+                local nowIds = spudFieldCellIds(field, stage)
+                if nowIds then ids = nowIds end
+                if #ids == 0 then return true, 0 end
+            else
+                log("batch test: the call threw — one call per cell")
+            end
+        end
         for _, id in ipairs(ids) do
             if stopping() then break end
             if spudFieldRemoteCall(job.verb, field, id, att) then
@@ -3853,7 +3911,7 @@ local okBuild, errBuild = pcall(function()
         end
         if left == 0 then
             log(string.format("✅ remote %s: %d cell(s) in %.1fs — the field is done without driving",
-                job.verb, sent, timer))
+                job.verb, sent + batchDone, timer))
             return true, 0
         end
         if left < before then
@@ -7405,6 +7463,22 @@ local okBuild, errBuild = pcall(function()
             spudDropOff = v
             spudSavedDropOff = v -- survives a reload
             log("drop-off: " .. tostring(v))
+        end,
+    })
+
+    -- ▸ TESTS · BATCH FIELD REMOTES (user: "can we just abuse bugs to plow and
+    --   harvest"). The captured call already carries a LIST of ids, so this
+    --   fires ONE call with every remaining id instead of one per cell. The
+    --   stage re-read is the proof: a server that loops the list finishes the
+    --   field in one call, a server that validates one id per call ignores the
+    --   extras and the normal one-call-per-cell pass runs on what is left.
+    --   Off by default, session-only, and it can never switch a job off.
+    Tabs.Tests:CreateToggle("batchFieldRemote", {
+        Title = "Batch field remote",
+        Default = false,
+        Callback = function(v)
+            spudBatchRemotes = v and true or false
+            log("tests: batch field remote " .. (spudBatchRemotes and "ON" or "OFF"))
         end,
     })
 
