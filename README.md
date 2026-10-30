@@ -95,9 +95,10 @@ Everything merged into one paste-and-run file:
   carry a whole field at once — and prints the argument shape it actually sends
   (read-only; it fires nothing). **Forge packet** patches a **real** packet:
   `CellToBuffer` is 6 bytes per cell while the live packets are 4-byte header +
-  6-byte records, so it keeps the captured header, swaps in a record forged to
-  the next stage, fires it and resets the mirror — if the forged stage comes
-  back the server read the packet; if it stays, the event is server→client only. Every
+  6-byte records, so it captures a real packet, patches **only the stage byte**
+  (found by diffing two records for the same cell at different stages) and fires
+  it — then compares the field's stages before/after, so any change is the
+  server's. Every
   line is logged as `test:` and **Copy report** puts place id, build, player
   and the whole run on the clipboard. Nothing touches animals or another
   player's plot, and the tests refuse to run while a farm pass is going.

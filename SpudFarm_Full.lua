@@ -12,7 +12,7 @@ local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/release
     .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
     .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.63 · fluent gui"
+local VERSION    = "rebuild v1.64 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -6448,14 +6448,13 @@ local okBuild, errBuild = pcall(function()
             return
         end
 
-        -- ▸ FORGE PACKET — the live watch captured `EVTFieldPacket(buffer(10))`
-        --   and `buffer(22)`, while `CellToBuffer` makes SIX bytes per cell:
-        --   the packet is a 4-byte header + 6-byte cell records. So this test
-        --   patches a REAL packet (its header kept, its last record replaced by
-        --   a forged one) rather than sending a bare record. Two CellToBuffer
-        --   builds for the same cell at different stages locate the stage byte;
-        --   the verdict resets the mirror, so a stage that comes back was the
-        --   server's.
+        -- ▸ FORGE PACKET — the live watch captured `EVTFieldPacket` buffers,
+        --   and two `CellToBuffer` records for the same cell at different
+        --   stages differ in ONE byte (live: byte 5, 08→0c). So this captures a
+        --   real packet, patches only that stage byte (the cell id, seed and
+        --   flags stay the server's own), fires it, and compares the field's
+        --   stages before/after — no forged mirror is involved, so a change can
+        --   only be the server's.
         if kind == "forgepacket" then
             local mods = game:GetService("ReplicatedStorage"):FindFirstChild("Modules")
             local larry = mods and mods:FindFirstChild("Larry")
@@ -6468,56 +6467,66 @@ local okBuild, errBuild = pcall(function()
             local M = require(F)
             local f = fields[1]
             if not f then spudTestSay("forgepacket: no field of ours is streamed") return end
-            local function hexstr(b, from, n)
+            local function hexstr(b)
                 local out = {}
-                local stop = math.min(buffer.len(b), (from or 0) + (n or 24))
-                for i = from or 0, stop - 1 do
+                for i = 0, math.min(buffer.len(b), 24) - 1 do
                     out[#out + 1] = string.format("%02x", buffer.readu8(b, i))
                 end
                 return table.concat(out, " ")
             end
-            local cells = M.GetCells(f.d)
-            local id, cell
-            for k, c in pairs(cells or {}) do
-                if type(k) == "number" and type(c) == "table" then id, cell = k, c break end
+            local function stageMap()
+                local m = {}
+                local cs = M.GetCells(f.d)
+                for k, c in pairs(cs or {}) do
+                    if type(k) == "number" and type(c) == "table" then
+                        m[k] = tostring(c.Stage or "?")
+                    end
+                end
+                return m
             end
-            if not id then spudTestSay("forgepacket: GetCells returned no cell") return end
-            local real = tostring(cell.Stage or "?")
-            local want = (real == "Cultivated") and "Seeded" or "Cultivated"
+            local cells0 = M.GetCells(f.d)
+            local id0, cell0
+            for k, c in pairs(cells0 or {}) do
+                if type(k) == "number" and type(c) == "table" then id0, cell0 = k, c break end
+            end
+            if not id0 then spudTestSay("forgepacket: GetCells returned no cell") return end
+            local real = tostring(cell0.Stage or "?")
+            local order, nextStage = { "Empty", "Plowed", "Cultivated", "Seeded" }, "Seeded"
+            for i, sname in ipairs(order) do
+                if sname == real and order[i + 1] then nextStage = order[i + 1] end
+            end
             local function recFor(stage)
-                cell.Stage = stage
+                cell0.Stage = stage
                 local fn = M.CellToBuffer
                 if type(fn) ~= "function" then return nil end
-                local ok, a = pcall(fn, f.d, cell)
-                if not (ok and typeof(a) == "buffer") then
-                    ok, a = pcall(fn, cell)
-                end
+                local ok, a = pcall(fn, f.d, cell0)
+                if not (ok and typeof(a) == "buffer") then ok, a = pcall(fn, cell0) end
                 return (ok and typeof(a) == "buffer") and a or nil
             end
-            local recA, recB = recFor("Plowed"), recFor(want)
-            cell.Stage = real
-            if not (recA and recB and buffer.len(recA) == 6 and buffer.len(recB) == 6) then
-                spudTestSay("forgepacket: CellToBuffer did not give two 6-byte records")
+            local recA, recB = recFor(real), recFor(nextStage)
+            cell0.Stage = real
+            if not (recA and recB and buffer.len(recA) == buffer.len(recB)) then
+                spudTestSay("forgepacket: CellToBuffer did not give two records")
                 return
             end
-            local diff = {}
-            for i = 0, 5 do
+            local idx, toV
+            for i = 0, buffer.len(recA) - 1 do
                 local x, y = buffer.readu8(recA, i), buffer.readu8(recB, i)
-                if x ~= y then
-                    diff[#diff + 1] = string.format("byte %d %02x→%02x", i, x, y)
-                end
+                if x ~= y then idx, toV = i, y end
             end
-            spudTestSay("forgepacket: record for cell " .. id .. " — "
-                .. (diff[1] or "no stage difference")
-                .. (#diff > 1 and (" (+" .. (#diff - 1) .. " more)") or ""))
-            -- 1) a real packet to patch
+            if not idx then
+                spudTestSay("forgepacket: the two records are identical — no stage byte to patch")
+                return
+            end
+            spudTestSay(string.format("forgepacket: cell %d is %s; record byte %d = %02x, %s = %02x",
+                id0, real, idx, buffer.readu8(recA, idx), nextStage, toV))
             local realPkt
             local c1 = pkt.OnClientEvent:Connect(function(b)
-                if not realPkt and typeof(b) == "buffer" and buffer.len(b) >= 6 then
+                if not realPkt and typeof(b) == "buffer" and buffer.len(b) > idx then
                     realPkt = b
                 end
             end)
-            spudTestSay("forgepacket: listening 10s for a real packet — drive over one cell")
+            spudTestSay("forgepacket: listening 10s for a real packet — drive over one of your cells")
             local dl = os.clock() + 10
             while os.clock() < dl and not realPkt do task.wait(0.2) end
             pcall(function() c1:Disconnect() end)
@@ -6527,40 +6536,30 @@ local okBuild, errBuild = pcall(function()
             end
             spudTestSay(string.format("forgepacket: captured buffer(%d) [%s]",
                 buffer.len(realPkt), hexstr(realPkt)))
-            -- 2) keep the header, swap the last record for the forged one
-            local rec = recFor(want)
-            cell.Stage = real
-            local patched = buffer.copy(realPkt)
-            local start = buffer.len(patched) - 6
-            if start < 0 or not rec then
-                spudTestSay("forgepacket: the packet is shorter than one record — nothing to patch")
-                return
-            end
-            for i = 0, 5 do
-                buffer.writeu8(patched, start + i, buffer.readu8(rec, i))
-            end
-            spudTestSay(string.format("forgepacket: patched → [%s] (record at byte %d)",
-                hexstr(patched), start))
-            -- 3) fire it, then see whether the forged stage comes back
+            local patched = buffer.create(buffer.len(realPkt))
+            buffer.copy(patched, 0, realPkt, 0, buffer.len(realPkt))
+            local at = buffer.len(patched) - buffer.len(recA) + idx
+            local oldV = buffer.readu8(patched, at)
+            buffer.writeu8(patched, at, toV)
+            spudTestSay(string.format("forgepacket: patched byte %d %02x→%02x → [%s]",
+                at, oldV, toV, hexstr(patched)))
+            local before = stageMap()
             local answered = 0
             local c2 = pkt.OnClientEvent:Connect(function() answered += 1 end)
             local okFire = pcall(function() pkt:FireServer(patched) end)
-            task.wait(2.5)
+            task.wait(3.0)
             pcall(function() c2:Disconnect() end)
-            cell.Stage = real
-            if type(M.UpdateCell) == "function" then pcall(M.UpdateCell, f.d, cell) end
-            local back = false
-            dl = os.clock() + 2.5
-            while os.clock() < dl do
-                task.wait(0.1)
-                if cellStage(f.d, id) == want then back = true break end
+            local after2 = stageMap()
+            local changed
+            for id2, st in pairs(after2) do
+                if before[id2] and st ~= before[id2] then
+                    changed = string.format("cell %d %s → %s", id2, before[id2], st)
+                end
             end
-            spudTestSay(string.format(
-                "forgepacket: FireServer %s, %d packet(s) came back — %s",
+            spudTestSay(string.format("forgepacket: FireServer %s, %d packet(s) came back — %s",
                 okFire and "ran" or "refused", answered,
-                back and "TAKEN: the forged stage came back, the server read the packet"
-                    or ("IGNORED: cell " .. id .. " stayed " .. real
-                        .. ", the event is server→client only")))
+                changed and ("TAKEN: " .. changed .. " after the packet")
+                    or "IGNORED: every cell kept its stage, the event is server→client only"))
             return
         end
 
