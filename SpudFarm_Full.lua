@@ -12,7 +12,7 @@ local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/release
     .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
     .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.57 · fluent gui"
+local VERSION    = "rebuild v1.58 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -6865,22 +6865,34 @@ local okBuild, errBuild = pcall(function()
                 "force: 2s later the game reads %s (UpdateCell %s) — %s",
                 tostring(after),
                 viaUpdate == nil and "not present" or (viaUpdate and "ran" or "refused"),
-                after == want and "THE WRITE STUCK (client mirror is writable)"
+                after == want and "THE WRITE STUCK (the client cell table is writable)"
                     or "the game rewrote it (the stage lives on the server)"))
             if after ~= want then
                 pcall(function() cell.Stage = real end)
                 spudTestSay("force: nothing fired — a rewritten mirror cannot fool the call")
                 return
             end
+            -- ▸ THE VERDICT IS THE TARGET STAGE, NOT "THE VALUE CHANGED" (first
+            --   run, 2026-10-30: the test fired, read back its OWN forged
+            --   `Cultivated` and called that TAKEN). A seed take reads back
+            --   **Seeded**; if the server refuses, no update is sent at all and
+            --   the forged value just sits there.
+            local target = "Seeded"
             spudTestSay(string.format(
-                "force: firing FNCSeedFieldCell on the forged cell (really %s)%s",
-                real, wrote2 and ", an attribute write also went in" or ""))
+                "force: firing FNCSeedFieldCell on the forged cell (really %s; a real take reads %s)%s",
+                real, target, wrote2 and ", an attribute write also went in" or ""))
             spudFieldRemoteCall("seed", f.d, id, att)
-            local to = waitCell(f.d, id, real, 2.0)
-            local taken = to ~= real
-            spudTestSay(string.format("force: stage %s → %s — %s", real, tostring(to),
-                taken and "TAKEN: the server trusted the forced stage"
-                    or "IGNORED: the server keeps its own stage, the blade is the only door"))
+            local deadline, to = os.clock() + 2.5, cellStage(f.d, id)
+            while os.clock() < deadline and to ~= target do
+                task.wait(0.1)
+                to = cellStage(f.d, id)
+            end
+            local taken = to == target
+            spudTestSay(string.format("force: reads %s — %s", tostring(to),
+                taken and "TAKEN: the server accepted a cell the mirror faked, the stage is a client lie the server believed"
+                    or (to == want
+                        and "IGNORED: no update arrived — the forged value is only our write, the server kept Plowed"
+                        or "unclear — the game now reads " .. tostring(to))))
             pcall(function() cell.Stage = real end)
             return
         end

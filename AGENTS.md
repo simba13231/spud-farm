@@ -8,7 +8,7 @@ asked and fixed, and the exact loop to prove a change works.
 description — it is the long-form manual and it is kept in sync with behaviour.
 
 - Main script: [SpudFarm_Full.lua](SpudFarm_Full.lua) — one paste-and-run Luau
-  file for the Roblox game *Farming and Friends*, currently `rebuild v1.57 ·
+  file for the Roblox game *Farming and Friends*, currently `rebuild v1.58 ·
   fluent gui` (`VERSION`, line 15). ≈12.3k lines.
 - Target: Windows + Git Bash. Luau toolchain lives in
   `%LOCALAPPDATA%\Temp\opencode\luau\` (`luau.exe`, `luau-compile.exe`,
@@ -72,7 +72,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 ### 1.4 Script limits (these have broken the build before)
 
 13. **Luau's 200-local limit is real and we are 2 away from the practical
-    ceiling.** Run `python tools/local_budget.py`. As of v1.57:
+    ceiling.** Run `python tools/local_budget.py`. As of v1.58:
     `4-space locals before milkCycle: 183 (practical ceiling 185)`,
     whole body `190 / 200`, **headroom 2**. Do **not** add a `local` inside the
     main build closure. Reuse an existing local, convert the feature to a
@@ -105,7 +105,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 
 ### 1.6 Working tree state (read before editing)
 
-`HEAD` is the latest committed build (v1.57, honest field-API dump),
+`HEAD` is the latest committed build (v1.58, force verdict on the target stage),
 `main`
 tracks `origin/main`, and the tree is clean. Keep it that way: make the change,
 run the gates, and commit only the files the change touches. `git add -A` is
@@ -140,10 +140,10 @@ The one command that runs everything — compile, budget, name audit and every
 harness, checking both the exit code and the text — is:
 
 ```bash
-python tools/run_all.py        # 30/30 checks on v1.57
+python tools/run_all.py        # 30/30 checks on v1.58
 ```
 
-Last full run (v1.57): **30/30 checks passed** (27 harnesses + 3 gates).
+Last full run (v1.58): **30/30 checks passed** (27 harnesses + 3 gates).
 
 | Script | What it actually proves |
 |---|---|
@@ -663,6 +663,10 @@ ReplicatedStorage.Modules.Larry.FNCFillSeeder:InvokeServer(Workspace.Objects.Equ
     `FNCSeedFieldCell` on it and reports `TAKEN: the server trusted the forced
     stage` or `IGNORED: the server keeps its own stage, the blade is the only
     door`. The forged value is restored afterwards.
+    **First live run (owner, 2026-10-30): the mirror is WRITABLE — `UpdateCell`
+    kept the forged `Cultivated` for 2 s — but the first verdict read its own
+    write back, so v1.58 judges the TARGET stage instead (a seed take reads
+    `Seeded`; a refusal sends no update, so the forged value just stays).**
   - **Fill from afar** — `FNCFillSeeder` on a distant seeder; the seeder's
     `Capacity`/`MaxCapacity` pair (the live dump: `Capacity=0, MaxCapacity=50`,
     the same fields the harvester uses for its tank) and `coinBalance` show
@@ -1272,11 +1276,11 @@ for this session`), and the equipment lines (`✅ mounted … (FNCEnterEquipment
    well off the row; anything the server refuses must still be hopped) and
    v1.55 (a plow field must finish on the sweep: watch that its leftovers are
    not a row of missed cells, and that the log's `took` is close to `swept`)
-   and v1.56/v1.57 (Tests → **Field API** then **Force a tile**: the export
-   list already came back with **no setter**, so the force verdict is the last
-   word — a sticky mirror means the client stage is writable, `TAKEN` means the
-   server reads it and a whole field could be forced; anything else confirms
-   the blade is the only door).
+   and v1.57/v1.58 (Tests → **Force a tile**: the live FieldHelper dump has
+   **no setter**, and the client cell table is **writable** (`UpdateCell` keeps
+   a forged stage), so the remaining question is whether the server uses it —
+   the verdict is `reads Seeded` = TAKEN (a real abuse) or `reads Cultivated`
+   = IGNORED (client-only lie). Paste that one line).
    Harness green ≠ game green.
 2. **The 24 % baseline may differ per build.** If stalls sit higher, the first
    pass logs `reads X% but the game offers no Clean there - the dirty line moves

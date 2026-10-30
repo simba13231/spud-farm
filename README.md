@@ -106,8 +106,9 @@ Everything merged into one paste-and-run file:
   cell writer) and **Force a tile** (forges a cell the seed call would refuse —
   any stage that is not `Cultivated`, so a Plowed field needs no Empty cell —
   lets the game's `UpdateCell` run on it, waits 2 s and re-reads, then fires
-  the call: `TAKEN` would mean the server trusts the client's stage,
-  `IGNORED` means the blade is still the only door).
+  the call and judges the **target** stage (`Seeded` = the server believed the
+  forged cell; still the forged value = no update arrived, so the blade is
+  still the only door).
   **Run all** runs the whole set. Nothing touches animals or another player's
   plot, and the tests refuse to run while a farm pass is going. Sell takes its
   pad from the sell board, then the fulfillment pad, then a raw scan of both
