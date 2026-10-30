@@ -12,7 +12,7 @@ local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/release
     .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
     .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.56 · fluent gui"
+local VERSION    = "rebuild v1.57 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -6764,17 +6764,40 @@ local okBuild, errBuild = pcall(function()
                 end
                 spudTestSay(setter and ("fieldapi: an export looks like a cell setter — " .. setter)
                     or "fieldapi: no cell setter on FieldHelper (the stage is server-owned)")
+                -- the constants that decide what a call accepts, and the
+                -- client's own cell writer (UpdateCell/UpdateCells/CellsUpdated)
+                for _, name in ipairs({ "CELL_STAGES", "SEED_TYPE", "STAGE_MASK" }) do
+                    local t = M[name]
+                    if type(t) == "table" then
+                        local parts = {}
+                        for k, v in pairs(t) do
+                            if #parts < 16 then
+                                parts[#parts + 1] = tostring(k) .. "=" .. tostring(v)
+                            end
+                        end
+                        table.sort(parts)
+                        spudTestSay(string.format("fieldapi: %s = {%s}", name,
+                            table.concat(parts, ", ")))
+                    else
+                        spudTestSay("fieldapi: " .. name .. " is " .. tostring(typeof(t)))
+                    end
+                end
+                spudTestSay("fieldapi: client writers — UpdateCell "
+                    .. tostring(type(M.UpdateCell)) .. ", UpdateCells "
+                    .. tostring(type(M.UpdateCells)) .. ", CellsUpdated "
+                    .. tostring(typeof(M.CellsUpdated)))
             end)
             if not ok then spudTestSay("fieldapi: crashed — " .. tostring(err)) end
             return
         end
 
         -- ▸ FORCE A TILE — the owner's question ("isnt there a way we can force
-        --   a tile to become tiles"). It forges a cell that is really EMPTY in
-        --   the client mirror (GetCells' Stage) and fires the seed call on it:
-        --   a TAKEN answer means the server read the client's stage (a real
-        --   abuse); IGNORED means it keeps its own (what the Wrong-stage test
-        --   already suggested). The forged value is put back afterwards.
+        --   a tile to become tiles"). It forges a cell the seed call would
+        --   REFUSE (any stage that is not Cultivated) in the client mirror
+        --   (GetCells' Stage), lets the game's own updater run on it, and fires
+        --   the call: TAKEN means the server read the client's stage (a real
+        --   abuse); IGNORED means it keeps its own. The cell is put back
+        --   afterwards. Any stage works — a Plowed field needs no Empty cell.
         if kind == "force" then
             local f = fields[1]
             if not f then spudTestSay("force: no field of ours is streamed") return end
@@ -6789,7 +6812,9 @@ local okBuild, errBuild = pcall(function()
             local M = F and require(F)
             if not (M and M.GetCells) then spudTestSay("force: FieldHelper.GetCells is missing") return end
             local cells = M.GetCells(f.d)
+            local want = "Cultivated" -- what FNCSeedFieldCell checks
             local id, cell, real
+            -- an Empty cell is the cleanest refusal; any other stage will do
             if cells then
                 for k, c in pairs(cells) do
                     if type(c) == "table" and type(k) == "number"
@@ -6798,34 +6823,51 @@ local okBuild, errBuild = pcall(function()
                         break
                     end
                 end
+                if not id then
+                    for k, c in pairs(cells) do
+                        if type(c) == "table" and type(k) == "number"
+                            and tostring(c.Stage or "?") ~= want then
+                            id, cell, real = k, c, tostring(c.Stage or "?")
+                            break
+                        end
+                    end
+                end
             end
             if not id then
-                spudTestSay("force: no Empty cell in " .. f.d.Name
-                    .. " — plow/clear one first (the test needs a cell the server would refuse)")
+                spudTestSay("force: every cell in " .. f.d.Name .. " is already " .. want
+                    .. " — nothing the call would refuse")
                 return
             end
-            spudTestSay(string.format("force: %s cell %d is %s; writing the mirror to Cultivated",
-                f.d.Name, id, real))
-            local wrote = pcall(function() cell.Stage = "Cultivated" end)
+            spudTestSay(string.format(
+                "force: %s cell %d is %s — writing the mirror to %s",
+                f.d.Name, id, real, want))
+            pcall(function() cell.Stage = want end)
             -- some builds keep the stage on an instance or an attribute behind
             -- the table: write that too when the cell points at one
             local wrote2 = false
             pcall(function()
                 for _, v in pairs(cell) do
                     if typeof(v) == "Instance" then
-                        v:SetAttribute("Stage", "Cultivated")
+                        v:SetAttribute("Stage", want)
                         wrote2 = true
                     end
                 end
             end)
+            -- the game's own client updater may own the table/render — let it
+            -- run on the forged entry and see whether it keeps the value
+            local viaUpdate = nil
+            if type(M.UpdateCell) == "function" then
+                viaUpdate = pcall(M.UpdateCell, f.d, cell) or pcall(M.UpdateCell, f.d, id, cell)
+            end
             task.wait(2.0)
             local after = cellStage(f.d, id)
             spudTestSay(string.format(
-                "force: 2s later the game reads %s — %s",
+                "force: 2s later the game reads %s (UpdateCell %s) — %s",
                 tostring(after),
-                after == "Cultivated" and "THE WRITE STUCK (client mirror is writable)"
+                viaUpdate == nil and "not present" or (viaUpdate and "ran" or "refused"),
+                after == want and "THE WRITE STUCK (client mirror is writable)"
                     or "the game rewrote it (the stage lives on the server)"))
-            if after ~= "Cultivated" then
+            if after ~= want then
                 pcall(function() cell.Stage = real end)
                 spudTestSay("force: nothing fired — a rewritten mirror cannot fool the call")
                 return

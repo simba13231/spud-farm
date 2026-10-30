@@ -102,10 +102,12 @@ Everything merged into one paste-and-run file:
   afar** (spawn a stored machine from where you stand), **Fill from afar**
   (`FNCFillSeeder` on a distant seeder — does it refill, and does it charge?),
   **Field API** (read-only: what `FieldHelper` exports, what one cell actually
-  holds, and whether any export is a cell setter) and **Force a tile** (forges
-  an **Empty** cell's stage in the client mirror, waits 2 s and re-reads it,
-  then fires the seed call on it — `TAKEN` would mean the server trusts the
-  client's stage, `IGNORED` means the blade is still the only door).
+  holds, the `CELL_STAGES`/`SEED_TYPE`/`STAGE_MASK` values and the client's own
+  cell writer) and **Force a tile** (forges a cell the seed call would refuse —
+  any stage that is not `Cultivated`, so a Plowed field needs no Empty cell —
+  lets the game's `UpdateCell` run on it, waits 2 s and re-reads, then fires
+  the call: `TAKEN` would mean the server trusts the client's stage,
+  `IGNORED` means the blade is still the only door).
   **Run all** runs the whole set. Nothing touches animals or another player's
   plot, and the tests refuse to run while a farm pass is going. Sell takes its
   pad from the sell board, then the fulfillment pad, then a raw scan of both
