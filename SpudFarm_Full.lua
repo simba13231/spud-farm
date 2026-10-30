@@ -12,7 +12,7 @@ local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/release
     .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
     .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.61 · fluent gui"
+local VERSION    = "rebuild v1.62 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -6351,7 +6351,7 @@ local okBuild, errBuild = pcall(function()
     end
 
     function spudTestRunAll()
-        for _, k in ipairs({ "remotes", "wrongtool", "packet" }) do
+        for _, k in ipairs({ "remotes", "wrongtool", "packet", "forgepacket" }) do
             spudTestRun(k)
             task.wait(0.3)
         end
@@ -6445,6 +6445,96 @@ local okBuild, errBuild = pcall(function()
                 spudTestSay(string.format(
                     "packet: captured %d — that shape is what a forged packet would have to match", got))
             end
+            return
+        end
+
+        -- ▸ FORGE PACKET — the live watch captured `EVTFieldPacket(buffer(10))`,
+        --   one cell's worth, and FieldHelper has CellToBuffer / BufferToCell /
+        --   SerializeForReplication. This builds a buffer from a FORGED cell and
+        --   fires it at the server. The verdict resets the mirror first: if the
+        --   forged stage comes back, the server read the packet; if it stays at
+        --   the real stage, the event is server→client only.
+        if kind == "forgepacket" then
+            local mods = game:GetService("ReplicatedStorage"):FindFirstChild("Modules")
+            local larry = mods and mods:FindFirstChild("Larry")
+            local pkt = larry and larry:FindFirstChild("EVTFieldPacket")
+            local F = mods and mods:FindFirstChild("FieldHelper")
+            if not (pkt and F) then
+                spudTestSay("forgepacket: EVTFieldPacket or FieldHelper is missing")
+                return
+            end
+            local M = require(F)
+            local f = fields[1]
+            if not f then spudTestSay("forgepacket: no field of ours is streamed") return end
+            local B = F:FindFirstChild("CellBufferStructure")
+            if B then
+                local ok, S = pcall(require, B)
+                local names = {}
+                if ok and type(S) == "table" then
+                    for k in pairs(S) do names[#names + 1] = tostring(k) end
+                    table.sort(names)
+                end
+                spudTestSay("forgepacket: CellBufferStructure — "
+                    .. (#names > 0 and table.concat(names, ", ") or "no named entries"))
+            end
+            local cells = M.GetCells(f.d)
+            local id, cell
+            for k, c in pairs(cells or {}) do
+                if type(k) == "number" and type(c) == "table" then id, cell = k, c break end
+            end
+            if not id then spudTestSay("forgepacket: GetCells returned no cell") return end
+            local real = tostring(cell.Stage or "?")
+            local want = "Cultivated"
+            if real == want then want = "Seeded" end
+            cell.Stage = want
+            local function hexstr(b)
+                local out = {}
+                for i = 0, math.min(buffer.len(b), 24) - 1 do
+                    out[#out + 1] = string.format("%02x", buffer.readu8(b, i))
+                end
+                return table.concat(out, " ")
+            end
+            local buf, how
+            local function try(name, ...)
+                if buf then return end
+                local fn = M[name]
+                if type(fn) ~= "function" then return end
+                local ok, a, b = pcall(fn, ...)
+                if ok then
+                    if typeof(a) == "buffer" then buf, how = a, name
+                    elseif typeof(b) == "buffer" then buf, how = b, name end
+                end
+            end
+            try("CellToBuffer", f.d, cell)
+            try("CellToBuffer", cell)
+            try("SerializeForReplication", f.d)
+            if not buf then
+                cell.Stage = real
+                spudTestSay("forgepacket: no export returned a buffer for a cell — nothing to send")
+                return
+            end
+            spudTestSay(string.format(
+                "forgepacket: %s made buffer(%d) [%s] — cell %d %s → %s",
+                how, buffer.len(buf), hexstr(buf), id, real, want))
+            local answered = 0
+            local conn = pkt.OnClientEvent:Connect(function() answered += 1 end)
+            local okFire = pcall(function() pkt:FireServer(buf) end)
+            task.wait(2.5)
+            pcall(function() conn:Disconnect() end)
+            cell.Stage = real
+            if type(M.UpdateCell) == "function" then pcall(M.UpdateCell, f.d, cell) end
+            local back = false
+            local deadline = os.clock() + 2.5
+            while os.clock() < deadline do
+                task.wait(0.1)
+                if cellStage(f.d, id) == want then back = true break end
+            end
+            spudTestSay(string.format(
+                "forgepacket: FireServer %s, %d packet(s) came back — %s",
+                okFire and "ran" or "refused", answered,
+                back and "TAKEN: the forged stage came back, the server read the packet"
+                    or ("IGNORED: the stage stayed " .. real
+                        .. ", the event is server→client only")))
             return
         end
 
@@ -8231,6 +8321,9 @@ local okBuild, errBuild = pcall(function()
     end })
     Tabs.Tests:CreateButton({ Title = "Packet watch", Callback = function()
         task.spawn(function() spudTestRun("packet") end)
+    end })
+    Tabs.Tests:CreateButton({ Title = "Forge packet", Callback = function()
+        task.spawn(function() spudTestRun("forgepacket") end)
     end })
     Tabs.Tests:CreateButton({ Title = "Run all", Callback = function()
         task.spawn(function() spudTestRunAll() end)
