@@ -8,7 +8,7 @@ asked and fixed, and the exact loop to prove a change works.
 description — it is the long-form manual and it is kept in sync with behaviour.
 
 - Main script: [SpudFarm_Full.lua](SpudFarm_Full.lua) — one paste-and-run Luau
-  file for the Roblox game *Farming and Friends*, currently `rebuild v1.64 ·
+  file for the Roblox game *Farming and Friends*, currently `rebuild v1.65 ·
   fluent gui` (`VERSION`, line 15). ≈12.3k lines.
 - Target: Windows + Git Bash. Luau toolchain lives in
   `%LOCALAPPDATA%\Temp\opencode\luau\` (`luau.exe`, `luau-compile.exe`,
@@ -72,7 +72,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 ### 1.4 Script limits (these have broken the build before)
 
 13. **Luau's 200-local limit is real and we are 2 away from the practical
-    ceiling.** Run `python tools/local_budget.py`. As of v1.64:
+    ceiling.** Run `python tools/local_budget.py`. As of v1.65:
     `4-space locals before milkCycle: 183 (practical ceiling 185)`,
     whole body `190 / 200`, **headroom 2**. Do **not** add a `local` inside the
     main build closure. Reuse an existing local, convert the feature to a
@@ -105,7 +105,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 
 ### 1.6 Working tree state (read before editing)
 
-`HEAD` is the latest committed build (v1.64, stage-byte patch),
+`HEAD` is the latest committed build (v1.65, packet door closed),
 `main`
 tracks `origin/main`, and the tree is clean. Keep it that way: make the change,
 run the gates, and commit only the files the change touches. `git add -A` is
@@ -140,10 +140,10 @@ The one command that runs everything — compile, budget, name audit and every
 harness, checking both the exit code and the text — is:
 
 ```bash
-python tools/run_all.py        # 30/30 checks on v1.64
+python tools/run_all.py        # 30/30 checks on v1.65
 ```
 
-Last full run (v1.64): **30/30 checks passed** (27 harnesses + 3 gates).
+Last full run (v1.65): **30/30 checks passed** (27 harnesses + 3 gates).
 
 | Script | What it actually proves |
 |---|---|
@@ -633,21 +633,6 @@ ReplicatedStorage.Modules.Larry.FNCFillSeeder:InvokeServer(Workspace.Objects.Equ
     `UnreliableRemoteEvent` by path. The per-cell field calls are only the ones
     the game fired by hand; a bulk/field door that was never fired would show
     up here and nowhere else.
-  - **Packet watch** (v1.61) — the remote list named one door that could carry
-    a whole field at once: `Modules.Larry.EVTFieldPacket`, beside
-    `FieldHelper.SerializeForReplication` / `DeserializeFromReplication` and the
-    `CellBufferStructure` module. This listens **12 s** (read-only, fires
-    nothing) and prints each packet's argument shape (`buffer(48)`,
-    `table{…}`, instance names). A forged packet is the next experiment, and it
-    needs this shape first.
-  - **Forge packet** (v1.62, sharpened in v1.63–v1.64) — the watch captured
-    `buffer(10)` and `buffer(22)` while `CellToBuffer` makes **6 bytes per
-    cell**, so a packet is a **4-byte header + 6-byte cell records** (v1.62 sent
-    a bare record, which is why it changed nothing). v1.63 captures a **real**
-    packet and patches **only the stage byte** of its last record (live diff:
-    `byte 5 08→0c`), then compares the field's stages before/after — no forged
-    mirror is involved, so a change can only be the server's. (`buffer.copy` is
-    `(target, offset, source, offset, count)` — the first call crashed on it.)
   - **Wrong tool** — isolates the one check still untested: does the server
     care *which* tool the attachment belongs to, or only *where* the blade is?
     It reads the hitched implement (`hitchedImplementName`), works out its own
@@ -680,8 +665,14 @@ ReplicatedStorage.Modules.Larry.FNCFillSeeder:InvokeServer(Workspace.Objects.Equ
 are the next candidates for the milk/barn/feed/gate/deposit steps that still
 press keys or drive the UI.
 
-**Is a tile forceable?** No. The live dump shows no setter, and Force a tile
-(2026-10-30) ended `the client cell table is writable — UpdateCell kept the
+**Is a tile forceable?** No — and the last candidate is closed too.
+`EVTFieldPacket` is the server telling clients which cells changed: live packets
+are a **4-byte header + 6-byte cell records** (`CellToBuffer` is the 6 bytes; the
+stage is one byte — live `04` Cultivated, `08` Plowed, `0c` Seeded, `20` on a
+standing crop). Forging one was tested twice: a bare record (v1.62) and then a
+**real** packet with only its stage byte patched (v1.64) — both ended with **no
+packet back and no cell moved**, so there is no client→server handler. The live
+dump also shows no setter, and Force a tile (2026-10-30) ended `the client cell table is writable — UpdateCell kept the
 forged Cultivated for 2 s` then `reads Cultivated — IGNORED: no update arrived`:
 the server never reads the client's copy. A cell only holds `Alternate,
 GrowthMultiplier, IsWatered, PlantGrowth, Position, SeedType, Stage` (50 cells,
@@ -1176,11 +1167,13 @@ sweep therefore forces *position*, not state, since position is the only input
 the server checks.
 
 **"we need to find another way of forcing the seeding and plowing"** → v1.59–
-v1.62. The remote inventory (334, all `Modules.Larry`) named `EVTFieldPacket`,
+v1.65. The remote inventory (334, all `Modules.Larry`) named `EVTFieldPacket`,
 the only door that could carry a whole field. Packet watch captured it as
 `buffer(10)` — one cell's worth — so Forge packet builds the same buffer from a
-forged cell and sends it back; the verdict resets the mirror first, so a stage
-that comes back means the server read it.
+forged cell and sends it back. The patch test then flipped that byte inside a
+real packet and sent it: **nothing came back and no cell moved** (v1.64–v1.65),
+so `EVTFieldPacket` is server→client only and the tile cannot be forced. The two
+packet tools were retired like the other settled experiments.
 
 **Where it stands:** `rebuild v1.62 · fluent gui`, whole suite green (30/30),
 harness verified. **Not yet reloaded in game** after v1.22–v1.46 — the next real
@@ -1288,10 +1281,11 @@ for this session`), and the equipment lines (`✅ mounted … (FNCEnterEquipment
    well off the row; anything the server refuses must still be hopped) and
    v1.55 (a plow field must finish on the sweep: watch that its leftovers are
    not a row of missed cells, and that the log's `took` is close to `swept`)
-   and v1.61–v1.64 (Tests → **Packet watch** then **Forge packet**: the live
-   packets are 4-byte header + 6-byte records and the stage is one byte
-   (`08` Plowed → `0c` Seeded); the forge test patches a real one — `TAKEN` means a field can be set in a single packet, `IGNORED` closes
-   the bulk door and leaves the blade as the only input) and v1.59 (Tests → **Remote list** then **Wrong tool**: paste both. A
+   and v1.61–v1.65 (the packet door: live packets are a 4-byte header + 6-byte
+   records and the stage is one byte (`04` Cultivated, `08` Plowed, `0c` Seeded);
+   a real packet with that byte patched and re-sent was **IGNORED** — no packet
+   back, no cell moved — so the bulk door is shut and the blade is the only
+   input) and v1.59 (Tests → **Remote list** then **Wrong tool**: paste both. A
    remote that looks like a field/bulk door names the next experiment; a
    `TAKEN` wrong-tool verdict means one hitched tool can run every stage in a
    single sweep) and v1.57/v1.58 (Tests → **Force a tile**: the live FieldHelper dump has

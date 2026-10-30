@@ -12,7 +12,7 @@ local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/release
     .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
     .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.64 · fluent gui"
+local VERSION    = "rebuild v1.65 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -6351,7 +6351,7 @@ local okBuild, errBuild = pcall(function()
     end
 
     function spudTestRunAll()
-        for _, k in ipairs({ "remotes", "wrongtool", "packet", "forgepacket" }) do
+        for _, k in ipairs({ "remotes", "wrongtool" }) do
             spudTestRun(k)
             task.wait(0.3)
         end
@@ -6392,176 +6392,6 @@ local okBuild, errBuild = pcall(function()
             return folder and folder:GetChildren() or {}
         end
 
-
-        -- ▸ PACKET WATCH — the remote list turned up one door that could carry
-        --   a whole field at once: Modules.Larry.EVTFieldPacket, with
-        --   FieldHelper.SerializeForReplication / DeserializeFromReplication
-        --   and the CellBufferStructure module beside it. This listens 12 s
-        --   (read-only, fires nothing) and dumps what actually arrives, so a
-        --   forged packet next is built on the real shape instead of a guess.
-        if kind == "packet" then
-            local mods = game:GetService("ReplicatedStorage"):FindFirstChild("Modules")
-            local larry = mods and mods:FindFirstChild("Larry")
-            local pkt = larry and larry:FindFirstChild("EVTFieldPacket")
-            if not pkt or not pkt:IsA("RemoteEvent") then
-                spudTestSay("packet: Modules.Larry.EVTFieldPacket is missing")
-                return
-            end
-            local got = 0
-            local function describe(v)
-                local t = typeof(v)
-                if t == "buffer" then return "buffer(" .. tostring(buffer.len(v)) .. ")" end
-                if t == "table" then
-                    local keys = {}
-                    for k in pairs(v) do
-                        keys[#keys + 1] = tostring(k)
-                        if #keys >= 8 then break end
-                    end
-                    return "table{" .. table.concat(keys, ",") .. "}"
-                end
-                if t == "Instance" then return v.Name .. "(" .. v.ClassName .. ")" end
-                return t .. " " .. tostring(v)
-            end
-            local conn = pkt.OnClientEvent:Connect(function(...)
-                got += 1
-                if got > 3 then return end
-                local a = table.pack(...)
-                local parts = {}
-                for i = 1, a.n do
-                    parts[#parts + 1] = describe(a[i])
-                    if #parts >= 5 then break end
-                end
-                spudTestSay(string.format("packet: #%d — %d arg(s): %s", got, a.n,
-                    table.concat(parts, " · ")))
-            end)
-            spudTestSay("packet: listening 12s — drive over one cell (or let a pass run) "
-                .. "and the shape of EVTFieldPacket lands here")
-            local deadline = os.clock() + 12
-            while os.clock() < deadline do task.wait(0.25) end
-            pcall(function() conn:Disconnect() end)
-            if got == 0 then
-                spudTestSay("packet: nothing arrived — either no cell changed or the event is server-only")
-            else
-                spudTestSay(string.format(
-                    "packet: captured %d — that shape is what a forged packet would have to match", got))
-            end
-            return
-        end
-
-        -- ▸ FORGE PACKET — the live watch captured `EVTFieldPacket` buffers,
-        --   and two `CellToBuffer` records for the same cell at different
-        --   stages differ in ONE byte (live: byte 5, 08→0c). So this captures a
-        --   real packet, patches only that stage byte (the cell id, seed and
-        --   flags stay the server's own), fires it, and compares the field's
-        --   stages before/after — no forged mirror is involved, so a change can
-        --   only be the server's.
-        if kind == "forgepacket" then
-            local mods = game:GetService("ReplicatedStorage"):FindFirstChild("Modules")
-            local larry = mods and mods:FindFirstChild("Larry")
-            local pkt = larry and larry:FindFirstChild("EVTFieldPacket")
-            local F = mods and mods:FindFirstChild("FieldHelper")
-            if not (pkt and F) then
-                spudTestSay("forgepacket: EVTFieldPacket or FieldHelper is missing")
-                return
-            end
-            local M = require(F)
-            local f = fields[1]
-            if not f then spudTestSay("forgepacket: no field of ours is streamed") return end
-            local function hexstr(b)
-                local out = {}
-                for i = 0, math.min(buffer.len(b), 24) - 1 do
-                    out[#out + 1] = string.format("%02x", buffer.readu8(b, i))
-                end
-                return table.concat(out, " ")
-            end
-            local function stageMap()
-                local m = {}
-                local cs = M.GetCells(f.d)
-                for k, c in pairs(cs or {}) do
-                    if type(k) == "number" and type(c) == "table" then
-                        m[k] = tostring(c.Stage or "?")
-                    end
-                end
-                return m
-            end
-            local cells0 = M.GetCells(f.d)
-            local id0, cell0
-            for k, c in pairs(cells0 or {}) do
-                if type(k) == "number" and type(c) == "table" then id0, cell0 = k, c break end
-            end
-            if not id0 then spudTestSay("forgepacket: GetCells returned no cell") return end
-            local real = tostring(cell0.Stage or "?")
-            local order, nextStage = { "Empty", "Plowed", "Cultivated", "Seeded" }, "Seeded"
-            for i, sname in ipairs(order) do
-                if sname == real and order[i + 1] then nextStage = order[i + 1] end
-            end
-            local function recFor(stage)
-                cell0.Stage = stage
-                local fn = M.CellToBuffer
-                if type(fn) ~= "function" then return nil end
-                local ok, a = pcall(fn, f.d, cell0)
-                if not (ok and typeof(a) == "buffer") then ok, a = pcall(fn, cell0) end
-                return (ok and typeof(a) == "buffer") and a or nil
-            end
-            local recA, recB = recFor(real), recFor(nextStage)
-            cell0.Stage = real
-            if not (recA and recB and buffer.len(recA) == buffer.len(recB)) then
-                spudTestSay("forgepacket: CellToBuffer did not give two records")
-                return
-            end
-            local idx, toV
-            for i = 0, buffer.len(recA) - 1 do
-                local x, y = buffer.readu8(recA, i), buffer.readu8(recB, i)
-                if x ~= y then idx, toV = i, y end
-            end
-            if not idx then
-                spudTestSay("forgepacket: the two records are identical — no stage byte to patch")
-                return
-            end
-            spudTestSay(string.format("forgepacket: cell %d is %s; record byte %d = %02x, %s = %02x",
-                id0, real, idx, buffer.readu8(recA, idx), nextStage, toV))
-            local realPkt
-            local c1 = pkt.OnClientEvent:Connect(function(b)
-                if not realPkt and typeof(b) == "buffer" and buffer.len(b) > idx then
-                    realPkt = b
-                end
-            end)
-            spudTestSay("forgepacket: listening 10s for a real packet — drive over one of your cells")
-            local dl = os.clock() + 10
-            while os.clock() < dl and not realPkt do task.wait(0.2) end
-            pcall(function() c1:Disconnect() end)
-            if not realPkt then
-                spudTestSay("forgepacket: no packet captured — drive over a cell and press it again")
-                return
-            end
-            spudTestSay(string.format("forgepacket: captured buffer(%d) [%s]",
-                buffer.len(realPkt), hexstr(realPkt)))
-            local patched = buffer.create(buffer.len(realPkt))
-            buffer.copy(patched, 0, realPkt, 0, buffer.len(realPkt))
-            local at = buffer.len(patched) - buffer.len(recA) + idx
-            local oldV = buffer.readu8(patched, at)
-            buffer.writeu8(patched, at, toV)
-            spudTestSay(string.format("forgepacket: patched byte %d %02x→%02x → [%s]",
-                at, oldV, toV, hexstr(patched)))
-            local before = stageMap()
-            local answered = 0
-            local c2 = pkt.OnClientEvent:Connect(function() answered += 1 end)
-            local okFire = pcall(function() pkt:FireServer(patched) end)
-            task.wait(3.0)
-            pcall(function() c2:Disconnect() end)
-            local after2 = stageMap()
-            local changed
-            for id2, st in pairs(after2) do
-                if before[id2] and st ~= before[id2] then
-                    changed = string.format("cell %d %s → %s", id2, before[id2], st)
-                end
-            end
-            spudTestSay(string.format("forgepacket: FireServer %s, %d packet(s) came back — %s",
-                okFire and "ran" or "refused", answered,
-                changed and ("TAKEN: " .. changed .. " after the packet")
-                    or "IGNORED: every cell kept its stage, the event is server→client only"))
-            return
-        end
 
         -- ▸ REMOTE LIST — read-only inventory of every remote the client can
         --   see. The field calls we know are the ones the game fired by hand;
@@ -8343,12 +8173,6 @@ local okBuild, errBuild = pcall(function()
     end })
     Tabs.Tests:CreateButton({ Title = "Wrong tool", Callback = function()
         task.spawn(function() spudTestRun("wrongtool") end)
-    end })
-    Tabs.Tests:CreateButton({ Title = "Packet watch", Callback = function()
-        task.spawn(function() spudTestRun("packet") end)
-    end })
-    Tabs.Tests:CreateButton({ Title = "Forge packet", Callback = function()
-        task.spawn(function() spudTestRun("forgepacket") end)
     end })
     Tabs.Tests:CreateButton({ Title = "Run all", Callback = function()
         task.spawn(function() spudTestRunAll() end)

@@ -90,21 +90,16 @@ Everything merged into one paste-and-run file:
   see — a bulk field door we never fired would only show up there. **Wrong
   tool** fires a different job's call at the cell the hitched blade is over: if
   it takes, the server checks the blade's position, not which implement it
-  belongs to, and one tool could plow, cultivate and seed in one sweep.
-  **Packet watch** listens 12 s for `EVTFieldPacket` — the one remote that could
-  carry a whole field at once — and prints the argument shape it actually sends
-  (read-only; it fires nothing). **Forge packet** patches a **real** packet:
-  `CellToBuffer` is 6 bytes per cell while the live packets are 4-byte header +
-  6-byte records, so it captures a real packet, patches **only the stage byte**
-  (found by diffing two records for the same cell at different stages) and fires
-  it — then compares the field's stages before/after, so any change is the
-  server's. Every
+  belongs to, and one tool could plow, cultivate and seed in one sweep. Every
   line is logged as `test:` and **Copy report** puts place id, build, player
   and the whole run on the clipboard. Nothing touches animals or another
   player's plot, and the tests refuse to run while a farm pass is going.
   (The settled experiments — seat/stage/attachment checks, the burst, sell,
-  carry, spawn, fill, the FieldHelper dump and force-a-tile — were removed once
-  they had their answer; their results are in the console history.)
+  carry, spawn, fill, the FieldHelper dump, force-a-tile and the field-packet
+  watch/forge — were removed once they had their answer; their results are in
+  the console history. The packet was the last forcing candidate: patching a
+  real packet's stage byte sent nothing back and moved no cell, so
+  `EVTFieldPacket` is server→client only.)
 - **Equipment on the game's own remotes** — the same capture pass recorded the
   equipment calls, so the script fires them instead of pressing keys or driving
   the Equipment Manager UI: `FNCEnterEquipment(vehicle, seat)` to mount,
