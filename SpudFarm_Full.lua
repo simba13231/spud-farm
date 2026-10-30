@@ -12,7 +12,7 @@ local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/release
     .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
     .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.60 · fluent gui"
+local VERSION    = "rebuild v1.61 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -6351,7 +6351,7 @@ local okBuild, errBuild = pcall(function()
     end
 
     function spudTestRunAll()
-        for _, k in ipairs({ "remotes", "wrongtool" }) do
+        for _, k in ipairs({ "remotes", "wrongtool", "packet" }) do
             spudTestRun(k)
             task.wait(0.3)
         end
@@ -6392,6 +6392,61 @@ local okBuild, errBuild = pcall(function()
             return folder and folder:GetChildren() or {}
         end
 
+
+        -- ▸ PACKET WATCH — the remote list turned up one door that could carry
+        --   a whole field at once: Modules.Larry.EVTFieldPacket, with
+        --   FieldHelper.SerializeForReplication / DeserializeFromReplication
+        --   and the CellBufferStructure module beside it. This listens 12 s
+        --   (read-only, fires nothing) and dumps what actually arrives, so a
+        --   forged packet next is built on the real shape instead of a guess.
+        if kind == "packet" then
+            local mods = game:GetService("ReplicatedStorage"):FindFirstChild("Modules")
+            local larry = mods and mods:FindFirstChild("Larry")
+            local pkt = larry and larry:FindFirstChild("EVTFieldPacket")
+            if not pkt or not pkt:IsA("RemoteEvent") then
+                spudTestSay("packet: Modules.Larry.EVTFieldPacket is missing")
+                return
+            end
+            local got = 0
+            local function describe(v)
+                local t = typeof(v)
+                if t == "buffer" then return "buffer(" .. tostring(buffer.len(v)) .. ")" end
+                if t == "table" then
+                    local keys = {}
+                    for k in pairs(v) do
+                        keys[#keys + 1] = tostring(k)
+                        if #keys >= 8 then break end
+                    end
+                    return "table{" .. table.concat(keys, ",") .. "}"
+                end
+                if t == "Instance" then return v.Name .. "(" .. v.ClassName .. ")" end
+                return t .. " " .. tostring(v)
+            end
+            local conn = pkt.OnClientEvent:Connect(function(...)
+                got += 1
+                if got > 3 then return end
+                local a = table.pack(...)
+                local parts = {}
+                for i = 1, a.n do
+                    parts[#parts + 1] = describe(a[i])
+                    if #parts >= 5 then break end
+                end
+                spudTestSay(string.format("packet: #%d — %d arg(s): %s", got, a.n,
+                    table.concat(parts, " · ")))
+            end)
+            spudTestSay("packet: listening 12s — drive over one cell (or let a pass run) "
+                .. "and the shape of EVTFieldPacket lands here")
+            local deadline = os.clock() + 12
+            while os.clock() < deadline do task.wait(0.25) end
+            pcall(function() conn:Disconnect() end)
+            if got == 0 then
+                spudTestSay("packet: nothing arrived — either no cell changed or the event is server-only")
+            else
+                spudTestSay(string.format(
+                    "packet: captured %d — that shape is what a forged packet would have to match", got))
+            end
+            return
+        end
 
         -- ▸ REMOTE LIST — read-only inventory of every remote the client can
         --   see. The field calls we know are the ones the game fired by hand;
@@ -8173,6 +8228,9 @@ local okBuild, errBuild = pcall(function()
     end })
     Tabs.Tests:CreateButton({ Title = "Wrong tool", Callback = function()
         task.spawn(function() spudTestRun("wrongtool") end)
+    end })
+    Tabs.Tests:CreateButton({ Title = "Packet watch", Callback = function()
+        task.spawn(function() spudTestRun("packet") end)
     end })
     Tabs.Tests:CreateButton({ Title = "Run all", Callback = function()
         task.spawn(function() spudTestRunAll() end)

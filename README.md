@@ -90,7 +90,10 @@ Everything merged into one paste-and-run file:
   see — a bulk field door we never fired would only show up there. **Wrong
   tool** fires a different job's call at the cell the hitched blade is over: if
   it takes, the server checks the blade's position, not which implement it
-  belongs to, and one tool could plow, cultivate and seed in one sweep. Every
+  belongs to, and one tool could plow, cultivate and seed in one sweep.
+  **Packet watch** listens 12 s for `EVTFieldPacket` — the one remote that could
+  carry a whole field at once — and prints the argument shape it actually sends
+  (read-only; it fires nothing). Every
   line is logged as `test:` and **Copy report** puts place id, build, player
   and the whole run on the clipboard. Nothing touches animals or another
   player's plot, and the tests refuse to run while a farm pass is going.

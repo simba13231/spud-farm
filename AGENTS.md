@@ -8,7 +8,7 @@ asked and fixed, and the exact loop to prove a change works.
 description — it is the long-form manual and it is kept in sync with behaviour.
 
 - Main script: [SpudFarm_Full.lua](SpudFarm_Full.lua) — one paste-and-run Luau
-  file for the Roblox game *Farming and Friends*, currently `rebuild v1.60 ·
+  file for the Roblox game *Farming and Friends*, currently `rebuild v1.61 ·
   fluent gui` (`VERSION`, line 15). ≈12.3k lines.
 - Target: Windows + Git Bash. Luau toolchain lives in
   `%LOCALAPPDATA%\Temp\opencode\luau\` (`luau.exe`, `luau-compile.exe`,
@@ -72,7 +72,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 ### 1.4 Script limits (these have broken the build before)
 
 13. **Luau's 200-local limit is real and we are 2 away from the practical
-    ceiling.** Run `python tools/local_budget.py`. As of v1.60:
+    ceiling.** Run `python tools/local_budget.py`. As of v1.61:
     `4-space locals before milkCycle: 183 (practical ceiling 185)`,
     whole body `190 / 200`, **headroom 2**. Do **not** add a `local` inside the
     main build closure. Reuse an existing local, convert the feature to a
@@ -105,7 +105,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 
 ### 1.6 Working tree state (read before editing)
 
-`HEAD` is the latest committed build (v1.60, trimmed Tests tab),
+`HEAD` is the latest committed build (v1.61, packet watcher),
 `main`
 tracks `origin/main`, and the tree is clean. Keep it that way: make the change,
 run the gates, and commit only the files the change touches. `git add -A` is
@@ -140,10 +140,10 @@ The one command that runs everything — compile, budget, name audit and every
 harness, checking both the exit code and the text — is:
 
 ```bash
-python tools/run_all.py        # 30/30 checks on v1.60
+python tools/run_all.py        # 30/30 checks on v1.61
 ```
 
-Last full run (v1.60): **30/30 checks passed** (27 harnesses + 3 gates).
+Last full run (v1.61): **30/30 checks passed** (27 harnesses + 3 gates).
 
 | Script | What it actually proves |
 |---|---|
@@ -633,6 +633,13 @@ ReplicatedStorage.Modules.Larry.FNCFillSeeder:InvokeServer(Workspace.Objects.Equ
     `UnreliableRemoteEvent` by path. The per-cell field calls are only the ones
     the game fired by hand; a bulk/field door that was never fired would show
     up here and nowhere else.
+  - **Packet watch** (v1.61) — the remote list named one door that could carry
+    a whole field at once: `Modules.Larry.EVTFieldPacket`, beside
+    `FieldHelper.SerializeForReplication` / `DeserializeFromReplication` and the
+    `CellBufferStructure` module. This listens **12 s** (read-only, fires
+    nothing) and prints each packet's argument shape (`buffer(48)`,
+    `table{…}`, instance names). A forged packet is the next experiment, and it
+    needs this shape first.
   - **Wrong tool** — isolates the one check still untested: does the server
     care *which* tool the attachment belongs to, or only *where* the blade is?
     It reads the hitched implement (`hitchedImplementName`), works out its own
@@ -651,6 +658,19 @@ ReplicatedStorage.Modules.Larry.FNCFillSeeder:InvokeServer(Workspace.Objects.Equ
   afar (carry works at 35 studs), Spawn from afar (works from anywhere), Fill
   from afar (refused at 963 studs), Field API (the module exports **no setter**;
   `UpdateCell`/`UpdateCells` are the client's own writers) and Force a tile.
+
+**Remote inventory (v1.60, owner's report 2026-10-30).** 334 remotes under
+`ReplicatedStorage`, all on `Modules.Larry`. Field: `EVTPlowFieldCell`,
+`EVTCultivateFieldCell`, `FNCSeedFieldCell`, `FNCHarvestFieldCell`,
+`FNCSprayFieldCell`, `EVTFieldPacket`, `FNCEditField`,
+`FNCConvertRundownField`. **Never wired, and now named**: `EVTHerdRequest`,
+`EVTAnimalAction`, `EVTCollectAnimalProduction`, `EVTFilthCleaning`,
+`EVTFillFeeder`, `EVTFillFeedDispenser`, `EVTOpenBarnGate`, `EVTToggleDoor`,
+`EVTDepositWarehouse`, `EVTWithdrawWarehouse`, `EVTFulfillOrder`,
+`EVTTeleportToFarm`, `FNCCutTree`/`EVTToppleTree`, `EVTSellObjects`,
+`EVTSellAtAnimalCo`, `FNCForceRespawnEquipment`, `FNCSetEquipmentHome`. Those
+are the next candidates for the milk/barn/feed/gate/deposit steps that still
+press keys or drive the UI.
 
 **Is a tile forceable?** No. The live dump shows no setter, and Force a tile
 (2026-10-30) ended `the client cell table is writable — UpdateCell kept the
@@ -1253,7 +1273,9 @@ for this session`), and the equipment lines (`✅ mounted … (FNCEnterEquipment
    well off the row; anything the server refuses must still be hopped) and
    v1.55 (a plow field must finish on the sweep: watch that its leftovers are
    not a row of missed cells, and that the log's `took` is close to `swept`)
-   and v1.59 (Tests → **Remote list** then **Wrong tool**: paste both. A
+   and v1.61 (Tests → **Packet watch**: press it on the field and drive over a
+   cell; the captured `EVTFieldPacket` shape decides whether a forged packet is
+   even possible) and v1.59 (Tests → **Remote list** then **Wrong tool**: paste both. A
    remote that looks like a field/bulk door names the next experiment; a
    `TAKEN` wrong-tool verdict means one hitched tool can run every stage in a
    single sweep) and v1.57/v1.58 (Tests → **Force a tile**: the live FieldHelper dump has
