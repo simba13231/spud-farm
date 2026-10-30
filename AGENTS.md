@@ -1175,7 +1175,7 @@ real packet and sent it: **nothing came back and no cell moved** (v1.64–v1.65)
 so `EVTFieldPacket` is server→client only and the tile cannot be forced. The two
 packet tools were retired like the other settled experiments.
 
-**Where it stands:** `rebuild v1.62 · fluent gui`, whole suite green (30/30),
+**Where it stands:** `rebuild v1.65 · fluent gui`, whole suite green (30/30),
 harness verified. **Not yet reloaded in game** after v1.22–v1.46 — the next real
 test is a live pass watching `path: … theta* N pops / N ms, min clear N`, the
 new width line (`tool … — 3-wide …; rows every 30`), the Farm owner picker
