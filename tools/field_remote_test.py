@@ -31,6 +31,8 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SRC = ROOT / "SpudFarm_Full.lua"
 WANTED = [
+    "cellsAtStage",
+    "spudHopCells",
     "spudFieldRemoteKit",
     "spudFieldCellIds",
     "spudToolAttachment",
@@ -80,6 +82,39 @@ function require(x) return x end
 
 grownStage = function(s) return s == "Grown" end
 spudFieldRemoteState = { kit = nil, off = {} }
+
+-- ▸ vectors/CFrames for the hop fixtures (cellsAtStage + spudHopCells)
+local V = {}
+function V.__add(a, b) return setmetatable({ X = a.X + b.X, Y = a.Y + b.Y, Z = a.Z + b.Z }, V) end
+function V.__sub(a, b) return setmetatable({ X = a.X - b.X, Y = a.Y - b.Y, Z = a.Z - b.Z }, V) end
+function V.__mul(a, b)
+    if type(a) == "number" then return setmetatable({ X = b.X * a, Y = b.Y * a, Z = b.Z * a }, V) end
+    return setmetatable({ X = a.X * b, Y = a.Y * b, Z = a.Z * b }, V)
+end
+V.__index = function(t, k)
+    if k == "Magnitude" then return math.sqrt(t.X * t.X + t.Y * t.Y + t.Z * t.Z) end
+    return nil
+end
+Vector3 = { new = function(x, y, z)
+    return setmetatable({ X = x or 0, Y = y or 0, Z = z or 0 }, V)
+end }
+local CF = {}
+CF.__index = CF
+CF.__mul = function(a, b)
+    if a.base then return { Position = a.Position + (b.pos or b.Position) } end
+    return a
+end
+CF.__sub = function(a, b) return { rot = true } end
+CFrame = { new = function(x, y, z)
+    if type(x) == "table" then return setmetatable({ pos = x }, CF) end
+    return setmetatable({ pos = Vector3.new(x or 0, y or 0, z or 0) }, CF)
+end }
+function cellPosOf(id)
+    local x, y = math.floor(id / 128), id % 128
+    return Vector3.new((x - 3) * 10, 0, (y - 2) * 10) -- the fixture's rows = 3 (643 is Seeded)
+end
+ATTPARENT = nil
+RIDE_POS = Vector3.new(0, 0, 0)
 
 local fieldState = {}
 local fieldHelper = newInst("FieldHelper", "ModuleScript")
@@ -131,6 +166,11 @@ local function seedHandler(field, ids)
             elseif mode.seed == "firstBatch" then
                 -- takes the first id of a list, but any single-id call
                 take = (id == 641) or (#ids == 1)
+            end
+            if take and mode.atCell then
+                -- the live rule: only a cell the blade is over is accepted
+                local p = ATTPARENT and ATTPARENT.Position
+                if not (p and (p - cellPosOf(id)).Magnitude <= 2) then take = false end
             end
             if take then cell.Stage = "Seeded" end
         end
@@ -438,6 +478,47 @@ resetState()
 larry.Name = "LarryX"
 check("no Modules.Larry -> no kit", spudFieldRemoteKit() == nil)
 larry.Name = "Larry"
+
+-- 11. the ride is hopped onto each remaining cell so the blade is over it
+local hopAttPart = newInst("RaycastPart", "Part")
+hopAttPart.Position = Vector3.new(0, 0, -5)
+local hopAtt = newInst("Attachment", "Attachment")
+hopAtt.Parent = hopAttPart
+ATTPARENT = hopAttPart
+RIDE_POS = Vector3.new(0, 0, 0)
+local hopRide = {}
+function hopRide:GetPivot() return setmetatable({ Position = RIDE_POS }, CF) end
+function hopRide:PivotTo(cf)
+    RIDE_POS = cf.pos
+    ATTPARENT.Position = RIDE_POS + Vector3.new(0, 0, -5)
+end
+local baseCF = setmetatable({ base = true, Position = Vector3.new(0, 0, 0) }, CF)
+local baseSize = Vector3.new(50, 1, 20)
+capVal.Value = 50
+mode.seed = "all"
+mode.atCell = true
+resetCells()
+resetState()
+local h0 = seedRemote.invokeCalls
+local tookHop, hopDry = spudHopCells(seedJob, field, hopRide, tool, "Cultivated",
+    baseCF, baseSize, hopAtt)
+check("hop: the blade is lined up on both cells", tookHop == 2, tostring(tookHop))
+check("hop: one call per cell", seedRemote.invokeCalls - h0 == 2,
+    (seedRemote.invokeCalls - h0) .. " call(s)")
+check("hop: the field is done afterwards",
+    #spudFieldCellIds(field, "Cultivated") == 0)
+check("hop: a full seeder means not dry", hopDry == false, tostring(hopDry))
+
+resetCells()
+resetState()
+capVal.Value = 1
+local tookOne, dryOne = spudHopCells(seedJob, field, hopRide, tool, "Cultivated",
+    baseCF, baseSize, hopAtt)
+check("hop: one seed hops one cell and hands back",
+    tookOne == 1 and dryOne == true,
+    string.format("%s,%s", tostring(tookOne), tostring(dryOne)))
+capVal.Value = 50
+mode.atCell = false
 
 print(fails == 0 and "ALL OK" or (fails .. " FAILED"))
 """

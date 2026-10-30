@@ -12,7 +12,7 @@ local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/release
     .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
     .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.51 · fluent gui"
+local VERSION    = "rebuild v1.52 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -3635,7 +3635,7 @@ local okBuild, errBuild = pcall(function()
                         local s = tostring(cell.Stage or "?")
                         if (type(stage) == "function" and stage(s))
                             or (type(stage) ~= "function" and s == stage) then
-                            missed[#missed + 1] = { x = x, y = y }
+                            missed[#missed + 1] = { x = x, y = y, id = id }
                         end
                     end
                 end
@@ -3654,7 +3654,7 @@ local okBuild, errBuild = pcall(function()
                     lz = (m.x - (cols + 1) / 2) * 10
                 end
                 local p = (baseCF * CFrame.new(lx, 0, lz)).Position
-                pts[#pts + 1] = { X = p.X, Y = p.Y, Z = p.Z }
+                pts[#pts + 1] = { id = m.id, X = p.X, Y = p.Y, Z = p.Z }
             end
             return pts
         end)
@@ -6745,6 +6745,68 @@ local okBuild, errBuild = pcall(function()
         spudTestSay(kind .. ": no field of ours has a plow/cultivate/seed cell with a nearby tool to try")
     end
 
+    -- ▸ THE SERVER ONLY TAKES A CELL WHOSE BLADE IS OVER IT (live 2026-10-30:
+    --   a 46-id batch took 2, the whole call pass took 6 — the tractor sat at
+    --   the field edge). So the ride is HOPPED onto each remaining cell with
+    --   the tool's own attachment lined up on it, and that one id is fired.
+    --   The stage re-read is the proof; a cell a hop did not take is left for
+    --   the drive, so this can only add speed. Seed and harvest hops stop at
+    --   the machine's own budget (seeds / free tank space).
+    function spudHopCells(job, field, ride, impl, stage, baseCF, baseSize, att)
+        local pts = cellsAtStage(field, stage, baseCF, baseSize)
+        if not pts or #pts == 0 then return 0, false end
+        local before = #pts
+        local off = nil
+        pcall(function()
+            local part = att and att.Parent
+            if part and part.Position then
+                off = part.Position - ride:GetPivot().Position
+            end
+        end)
+        local budget, dry = nil, false
+        if job.verb == "seed" or job.verb == "harvest" then
+            pcall(function()
+                local conf = impl and impl:FindFirstChild("Configurations")
+                local c = conf and conf:FindFirstChild("Capacity")
+                local m = conf and conf:FindFirstChild("MaxCapacity")
+                local cur = c and c:IsA("IntValue") and tonumber(c.Value) or nil
+                if job.verb == "seed" then
+                    budget = cur
+                elseif cur and m and m:IsA("IntValue") then
+                    budget = math.max(0, m.Value - cur)
+                end
+            end)
+        end
+        local fired = 0
+        for _, c in ipairs(pts) do
+            if stopping() then break end
+            if c.id then
+                if budget and fired >= budget then
+                    dry = true
+                    break
+                end
+                local cf = ride:GetPivot()
+                local rot = cf - cf.Position
+                local target
+                if off then
+                    target = Vector3.new(c.X, c.Y, c.Z) - off
+                else
+                    target = Vector3.new(c.X, c.Y + 2, c.Z)
+                end
+                ride:PivotTo(CFrame.new(target) * rot)
+                task.wait(0.1) -- the CFrame needs a beat to reach the server
+                spudFieldRemoteCall(job.verb, field, c.id, att)
+                fired += 1
+            end
+        end
+        local after = cellsAtStage(field, stage, baseCF, baseSize)
+        local left = after and #after or nil
+        local took = left and (before - left) or 0
+        log(string.format("remote %s: hopped the ride over %d cell(s) — %d took, %s left",
+            job.verb, fired, took, left and tostring(left) or "unreadable"))
+        return took, dry
+    end
+
     local function sweepField(tr, field, seat, job, impl)
         local baseCF, baseSize = fieldFrame(field)
         if not baseCF then return false, "no bounds" end
@@ -6827,6 +6889,29 @@ local okBuild, errBuild = pcall(function()
                         job.verb, need0 or 0))
                 end
                 return true
+            end
+            -- ▸ one call per cell only lands where the blade is (live: 6 of 46),
+            --   so hop onto each remaining cell and fire that one id before
+            --   giving up and driving. The stage re-read decides.
+            if need0 and need0 > 0 then
+                local hopped, hopDry = spudHopCells(job, field, tr, impl,
+                    job.grown and grownStage or job.stage, baseCF, baseSize, spudToolAttachment(impl))
+                if hopped and hopped > 0 then
+                    st0 = countStages(field) or st0
+                    need0 = st0 and whichNeed(job, st0) or need0
+                    if need0 == 0 then
+                        if job.selfPropelled then
+                            harvestSellIfFull(tr, seat, field, "after the hop pass")
+                        end
+                        return true
+                    end
+                end
+                if hopDry then
+                    if job.selfPropelled then
+                        harvestSellIfFull(tr, seat, field, "after the hop pass")
+                    end
+                    return true
+                end
             end
         end
         log(string.format("%s: 1 headland lap + %d skip-row pass(es)  (%s)", job.verb, #lines,

@@ -8,7 +8,7 @@ asked and fixed, and the exact loop to prove a change works.
 description — it is the long-form manual and it is kept in sync with behaviour.
 
 - Main script: [SpudFarm_Full.lua](SpudFarm_Full.lua) — one paste-and-run Luau
-  file for the Roblox game *Farming and Friends*, currently `rebuild v1.51 ·
+  file for the Roblox game *Farming and Friends*, currently `rebuild v1.52 ·
   fluent gui` (`VERSION`, line 15). ≈12.3k lines.
 - Target: Windows + Git Bash. Luau toolchain lives in
   `%LOCALAPPDATA%\Temp\opencode\luau\` (`luau.exe`, `luau-compile.exe`,
@@ -72,7 +72,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 ### 1.4 Script limits (these have broken the build before)
 
 13. **Luau's 200-local limit is real and we are 2 away from the practical
-    ceiling.** Run `python tools/local_budget.py`. As of v1.51:
+    ceiling.** Run `python tools/local_budget.py`. As of v1.52:
     `4-space locals before milkCycle: 183 (practical ceiling 185)`,
     whole body `190 / 200`, **headroom 2**. Do **not** add a `local` inside the
     main build closure. Reuse an existing local, convert the feature to a
@@ -105,7 +105,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 
 ### 1.6 Working tree state (read before editing)
 
-`HEAD` is the latest committed build (v1.51, whole field on remotes), `main`
+`HEAD` is the latest committed build (v1.52, hop the blade to each cell), `main`
 tracks `origin/main`, and the tree is clean. Keep it that way: make the change,
 run the gates, and commit only the files the change touches. `git add -A` is
 banned here. **Commit and push after every completed change** (owner's standing
@@ -139,10 +139,10 @@ The one command that runs everything — compile, budget, name audit and every
 harness, checking both the exit code and the text — is:
 
 ```bash
-python tools/run_all.py        # 30/30 checks on v1.51
+python tools/run_all.py        # 30/30 checks on v1.52
 ```
 
-Last full run (v1.51): **30/30 checks passed** (27 harnesses + 3 gates).
+Last full run (v1.52): **30/30 checks passed** (27 harnesses + 3 gates).
 
 | Script | What it actually proves |
 |---|---|
@@ -1157,7 +1157,10 @@ for this session`), and the equipment lines (`✅ mounted … (FNCEnterEquipment
    seeded; a refill that puts nothing in must stop it) and v1.51 (harvest: a
    full tank must log `the tank is full … the sell trip runs before the rest`
    and fire no harvest call; any refused tail must log
-   `one retry of just those` and then `the retry finished the field`).
+   `one retry of just those` and then `the retry finished the field`) and v1.52
+   (a field after the call pass must log `remote <job>: hopped the ride over N
+   cell(s) — N took`; if the count reaches 0 the field ends with **no row
+   driven**, otherwise the drive starts from the last hopped cell).
    Harness green ≠ game green.
 2. **The 24 % baseline may differ per build.** If stalls sit higher, the first
    pass logs `reads X% but the game offers no Clean there - the dirty line moves
