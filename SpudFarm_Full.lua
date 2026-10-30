@@ -12,7 +12,7 @@ local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/release
     .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
     .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.43 · fluent gui"
+local VERSION    = "rebuild v1.44 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -3938,6 +3938,170 @@ local okBuild, errBuild = pcall(function()
         return true
     end
 
+    -- ▸ TESTS · BUG FINDER (user: "maybe you can make a dump to try to find
+    --   bugs to abuse"). The batch test answered one question (one id per
+    --   call); these answer the next three by firing ONE captured call on ONE
+    --   of my own cells and re-reading the field, so the game's own state is
+    --   the verdict:
+    --     ride  — a cell call with nobody in the seat, no hitch, tool far away
+    --     stage — seeding a cell that is NOT at the seed job's stage
+    --     tool  — the same call with an empty attachment table
+    --     burst — every id fired back-to-back, no 40 ms spacing
+    --   They only write cells on the farm being worked (never money, animals
+    --   or another player's plot) and refuse to run during a farm pass.
+    spudTestLines = {}
+    function spudTestSay(line)
+        spudTestLines[#spudTestLines + 1] = tostring(line)
+        while #spudTestLines > 10 do table.remove(spudTestLines, 1) end
+        log("test: " .. tostring(line))
+        if spudTestShow then spudTestShow(table.concat(spudTestLines, "\n")) end
+    end
+
+    function spudTestRun(kind)
+        if spudTestBusy then spudTestSay("a test is already running") return end
+        spudTestBusy = true
+        local ok, err = pcall(spudTestWork, kind)
+        spudTestBusy = false
+        if not ok then spudTestSay("the test crashed: " .. tostring(err)) end
+    end
+
+    function spudTestWork(kind)
+        if loopThread then
+            spudTestSay("a farm pass is running — stop it before testing")
+            return
+        end
+        local char = LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        if not root then spudTestSay("no character — join the game first") return end
+        local here = root.Position
+        local fields = findMyFields(here)
+        if #fields == 0 then spudTestSay("no field of ours is streamed here") return end
+
+        local function jobFor(verb)
+            for _, j in ipairs(JOBS) do
+                if j.verb == verb then return j end
+            end
+        end
+        local function cellStage(field, id)
+            local ok, s = pcall(function()
+                local mods = game:GetService("ReplicatedStorage"):FindFirstChild("Modules")
+                local F = mods and mods:FindFirstChild("FieldHelper")
+                F = F and require(F)
+                local cells = F and F.GetCells(field)
+                local cell = cells and cells[id]
+                return cell and tostring(cell.Stage or "?") or nil
+            end)
+            if ok then return s end
+            return nil
+        end
+        local function waitCell(field, id, from, secs)
+            local deadline = os.clock() + (secs or 1.4)
+            while os.clock() < deadline do
+                local s = cellStage(field, id)
+                if s and s ~= from then return s end
+                task.wait(0.1)
+            end
+            return cellStage(field, id)
+        end
+
+        if kind == "burst" then
+            for _, f in ipairs(fields) do
+                for _, verb in ipairs({ "plow", "cultivate", "seed" }) do
+                    local j = jobFor(verb)
+                    local ids = spudFieldCellIds(f.d, j.stage)
+                    local att = spudToolAttachment(findImplement(j.typeName, here) or nil)
+                    if ids and #ids > 1 and att then
+                        local t0 = os.clock()
+                        local fired = 0
+                        for _, id in ipairs(ids) do
+                            if spudFieldRemoteCall(verb, f.d, id, att) then fired += 1 end
+                        end
+                        local left, deadline = nil, os.clock() + 1.4
+                        while true do
+                            local now = spudFieldCellIds(f.d, j.stage)
+                            if not now then break end
+                            left = #now
+                            if left == 0 or os.clock() >= deadline then break end
+                            task.wait(0.1)
+                        end
+                        local took = left and (#ids - left) or 0
+                        spudTestSay(string.format(
+                            "burst: %d %s call(s) in %.2fs, no spacing — %d took (of %d)",
+                            fired, verb, os.clock() - t0, took, #ids))
+                        return
+                    end
+                end
+            end
+            spudTestSay("burst: no field of ours has more than one cell needing plow/cultivate/seed")
+            return
+        end
+
+        if kind == "stage" then
+            local j = jobFor("seed")
+            local att = spudToolAttachment(findImplement(j.typeName, here) or nil)
+            if not att then
+                spudTestSay("stage: no seeder with an attachment nearby — bring the KADL close")
+                return
+            end
+            for _, f in ipairs(fields) do
+                local ids = spudFieldCellIds(f.d, function(s) return s ~= j.stage end)
+                if ids and #ids > 0 then
+                    local id = ids[1]
+                    local from = cellStage(f.d, id)
+                    spudTestSay(string.format(
+                        "stage: seeding cell %d of %s while it is %s, with the KADL attachment",
+                        id, f.d.Name, tostring(from)))
+                    spudFieldRemoteCall("seed", f.d, id, att)
+                    local to = waitCell(f.d, id, from)
+                    spudTestSay(string.format("stage: cell is now %s — %s",
+                        tostring(to),
+                        (to ~= from and to == "Seeded")
+                            and "TAKEN: the server did not check the stage"
+                            or "IGNORED: the server checks the stage"))
+                    return
+                end
+            end
+            spudTestSay("stage: every cell of ours is already cultivated — nothing to seed out of stage")
+            return
+        end
+
+        -- ride + tool share the single-cell one-shot
+        for _, f in ipairs(fields) do
+            for _, verb in ipairs({ "plow", "cultivate", "seed" }) do
+                local j = jobFor(verb)
+                local ids = spudFieldCellIds(f.d, j.stage)
+                if ids and #ids > 0 then
+                    local id = ids[1]
+                    local from = cellStage(f.d, id)
+                    local impl = findImplement(j.typeName, here)
+                    local realAtt = impl and spudToolAttachment(impl) or nil
+                    -- isolate one question per test: `ride` needs a real tool
+                    -- to exist (the seat is the only thing missing), `tool`
+                    -- needs the machine to exist but sends no attachment
+                    if (kind == "tool" and impl) or (kind == "ride" and realAtt) then
+                        local att = (kind == "tool") and nil or realAtt
+                        if kind == "tool" then
+                            spudTestSay(string.format(
+                                "tool: %s cell %d with an EMPTY attachment table (tool %s ignored)",
+                                verb, id, impl.Name))
+                        else
+                            spudTestSay(string.format(
+                                "ride: %s cell %d from (%.0f, %.0f), tool %s with its attachment, nobody seated",
+                                verb, id, here.X, here.Z, impl.Name))
+                        end
+                        spudFieldRemoteCall(verb, f.d, id, att)
+                        local to = waitCell(f.d, id, from)
+                        local taken = to ~= from
+                        spudTestSay(string.format("%s: %s → %s — %s", kind, tostring(from), tostring(to),
+                            taken and "TAKEN" or "IGNORED"))
+                        return
+                    end
+                end
+            end
+        end
+        spudTestSay(kind .. ": no field of ours has a plow/cultivate/seed cell with a nearby tool to try")
+    end
+
     -- ▸ EQUIPMENT REMOTES — every call below was recorded from the game's own
     --   client by SpudRemoteProbe (2026-10-30), all under Modules.Larry:
     --     FNCEnterEquipment(vehicle, seat)
@@ -7481,6 +7645,32 @@ local okBuild, errBuild = pcall(function()
             log("tests: batch field remote " .. (spudBatchRemotes and "ON" or "OFF"))
         end,
     })
+
+    -- ▸ TESTS · BUG FINDER (user: "maybe you can make a dump to try to find
+    --   bugs to abuse"). One button per question; each fires ONE captured call
+    --   on one of our own cells and lets the field's own stage answer. The
+    --   result lands here and in the console, prefixed `test:`.
+    pcall(function()
+        spudTestPara = Tabs.Tests:CreateParagraph("TestsResult", {
+            Title = "Result",
+            Content = "no test run yet",
+        })
+    end)
+    spudTestShow = function(text)
+        if spudTestPara then pcall(function() spudTestPara:SetValue(text) end) end
+    end
+    Tabs.Tests:CreateButton({ Title = "From here", Callback = function()
+        task.spawn(function() spudTestRun("ride") end)
+    end })
+    Tabs.Tests:CreateButton({ Title = "Wrong stage", Callback = function()
+        task.spawn(function() spudTestRun("stage") end)
+    end })
+    Tabs.Tests:CreateButton({ Title = "No attachment", Callback = function()
+        task.spawn(function() spudTestRun("tool") end)
+    end })
+    Tabs.Tests:CreateButton({ Title = "All at once", Callback = function()
+        task.spawn(function() spudTestRun("burst") end)
+    end })
 
     -- ▸🩺 DOCTOR REPORT (read-only). After a run of patches where each fix
     --   exposed the next weak spot, the answer is not another feature: too
