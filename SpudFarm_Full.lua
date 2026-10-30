@@ -12,7 +12,7 @@ local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/release
     .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
     .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.54 · fluent gui"
+local VERSION    = "rebuild v1.55 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -6857,7 +6857,7 @@ local okBuild, errBuild = pcall(function()
         for lap = 1, 2 do
             local live = {}
             for _, c in ipairs(pts) do
-                if c.id and not c.fired then live[#live + 1] = c end
+                if c.id then live[#live + 1] = c end
             end
             if #live == 0 then break end
             -- lap 2 runs between lap 1's rows: half a row over
@@ -6913,6 +6913,42 @@ local okBuild, errBuild = pcall(function()
             end
             local stopped = false
             local lapSpeed = lap == 1 and spd or spd * 0.7 -- the second lap slows to aim
+            -- ▸ A CELL UNDER THE BLADE IS FIRED NOW, not at the next burst
+            --   (owner: "it does not work so well with the plow"). A burst is
+            --   22 studs apart at this speed, so a cell the blade is over could
+            --   wait a long way before its call — and the server only takes a
+            --   cell the blade is over. The near check runs every tick and
+            --   costs a distance compare. A wide fire NEVER blocks it: the
+            --   burst's call at 14 studs is usually refused, and marking that
+            --   cell "done" is what left the plow with a field of leftovers.
+            --   The burst runs only for the jobs with no load to spend
+            --   (plow/cultivate); seed/harvest fire close-only so the seeds
+            --   are spent on cells the server will actually take.
+            local nearR = 4
+            local wide = (budget == nil)
+            local function fireWithin(cx, cz, rad, isNear)
+                for _, c in ipairs(live) do
+                    local eligible
+                    if isNear then
+                        eligible = not c.near
+                    else
+                        eligible = not c.wide and not c.near
+                    end
+                    if eligible then
+                        local dx, dz = c.X - cx, c.Z - cz
+                        if dx * dx + dz * dz <= rad * rad then
+                            if budget and fired >= budget then
+                                dry = true
+                                return false
+                            end
+                            spudFieldRemoteCall(job.verb, field, c.id, att)
+                            if isNear then c.near = true else c.wide = true end
+                            fired += 1
+                        end
+                    end
+                end
+                return true
+            end
             local travelled, lastFire = 0, -1e9
             while travelled < total do
                 if stopping() then stopped = true break end
@@ -6927,24 +6963,10 @@ local okBuild, errBuild = pcall(function()
                     target = Vector3.new(px, py + 2, pz)
                 end
                 ride:PivotTo(CFrame.new(target) * rot)
-                if travelled - lastFire >= gap or travelled >= total then
+                if not fireWithin(px, pz, nearR, true) then stopped = true break end
+                if wide and (travelled - lastFire >= gap or travelled >= total) then
                     lastFire = travelled
-                    for _, c in ipairs(live) do
-                        if not c.fired then
-                            local dx, dz = c.X - px, c.Z - pz
-                            if dx * dx + dz * dz <= radius * radius then
-                                if budget and fired >= budget then
-                                    dry = true
-                                    stopped = true
-                                    break
-                                end
-                                spudFieldRemoteCall(job.verb, field, c.id, att)
-                                c.fired = true
-                                fired += 1
-                            end
-                        end
-                    end
-                    if stopped then break end
+                    if not fireWithin(px, pz, radius, false) then stopped = true break end
                 end
                 task.wait(tick)
             end

@@ -190,8 +190,21 @@ local function fillHandler()
     return true
 end
 
+local function cultHandler(field, ids)
+    local cells = fieldState[field]
+    for _, id in ipairs(ids) do
+        local cell = cells and cells[id]
+        if cell and cell.Stage == "Cultivated" then
+            local p = ATTPARENT and ATTPARENT.Position
+            if not mode.atCell or (p and (p - cellPosOf(id)).Magnitude <= acceptR) then
+                cell.Stage = "Seeded"
+            end
+        end
+    end
+end
+
 local seedRemote = newRemote("FNCSeedFieldCell", "RemoteFunction", seedHandler)
-local cultRemote = newRemote("EVTCultivateFieldCell", "RemoteEvent", nil)
+local cultRemote = newRemote("EVTCultivateFieldCell", "RemoteEvent", cultHandler)
 local plowRemote = newRemote("EVTPlowFieldCell", "RemoteEvent", nil)
 local harvestRemote = newRemote("FNCHarvestFieldCell", "RemoteFunction", harvestHandler)
 local fillRemote = newRemote("FNCFillSeeder", "RemoteFunction", fillHandler)
@@ -568,6 +581,37 @@ check("sweep: 3 seeds fire 3 calls", seedRemote.invokeCalls - s0 == 3,
     (seedRemote.invokeCalls - s0) .. " call(s)")
 check("sweep: the seeder runs dry mid-field", dryB == true and tookB == 3,
     string.format("%s,%s", tostring(tookB), tostring(dryB)))
+
+-- a server that only takes a cell under the blade: the near fire catches it
+-- even though the bursts are 22 studs apart
+acceptR = 5
+capVal.Value = 50
+sweepGrid()
+resetState()
+s0 = seedRemote.invokeCalls
+local tookN, dryN = spudSweepCells(seedJob, field, hopRide, tool, "Cultivated",
+    baseCF, baseSize, hopAtt)
+check("sweep: a blade-over server still gets every cell", tookN == 15, tostring(tookN))
+check("sweep: no cell is fired twice", seedRemote.invokeCalls - s0 == 15,
+    (seedRemote.invokeCalls - s0) .. " call(s)")
+check("sweep: a passing cell never leaves the field dry", dryN == false, tostring(dryN))
+
+-- a job with no load to spend (plow/cultivate) also gets the wide burst, and
+-- a burst the server refuses must NOT stop the close fire later
+acceptR = 5
+sweepGrid()
+resetState()
+local cultJob = { verb = "cultivate", stage = "Cultivated",
+    remote = "EVTCultivateFieldCell", prog = "cultivating" }
+local cu0 = cultRemote.fireCalls
+local tookC, dryC = spudSweepCells(cultJob, field, hopRide, tool, "Cultivated",
+    baseCF, baseSize, hopAtt)
+check("sweep: a refused wide burst does not block the close fire",
+    tookC == 15, tostring(tookC))
+check("sweep: a close-only budget is never charged for a burst",
+    dryC == false, tostring(dryC))
+check("sweep: a no-load job does burst and then fire close", cultRemote.fireCalls - cu0 >= 15,
+    (cultRemote.fireCalls - cu0) .. " call(s)")
 
 -- a server that takes nothing leaves the whole field for the hop/drive
 acceptR = -1

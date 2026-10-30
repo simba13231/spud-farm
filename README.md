@@ -67,10 +67,14 @@ Everything merged into one paste-and-run file:
   fills (up to 3 refills) or the harvest loop sells and comes back. A refused
   tail gets one retry, and a call only lands where the blade is — so after the
   call pass the ride is **swept across the field in one serpentine tween**
-  (**45 studs/s**, rows 10 studs apart) firing a burst **every 0.5 s** at every
-  remaining cell within **14 studs** of the blade: a whole field is covered in
-  about **5–7 s**, and a cell a burst skipped gets a **second lap** offset by
-  half a row and driven slower. Anything
+  (**45 studs/s**, rows 10 studs apart): a cell the blade is actually over is
+  fired **the moment it is under the blade**, and for plow/cultivate a burst
+  **every 0.5 s** also reaches **14 studs** around the blade — a whole field is
+  covered in about **5–7 s**, and a cell a burst skipped gets a **second lap**
+  offset by half a row and driven slower. Seeding and harvesting fire
+  close-only, so seeds and tank space are spent on cells the server takes. A
+  wide call the server refuses never blocks the close one — that is what made
+  the plow leave a field of leftovers. Anything
   still standing after the sweep is **hopped** onto cell by cell with the
   tool's attachment lined up and that single id fired (`remote plow: hopped the
   ride over 46 cell(s) — 46 took`), and only then is the field driven — so the
