@@ -8,13 +8,13 @@ asked and fixed, and the exact loop to prove a change works.
 description — it is the long-form manual and it is kept in sync with behaviour.
 
 - Main script: [SpudFarm_Full.lua](SpudFarm_Full.lua) — one paste-and-run Luau
-  file for the Roblox game *Farming and Friends*, currently `rebuild v1.38 ·
-  fluent gui` (`VERSION`, line 15). ≈12.0k lines.
+  file for the Roblox game *Farming and Friends*, currently `rebuild v1.39 ·
+  fluent gui` (`VERSION`, line 15). ≈12.3k lines.
 - Target: Windows + Git Bash. Luau toolchain lives in
   `%LOCALAPPDATA%\Temp\opencode\luau\` (`luau.exe`, `luau-compile.exe`,
   `luau-analyze.exe`).
 - Nothing here is a library or a build system. There is no bundler, no package
-  manager, no CI. Validation is a compile check plus twenty-five harness scripts in
+  manager, no CI. Validation is a compile check plus twenty-six harness scripts in
   `tools/` (`python tools/run_all.py` runs the whole gate).
 
 ---
@@ -72,7 +72,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 ### 1.4 Script limits (these have broken the build before)
 
 13. **Luau's 200-local limit is real and we are 2 away from the practical
-    ceiling.** Run `python tools/local_budget.py`. As of v1.38:
+    ceiling.** Run `python tools/local_budget.py`. As of v1.39:
     `4-space locals before milkCycle: 183 (practical ceiling 185)`,
     whole body `190 / 200`, **headroom 2**. Do **not** add a `local` inside the
     main build closure. Reuse an existing local, convert the feature to a
@@ -105,7 +105,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 
 ### 1.6 Working tree state (read before editing)
 
-`HEAD` is the latest committed build (v1.38, field remotes), `main`
+`HEAD` is the latest committed build (v1.39, equipment remotes), `main`
 tracks `origin/main`, and the tree is clean. Keep it that way: make the change,
 run the gates, and commit only the files the change touches. `git add -A` is
 banned here. **Commit and push after every completed change** (owner's standing
@@ -132,17 +132,17 @@ done
 PYTHONIOENCODING=utf-8 python tools/test_doctor.py
 ```
 
-All of these must exit 0 (24 `*_test.py` harnesses + `test_doctor.py`, which
+All of these must exit 0 (25 `*_test.py` harnesses + `test_doctor.py`, which
 does not match `*_test.py`). A plain `for` loop is **not** enough on its own:
 most harnesses print `FAIL` but still exit 0, so the output has to be read.
 The one command that runs everything — compile, budget, name audit and every
 harness, checking both the exit code and the text — is:
 
 ```bash
-python tools/run_all.py        # 28/28 checks on v1.38
+python tools/run_all.py        # 29/29 checks on v1.39
 ```
 
-Last full run (v1.38): **28/28 checks passed** (25 harnesses + 3 gates).
+Last full run (v1.39): **29/29 checks passed** (26 harnesses + 3 gates).
 
 | Script | What it actually proves |
 |---|---|
@@ -166,6 +166,7 @@ Last full run (v1.38): **28/28 checks passed** (25 harnesses + 3 gates).
 | `equip_owner_test.py` | Whose tractor/tool is picked: the farm being worked first, mine next, an unreadable owner after that, a stranger's never; stored machines are reported for spawning; the implement distance/basis stay honest. |
 | `field_soil_test.py` | Tree/wood field types and names are never crop-harvest targets; a successful cell read with 0 cells is empty (skipped), while a failed read stays unknown (never a skip reason). |
 | `field_remote_test.py` | The field remotes: ids come from the game's own `GetCells` dict (numeric keys only, sorted, failed read = unknown), the tool's RaycastPart attachment is the one sent, one call per remaining cell carries `(field, {id}, {attachment})`, a full batch reports done, a partial batch hands back the remainder, an ignored batch switches that job back to driving (and fires nothing again), and `FillSeeder` falls back to V on a refusal. |
+| `equip_remote_test.py` | The equipment remotes: the seven captured calls resolve on `Modules.Larry`; spawn/store are proven by `InStorage` (or a >100-stud move for a rebuilt spawn) and fall back to the UI when ignored; enter is proven by the seat; hitch/unhitch use the captured `Components.Hitchable` + `Chassis.HitchableSocket` pair; carry/drop are proven by the hands; three misses switch one action off for the session. |
 | `row_steer_test.py` | The row decision in the wide band: `spudRowNeedsAlign` asks for ONE snap only past `spudRowAng` (15°) or `spudRowTol` (6 studs); `spudRowSteer` presses nothing inside the band; `spudRowEase` takes a step off the throttle after three steering flips (×0.7, floor 30 %) and gives one back per steady 3 s. |
 | `foreign_respawn_test.py` | `spudMayRespawn()` is false while a Farm owner is picked, and `ensureToolNearby` then never calls `respawnTool`: a stored or far-away tool is named and the pass is skipped, while `(mine)` still respawns. |
 | `dropoff_test.py` | The full-tank gate follows the Farm tab's Drop-off pick: a full tank unloads with Fulfillment or Sell chosen, a half tank works on, an unknown/nil destination never moves; the Fulfillment pad is read from `Stores.DropOffs` (Deposit_Warehouse preferred over Withdraw_Warehouse), aimed at its top surface, and an unstreamed/empty folder returns no pad instead of a guess. |
@@ -575,6 +576,40 @@ ReplicatedStorage.Modules.Larry.FNCFillSeeder:InvokeServer(Workspace.Objects.Equ
 `field_remote_test.py` pins the ids, the attachment pick, the call shape, the
 full/partial/ignored outcomes, the session switch-off and the fill fallback.
 
+### 3.13 Equipment actions fire the captured calls
+
+User: *"use remoted for everything."* The same probe pass recorded the
+equipment/action calls, so the loop now fires them instead of pressing keys or
+driving the Equipment Manager UI. All live under `Modules.Larry`:
+
+```
+FNCEnterEquipment(vehicle, seat)
+FNCAttemptHitch(tractor.Components.Hitchable, tool.Chassis.HitchableSocket)
+FNCUnhitch(tractor.Components.Hitchable)
+FNCSpawnEquipment(model) / FNCStoreEquipment(model)
+EVTRequestToCarry(draggable) / EVTRequestToDrop()
+```
+
+- **Fired only where the game offers the action**: mount after the walk-up,
+  hitch/unhitch at the same line-up pose the key needs, carry at the crate,
+  spawn/store for a machine that is actually stored/out.
+- **The effect is the proof** — the seat holding the humanoid
+  (`spudEnterRemote`), the existing hitch/unhitch tug (`attemptHitch`,
+  `dropImplementAtOrigin`), `InStorage` flipping (or a >100-stud move for a
+  spawn that rebuilds the model) in `spudEquipRemoteAct`, and `carrying()`
+  turning over for carry/drop.
+- **The old path always remains**: F for a mount, X for hitch/unhitch, E for a
+  crate, the Equipment Manager UI for spawn/store. `spudEquipRemoteMiss` counts
+  ignored calls; three switch that one action back to keys/UI for the session.
+- **Not wired yet**: cleaning a stall, milking, herding, selling, the
+  fulfillment pad, buying seeds, feeders and gates. Their shapes were never
+  captured — `SpudRemoteProbe.lua` now has an **ACTION CALLS** section and a
+  checklist for them (run it, or let one normal milk/barn cycle record while it
+  runs), and `EQUIPMENT CALLS` confirms the seven above.
+
+`equip_remote_test.py` pins the kit, the call shapes, the effect proofs, the
+UI/key fallbacks and the three-miss switch-off.
+
 ---
 
 ## 4. Code map (names, not line numbers — they move)
@@ -588,6 +623,7 @@ full/partial/ignored outcomes, the session switch-off and the fill fallback.
 | Whose machine | global `equipOwnerRank(m)` (farm being worked → mine → no readable owner → never another account), used by `findTractor` / `findImplement`; owner tag read by `milkStoreOwnerOf` |
 | Tree soil | global `spudTreeField(typeName, modelName)` (wood/tree/log/forest/timber/lumber/sawmill/stump → no crop harvest) and `spudNoCells(st)` (successful 0-cell read is empty, `nil` read is unknown); used in `probeWork`, `runPass`, `needLeft`, `grownLeft`, growth wait |
 | Field remotes | global `spudFieldRemoteKit()` (Modules.Larry: plow/cultivate/seed/harvest/fillSeeder), `spudFieldCellIds(field, stage)` (GetCells keys), `spudToolAttachment(impl)`, `spudFieldRemoteCall`, `spudFieldRemotePass` (fires, re-reads, self-disables a job), `spudFillSeederRemote`; state `spudFieldRemoteState`; wired at the top of `sweepField` and in `buySeedAndFill` |
+| Equipment remotes | global `spudEquipRemoteKit/State` (enter/hitch/unhitch/spawn/store/carry/drop), `spudEquipRemoteCall`, `spudEquipRemoteMiss`, `spudEquipRemoteAct` (spawn/store proof), `spudEnterRemote`, `spudHitchParts`, `spudHitchRemote`, `spudUnhitchRemote`, `spudCarryRemote`, `spudDropRemote`; wired in `managerAction`, `mountTractor`, `attemptHitch`, `dropImplementAtOrigin`, `carryCrate` and the two held-item drops |
 | Row driving | `keyRow(tr, seat, from, goal, who)` drives rows on real W (the game auto-steers); global `spudRowSteer(angDeg, crossY, cross, tol)` (heading > 8°, cross-track > 2.5 studs → re-center); travel `ALIGN_MAXVEL = 34`, fallback row speed 18 |
 | Dirt line | global `milkDirtLine = 24`; `milkDirtHigh(spot)` (the single "is this dirty?" answer) |
 | Drop-off | global `spudDropOff` (**Fulfillment** / **Sell**, remembered in `spudSavedDropOff`), `spudSellNow(cur,max)`, `spudFulfillSpots()` (Deposit_Warehouse top), `findSellSpots()` (crop sell board), `sellHarvester` (arc hop + `trySellAt`), `harvestSellIfFull`; Farm tab dropdown `dropOffChoice` |
@@ -843,8 +879,23 @@ back to driving for the session. Plow/seed/harvest reuse the captured shape
 the remote first and keeps V. New `field_remote_test.py` (24 checks); suite
 **28/28**.
 
-**Where it stands:** `rebuild v1.38 · fluent gui`, whole suite green (28/28),
-harness verified. **Not yet reloaded in game** after v1.22–v1.38 — the next real
+**"use remoted for everything"** → v1.39. The equipment calls the probe had
+already recorded were wired with the same verify-then-fall-back rule:
+`FNCEnterEquipment(vehicle, seat)` for a mount (the seat is the proof, F stays
+the fallback), `FNCAttemptHitch(hitchable, socket)` / `FNCUnhitch(hitchable)`
+inside the existing line-up + tug attempts (X stays the fallback),
+`FNCSpawnEquipment` / `FNCStoreEquipment` in `managerAction` (the `InStorage`
+flip or a >100-stud move is the proof; the Equipment Manager UI is the
+fallback — this is where the old UI flow was slowest),
+`EVTRequestToCarry` / `EVTRequestToDrop` for crates and held items. Three
+ignored calls switch that one action off for the session. Cleaning, milking,
+herding, selling, fulfillment, seed buying, feeders and gates are **not** wired
+yet: their shapes were never captured, so the probe gained an ACTION CALLS
+section and a checklist for them. New `equip_remote_test.py` (22 checks); suite
+**29/29**.
+
+**Where it stands:** `rebuild v1.39 · fluent gui`, whole suite green (29/29),
+harness verified. **Not yet reloaded in game** after v1.22–v1.39 — the next real
 test is a live pass watching `path: … theta* N pops / N ms, min clear N`, the
 new width line (`tool … — 3-wide …; rows every 30`), the Farm owner picker
 showing ONLY that owner's fields (`Field · Miou2251`), the equipment owner
@@ -855,10 +906,13 @@ being driven on W with the tractor re-centering after a drift, the
 `farm: using <tool> (<owner>)`, a full harvester taking the Drop-off trip
 (`fulfillment pad: Deposit_Warehouse at (…` → `✅ sold at …` or the honest
 `still full — none of the pads took the load`), the milk lines
-(`… read from here - none reports dirt`, `… cleaned in X.XXs`), and the field
+(`… read from here - none reports dirt`, `… cleaned in X.XXs`), the field
 remote lines (`✅ remote seed: N cell(s) in X.Xs — the field is done without
 driving`, or the honest `remote seed: the game ignored N call(s) … — driving
-for this session`).
+for this session`), and the equipment lines (`✅ mounted … (FNCEnterEquipment)`,
+`equipment: Store KADL via store (no UI)`, `✅ carrying the … (EVTRequestToCarry)`)
+or their honest fallback lines (`equipment: store didn't Store the KADL — using
+the Equipment Manager`).
 
 ---
 
@@ -893,7 +947,10 @@ for this session`).
    job must log `✅ remote X: N cell(s) in X.Xs` and leave the field finished,
    or the honest `remote X: the game ignored N call(s) … — driving for this
    session`; the seeder fill must log `seeder fill: FNCFillSeeder(seeder)` and
-   the count must rise, with V only on a refusal).
+   the count must rise, with V only on a refusal) and v1.39 (equipment remotes:
+   watch `✅ mounted … (FNCEnterEquipment)`, `equipment: Store/Spawn … via …
+   (no UI)`, `✅ carrying … (EVTRequestToCarry)`; a refused call must log its
+   fallback and the old F/X/E/UI path must still complete the step).
    Harness green ≠ game green.
 2. **The 24 % baseline may differ per build.** If stalls sit higher, the first
    pass logs `reads X% but the game offers no Clean there - the dirty line moves

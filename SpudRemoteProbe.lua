@@ -24,9 +24,20 @@
          g) seed ONE cultivated cell        (drive the planter over it)
          h) stand at the seeder holding a seed crate and press V (FillSeeder)
          i) harvest ONE grown cell          (drive the harvester over it)
+       EVERYTHING ELSE — one manual action each, any that you can do:
+         j) clean ONE dirty stall           (the Clean prompt)
+         k) milk ONE cow
+         l) arm / send ONE cow into a stall
+         m) sell one crop load              (the sell board)
+         n) unload a full harvester at the fulfillment pad
+         o) buy ONE seed crate at FarmCo
+         p) fill ONE feeder or dispenser
+         q) open ONE gate
+       The script's own key presses make the same calls, so running one
+       normal milk / barn cycle while this is recording counts too.
        Optional: run  spudRemoteMark("carry") / ("fill") / ("milk") /
-       ("plow") / ("seed") / ("harvest") right before each step so the
-       report is grouped.
+       ("plow") / ("seed") / ("harvest") / ("clean") / ("sell") right before
+       each step so the report is grouped.
     4. Run  spudRemoteStop()  in the executor.
        → it stops recording, prints the report, uploads it and copies the link
          to your clipboard. Send the link back.
@@ -224,9 +235,11 @@ local function remoteList()
     --   working. The names are already known; the report only needs the ones
     --   that can touch milk.
     local out, total = {}, 0
-    local keys = { "fill", "carry", "milk", "liquid", "animal", "collect",
+    local keys = { "fill", "carry", "drop", "milk", "liquid", "animal", "collect",
         "silo", "juicery", "harvester", "seed", "plant", "plow",
-        "cultivat", "harvest", "field" }
+        "cultivat", "harvest", "field", "clean", "sell", "fulfill", "order",
+        "gate", "feeder", "dispenser", "spawn", "store", "equip", "hitch",
+        "unhitch", "shear", "spindle" }
     pcall(function()
         local rs = game:GetService("ReplicatedStorage")
         for _, d in ipairs(rs:GetDescendants()) do
@@ -258,6 +271,28 @@ local function buildReport()
     local calls = 0
     for _, r in ipairs(records) do if r.kind == "call" then calls += 1 end end
     w(string.format("recorded calls: %d", calls))
+
+    -- a focused section: every recorded call whose name matches one of the
+    -- suspects, then the ones that never showed up (so a missing shape is
+    -- visible instead of looking like "nothing to capture")
+    local function callSection(title, suspects, hint)
+        w("")
+        w("══════ " .. title .. " ══════")
+        local seen, missing = 0, {}
+        for _, s in ipairs(suspects) do
+            local fired = false
+            for _, r in ipairs(records) do
+                if r.kind == "call" and r.name:lower():find(s:lower(), 1, true) then
+                    fired = true
+                    seen += 1
+                    w(string.format("  %s:%s(%s)", r.name, r.method, r.args))
+                end
+            end
+            if not fired then missing[#missing + 1] = s end
+        end
+        if seen == 0 then w("  NONE — " .. hint) end
+        if #missing > 0 then w("  not seen: " .. table.concat(missing, ", ")) end
+    end
 
     -- ▸ THE ONES THIS PROBE EXISTS FOR. The inventory already named them
     --   (EVTFillLiquidCarrier, EVTRequestToCarry/Drop, EVTAnimalInteraction,
@@ -318,9 +353,25 @@ local function buildReport()
         w("  not seen: " .. table.concat(fieldMissing, ", "))
     end
 
+    -- ▸ the equipment calls the farm loop already fires (all captured — these
+    --   lines are here so a build that renames one is visible immediately)
+    callSection("EQUIPMENT CALLS (mount / hitch / spawn / store / carry)",
+        { "EnterEquipment", "AttemptHitch", "Unhitch", "SpawnEquipment",
+          "StoreEquipment", "RequestToCarry", "RequestToDrop" },
+        "do one mount / hitch / spawn / store / carry by hand while the panel counts.")
+
+    -- ▸ the rest of the job: cleaning, milking, herding, selling, the
+    --   fulfillment pad, seed buying, feeders and gates. None of these are
+    --   wired yet because none has a captured shape.
+    callSection("ACTION CALLS (clean / milk / herd / sell / fulfill / feed / gate)",
+        { "CleanAnimal", "AnimalInteraction", "CollectAnimalProduction",
+          "SellAtStore", "SellAtAnimalCo", "FulfillOrder", "FillFeeder",
+          "FillFeedDispenser", "Gate", "Shear", "Spindle" },
+        "do one clean / milk / herd / sell / fulfill / feed / gate action by hand")
+
     w("")
     local list, total = remoteList()
-    w(string.format("══════ MILK/FIELD-RELATED REMOTES (%d of %d in ReplicatedStorage) ══════",
+    w(string.format("══════ MILK/FIELD/EQUIPMENT REMOTES (%d of %d in ReplicatedStorage) ══════",
         #list, total))
     if #list == 0 then
         w("  (none — the game may keep them elsewhere)")
@@ -633,8 +684,11 @@ print("3) milk one cow")
 print("4) FIELD: drive over ONE cell with each tool you want fast (plow,")
 print("   cultivator, planter, harvester) and press V at the seeder holding")
 print("   one seed crate — ANY ONE of these is enough to capture its shape")
-print("5) press  Copy report  on the little panel (or run spudRemoteStop()) and send it")
+print("5) EVERYTHING ELSE: clean a stall, milk a cow, send a cow, sell a load,")
+print("   fulfill an order, buy a crate, fill a feeder, open a gate — or just")
+print("   let one normal milk/barn cycle run while this is recording")
+print("6) press  Copy report  on the little panel (or run spudRemoteStop()) and send it")
 print("   (spudRemoteMark(\"carry\") / (\"fill\") / (\"milk\") / (\"plow\") / (\"seed\")")
-print("    between steps if you like)")
+print("    / (\"clean\") / (\"sell\") between steps if you like)")
 print("   the panel number MUST rise after each action — 0 means nothing was captured")
 print("════════════════════════════════════════")

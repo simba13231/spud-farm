@@ -61,6 +61,18 @@ Everything merged into one paste-and-run file:
   puts that job back on driving for the session. The seeder fill uses the
   captured `FNCFillSeeder(seeder)` first and presses V only when the seed count
   does not rise.
+- **Equipment on the game's own remotes** — the same capture pass recorded the
+  equipment calls, so the script fires them instead of pressing keys or driving
+  the Equipment Manager UI: `FNCEnterEquipment(vehicle, seat)` to mount,
+  `FNCAttemptHitch(hitchable, socket)` / `FNCUnhitch(hitchable)` for tools,
+  `FNCSpawnEquipment(model)` / `FNCStoreEquipment(model)` for storage, and
+  `EVTRequestToCarry(draggable)` / `EVTRequestToDrop()` for carried items. Each
+  is used only where the game offers the action, and the effect has to prove
+  it: the seat actually holding the character, the existing hitch/unhitch tug,
+  the `InStorage` flag (or a >100-stud move for a rebuilt spawn), hands
+  filling or emptying. A call that does not land falls back to the old
+  F/X/E/UI path in the same step, and three misses switch that one call off for
+  the session.
 - **Drop-off pick** — Farm tab → **Drop-off**: **Fulfillment** (default) or
   **Sell**. When the harvester's tank fills, it stops the row, arc-hops to the
   chosen pad, and unloads: Fulfillment is the warehouse pad
@@ -391,15 +403,17 @@ Roblox detection has three layers. **No Luau script can affect layer 1:**
    snap teleport, fast; the default) or Tween (slow stepped glide, safer) —
    Walkspeed/Jump clamps, NoClip force-blocked in stealth, all actions via
    real context-key binds (F/X/E/V) via virtual input (no RemoteEvent guessing =
-   no honeypot risk). **Two exceptions:** the milk store step fires two remotes
-   *recorded from the game itself* (`EVTRequestToCarry`, `EVTFillLiquidCarrier`)
-   to skip the context-button wait, and the field passes replay the game's own
-   cell calls (`EVTCultivateFieldCell` was recorded verbatim; the plow/seed/
-   harvest siblings use the same shape on the same captured path). Nothing is
-   trusted: a jug only counts once it is in `CarryLinks`, a fill only once the
-   tank rises, three ignored calls put the key path back for the session, and
-   every field batch is re-read after firing — a job the server ignores is
-   logged and goes back to driving for the rest of the session.
+   no honeypot risk). **Three exceptions:** the milk store step fires two
+   remotes *recorded from the game itself* (`EVTRequestToCarry`,
+   `EVTFillLiquidCarrier`); the field passes replay the game's own cell calls
+   (`EVTCultivateFieldCell` was recorded verbatim; the plow/seed/harvest
+   siblings share that shape on the same captured path); and the equipment
+   steps fire the captured mount, hitch/unhitch, spawn/store, carry and drop
+   calls. Nothing is trusted: a jug only counts once it is in `CarryLinks`, a
+   fill only once the tank rises, three ignored calls put the key path back for
+   the session, every field batch is re-read after firing, and every equipment
+   call has to show its effect (seat, tug, `InStorage`, hands) — a job the
+   server ignores goes back to keys/UI for the rest of the session.
 3. **Behavioral/ML scoring** — flags robotic timing, 24/7 sessions, crowded-server
    play. Mitigations built in: ±40% timing jitter, random micro-pauses, session
    limiter (auto-break, default 45 min on / 4 min off).
@@ -488,7 +502,12 @@ report gains a **FIELD CALLS** section with the exact arguments for
 `FNCHarvestFieldCell` and `FNCFillSeeder` (plus the remote's full path). The
 captured cultivate call and `FNCFillSeeder(seeder)` are what the field pass now
 fires; the plow/seed/harvest siblings share that shape and switch themselves
-back to driving if the server ignores them.
+back to driving if the server ignores them. The report also lists
+**EQUIPMENT CALLS** (the mount / hitch / spawn / store / carry calls the script
+now fires) and an **ACTION CALLS** section for the rest of the job — clean a
+stall, milk a cow, send one, sell a load, fulfill an order, buy a crate, fill a
+feeder, open a gate — or just let one normal milk/barn cycle run while it is
+recording, because the script's own key presses produce the same calls.
 
 ### `SpudBoot.lua` — loader that shows its own errors
 A tiny (~8 KB) launcher for when the executor console is not visible: it

@@ -12,7 +12,7 @@ local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/release
     .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
     .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.38 · fluent gui"
+local VERSION    = "rebuild v1.39 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -1599,6 +1599,10 @@ local okBuild, errBuild = pcall(function()
     local function managerAction(vehicleName, action)
         -- action = "Spawn" (bring it out) or "Store" (put it back)
         action = action or "Spawn"
+        -- ▸ the captured call first: it is exactly what the card's button
+        --   fires, and the InStorage flag/move is the proof. False = the UI
+        --   below runs unchanged.
+        if spudEquipRemoteAct(vehicleName, action) then return true end
         local ok, res = pcall(function()
             local pg = LocalPlayer:FindFirstChild("PlayerGui")
             local gv = pg and pg:FindFirstChild("GuiViews")
@@ -2297,18 +2301,38 @@ local okBuild, errBuild = pcall(function()
         return true
     end
 
-    -- one hitch attempt: press X once → tug forward 5 studs → did the plow follow?
+    -- one hitch attempt: the captured FNCAttemptHitch call, else X once →
+    -- tug forward 5 studs → did the plow follow? A remote that the game
+    -- ignored falls back to the key inside the same attempt.
     local function attemptHitch(tr, plow)
-        pressKey(Enum.KeyCode.X)
-        task.wait(0.6)
+        local function tug()
+            if stopping() then return 0 end
+            local before = plow:GetPivot().Position
+            local pivot = tr:GetPivot()
+            local fwd = Vector3.new(pivot.LookVector.X, 0, pivot.LookVector.Z)
+            if fwd.Magnitude < 0.1 then fwd = Vector3.new(0, 0, -1) end
+            glideTractor(tr, pivot.Position + fwd.Unit * 5)
+            task.wait(0.5)
+            return (plow:GetPivot().Position - before).Magnitude
+        end
+        local viaRemote = spudHitchRemote(tr, plow)
+        if viaRemote then
+            task.wait(0.3)
+        else
+            pressKey(Enum.KeyCode.X)
+            task.wait(0.6)
+        end
         if stopping() then return false, 0 end
-        local before = plow:GetPivot().Position
-        local pivot = tr:GetPivot()
-        local fwd = Vector3.new(pivot.LookVector.X, 0, pivot.LookVector.Z)
-        if fwd.Magnitude < 0.1 then fwd = Vector3.new(0, 0, -1) end
-        glideTractor(tr, pivot.Position + fwd.Unit * 5)
-        task.wait(0.5)
-        local moved = (plow:GetPivot().Position - before).Magnitude
+        local moved = tug()
+        if stopping() then return false, 0 end
+        if moved > 2.5 then return true, moved end
+        if viaRemote then
+            spudEquipRemoteMiss("hitch")
+            pressKey(Enum.KeyCode.X)
+            task.wait(0.6)
+            if stopping() then return false, 0 end
+            moved = tug()
+        end
         return moved > 2.5, moved
     end
 
@@ -2329,31 +2353,50 @@ local okBuild, errBuild = pcall(function()
             task.wait(0.2)
         end
         if stopping() then return false end
-        -- X-unhitch is PROXIMITY-gated like hitching: line up ON the
-        -- tool's hitch — the exact pose the game accepts — let it settle,
-        -- THEN press X. Prove with a tug: attached = the tool follows,
-        -- parked = it stays put.
-        for attempt = 1, 3 do
-            local lined = lineUpHitch(tr, impl)
-            if not lined then log("park: hitch line-up parts missing — pressing X anyway") end
-            task.wait(1) -- let the tool stop swinging after the move
-            if stopping() then return false end
-            pressKey(Enum.KeyCode.X)
-            task.wait(0.7)
-            if stopping() then return false end
+        -- ▸ UNHITCH: the captured FNCUnhitch(hitchable) first, X as the
+        --   fallback. Both are PROXIMITY-gated, so the same line-up pose is
+        --   used; the tug is the proof (attached = the tool follows, parked =
+        --   it stays put).
+        local function parkTug()
+            if stopping() then return 0 end
             local before = impl:GetPivot().Position
             local pivot = tr:GetPivot()
             local fwd = Vector3.new(pivot.LookVector.X, 0, pivot.LookVector.Z)
             if fwd.Magnitude < 0.1 then fwd = Vector3.new(0, 0, -1) end
             glideTractor(tr, pivot.Position + fwd.Unit * 6)
             task.wait(0.6)
+            if stopping() then return 0 end
+            return (impl:GetPivot().Position - before).Magnitude
+        end
+        for attempt = 1, 3 do
+            local lined = lineUpHitch(tr, impl)
+            if not lined then log("park: hitch line-up parts missing — pressing the fallback anyway") end
+            task.wait(1) -- let the tool stop swinging after the move
             if stopping() then return false end
-            local followed = (impl:GetPivot().Position - before).Magnitude
+            local viaRemote = spudUnhitchRemote(tr)
+            if not viaRemote then pressKey(Enum.KeyCode.X) end
+            task.wait(0.7)
+            if stopping() then return false end
+            local followed = parkTug()
+            if stopping() then return false end
             if followed <= 2 then
-                log(string.format("✅ tool parked where it came from (X, attempt %d — stayed put)", attempt))
+                log(string.format("✅ tool parked where it came from (%s, attempt %d — stayed put)",
+                    viaRemote and "FNCUnhitch" or "X", attempt))
                 return true
             end
-            log(string.format("unhitch attempt %d: still follows (%.1f studs) — re-lining up, X again",
+            if viaRemote then
+                spudEquipRemoteMiss("unhitch")
+                pressKey(Enum.KeyCode.X)
+                task.wait(0.7)
+                if stopping() then return false end
+                followed = parkTug()
+                if stopping() then return false end
+                if followed <= 2 then
+                    log(string.format("✅ tool parked where it came from (X fallback, attempt %d — stayed put)", attempt))
+                    return true
+                end
+            end
+            log(string.format("unhitch attempt %d: still follows (%.1f studs) — re-lining up, next try",
                 attempt, followed))
         end
         log("⚠ still attached after 3 presses — unhitch manually with X")
@@ -2409,20 +2452,27 @@ local okBuild, errBuild = pcall(function()
             end
             if stopping() then return false end
             if dist > 10 then log("still too far after moving") return false end
-            log("pressing F to mount the " .. label .. "…")
-            pressKey(Enum.KeyCode.F)
-            task.wait(0.7)
-            if stopping() then return false end
-            if not (hum.SeatPart and hum.SeatPart:IsDescendantOf(tr)) then
-                pressKey(Enum.KeyCode.F) -- context can take a moment to register
-                task.wait(0.7)
-            end
-            if stopping() then return false end
-            if hum.SeatPart and hum.SeatPart:IsDescendantOf(tr) then
-                log("✅ mounted " .. tr.Name)
+            -- ▸ the captured FNCEnterEquipment(vehicle, seat) first, proven by
+            --   the seat actually holding the humanoid; F is the fallback (and
+            --   is never pressed once the remote seated us — F would get out).
+            if spudEnterRemote(tr, seat) then
+                log("✅ mounted " .. tr.Name .. " (FNCEnterEquipment)")
             else
-                log("F pressed but not seated — game didn't accept the enter")
-                return false
+                log("pressing F to mount the " .. label .. "…")
+                pressKey(Enum.KeyCode.F)
+                task.wait(0.7)
+                if stopping() then return false end
+                if not (hum.SeatPart and hum.SeatPart:IsDescendantOf(tr)) then
+                    pressKey(Enum.KeyCode.F) -- context can take a moment to register
+                    task.wait(0.7)
+                end
+                if stopping() then return false end
+                if hum.SeatPart and hum.SeatPart:IsDescendantOf(tr) then
+                    log("✅ mounted " .. tr.Name)
+                else
+                    log("F pressed but not seated — game didn't accept the enter")
+                    return false
+                end
             end
         end
         return true
@@ -3830,6 +3880,151 @@ local okBuild, errBuild = pcall(function()
         return true
     end
 
+    -- ▸ EQUIPMENT REMOTES — every call below was recorded from the game's own
+    --   client by SpudRemoteProbe (2026-10-30), all under Modules.Larry:
+    --     FNCEnterEquipment(vehicle, seat)
+    --     FNCAttemptHitch(tractor.Components.Hitchable, tool.Chassis.HitchableSocket)
+    --     FNCUnhitch(tractor.Components.Hitchable)
+    --     FNCSpawnEquipment(model) / FNCStoreEquipment(model)
+    --     EVTRequestToCarry(draggable) / EVTRequestToDrop()
+    --   They are fired only where the game itself offers the action, an
+    --   effect read has to prove each one landed, and the old key/UI path is
+    --   the fallback. Three ignored calls switch that one off for the session.
+    spudEquipRemoteState = { kit = nil, fails = {}, off = {} }
+
+    function spudEquipRemoteKit()
+        local state = spudEquipRemoteState
+        if state.kit then return state.kit end
+        local rs = game:GetService("ReplicatedStorage")
+        local mods = rs:FindFirstChild("Modules")
+        local larry = mods and mods:FindFirstChild("Larry")
+        if not larry then return nil end
+        local specs = {
+            enter = { "FNCEnterEquipment", "InvokeServer" },
+            hitch = { "FNCAttemptHitch", "InvokeServer" },
+            unhitch = { "FNCUnhitch", "InvokeServer" },
+            spawn = { "FNCSpawnEquipment", "InvokeServer" },
+            store = { "FNCStoreEquipment", "InvokeServer" },
+            carry = { "EVTRequestToCarry", "FireServer" },
+            drop = { "EVTRequestToDrop", "FireServer" },
+        }
+        local kit = {}
+        for key, spec in pairs(specs) do
+            local ev = larry:FindFirstChild(spec[1])
+            local want = spec[2] == "FireServer" and "RemoteEvent" or "RemoteFunction"
+            if ev and ev:IsA(want) then
+                kit[key] = { remote = ev, method = spec[2] }
+            end
+        end
+        state.kit = kit
+        return kit
+    end
+
+    -- an ignored call is not a failure worth retrying all session: three and
+    -- the key/UI path owns that action again (the milk store's rule)
+    function spudEquipRemoteMiss(key)
+        local state = spudEquipRemoteState
+        if state.off[key] then return end
+        state.fails[key] = (state.fails[key] or 0) + 1
+        if state.fails[key] >= 3 then
+            state.off[key] = true
+            log("equipment: the game ignored the " .. key
+                .. " call three times — back to keys/UI for this session")
+        end
+    end
+
+    function spudEquipRemoteCall(key, ...)
+        local state = spudEquipRemoteState
+        if state.off[key] then return false end
+        local entry = (spudEquipRemoteKit() or {})[key]
+        if not entry then return false end
+        local args = table.pack(...)
+        local ok = pcall(function()
+            if entry.method == "FireServer" then
+                entry.remote:FireServer(table.unpack(args, 1, args.n))
+            else
+                entry.remote:InvokeServer(table.unpack(args, 1, args.n))
+            end
+        end)
+        return ok
+    end
+
+    -- Spawn / Store through the captured call. The InStorage flag (or, for a
+    -- spawn that rebuilds the model, a >100-stud move) is the proof; anything
+    -- else falls through to the Equipment Manager UI unchanged.
+    function spudEquipRemoteAct(vehicleName, action)
+        local folder = equipmentFolder()
+        local model = folder and folder:FindFirstChild(vehicleName)
+        if not model then return false end
+        local key = action == "Store" and "store" or "spawn"
+        local want = key == "store"
+        local before = model:GetAttribute("InStorage")
+        if before == want then return false end
+        local p0 = model:GetPivot().Position
+        if not spudEquipRemoteCall(key, model) then return false end
+        local deadline = os.clock() + 2
+        while os.clock() < deadline do
+            if stopping() then break end
+            local okNow, now, moved = pcall(function()
+                return model:GetAttribute("InStorage"),
+                    (model:GetPivot().Position - p0).Magnitude
+            end)
+            if okNow and now == want and now ~= before then
+                log(string.format("equipment: %s %s via %s (no UI)", action, model.Name, key))
+                return true
+            end
+            if okNow and key == "spawn" and moved > 100 then
+                log(string.format("equipment: %s respawned via %s (no UI)", model.Name, key))
+                return true
+            end
+            task.wait(0.2)
+        end
+        spudEquipRemoteMiss(key)
+        log(string.format("equipment: %s didn't %s the %s — using the Equipment Manager",
+            key, action, model.Name))
+        return false
+    end
+
+    -- F, proven by the seat: true only when the humanoid actually ends up in it
+    function spudEnterRemote(tr, seat)
+        if not (tr and seat) then return false end
+        if not spudEquipRemoteCall("enter", tr, seat) then return false end
+        for _ = 1, 8 do
+            if stopping() then return false end
+            local char = LocalPlayer.Character
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            if hum and hum.SeatPart and hum.SeatPart:IsDescendantOf(tr) then
+                return true
+            end
+            task.wait(0.15)
+        end
+        spudEquipRemoteMiss("enter")
+        return false
+    end
+
+    -- the captured hitch pair: tractor Components.Hitchable, tool Chassis.HitchableSocket
+    function spudHitchParts(tr, impl)
+        local tc = tr and tr:FindFirstChild("Components")
+        local th = tc and tc:FindFirstChild("Hitchable")
+        local ic = impl and impl:FindFirstChild("Chassis")
+        local is = ic and ic:FindFirstChild("HitchableSocket")
+        if th and is then return th, is end
+        return nil
+    end
+
+    function spudHitchRemote(tr, impl)
+        local th, is = spudHitchParts(tr, impl)
+        if not (th and is) then return false end
+        return spudEquipRemoteCall("hitch", th, is)
+    end
+
+    function spudUnhitchRemote(tr)
+        local tc = tr and tr:FindFirstChild("Components")
+        local th = tc and tc:FindFirstChild("Hitchable")
+        if not th then return false end
+        return spudEquipRemoteCall("unhitch", th)
+    end
+
     -- scan every field of mine ONCE (nearest-first) and say what work is
     -- left: any bare cells (the PLOW's job) and any Plowed cells (the
     -- CULTIVATOR's job). Every field's real state is logged. A failed
@@ -4057,7 +4252,38 @@ local okBuild, errBuild = pcall(function()
     --   "Carry" prompt, bound to E — NOT PickupSeedBox). One key press is not
     --   proof: press E until the game actually carries it, and log each miss
     --   with the game's own action list so a failure is readable.
-    local function carryCrate(what)
+    -- EVTRequestToCarry(<draggable>) — captured while picking a seed box up.
+    -- `carrying()` is the proof; E is the fallback.
+    function spudCarryRemote(model)
+        if not model then return false end
+        if not spudEquipRemoteCall("carry", model) then return false end
+        for _ = 1, 6 do
+            if stopping() then return false end
+            if carrying() then return true end
+            task.wait(0.2)
+        end
+        spudEquipRemoteMiss("carry")
+        return false
+    end
+
+    -- EVTRequestToDrop() — the captured drop. `carrying()` going false is the
+    -- proof; X is the fallback.
+    function spudDropRemote()
+        if not spudEquipRemoteCall("drop") then return false end
+        for _ = 1, 5 do
+            if stopping() then return true end
+            if not carrying() then return true end
+            task.wait(0.15)
+        end
+        spudEquipRemoteMiss("drop")
+        return false
+    end
+
+    local function carryCrate(what, model)
+        if spudCarryRemote(model) then
+            log("✅ carrying the " .. what .. " (EVTRequestToCarry)")
+            return true
+        end
         for attempt = 1, 3 do
             if stopping() then return false end
             pressKey(Enum.KeyCode.E) -- Carry = E
@@ -4292,7 +4518,7 @@ local okBuild, errBuild = pcall(function()
         log("seed crate: E at the crate to pick it up — the game offers: "
             .. (acts and (#acts > 0 and table.concat(acts, " · ") or "nothing") or "unreadable"))
         setStage("shop trip: picking the crate up (E)")
-        if not carryCrate("seed crate") then
+        if not carryCrate("seed crate", hit.m) then
             log("seed crate: couldn't pick it up after 3 tries — stopping the shop trip here (nothing bought)")
             return false
         end
@@ -4581,7 +4807,7 @@ local okBuild, errBuild = pcall(function()
         --   only pick something up if the game swapped it out during the buy
         if carrying() then
             log("seed crate: still carrying the crate — straight to the seeder")
-        elseif not carryCrate("bought crate") then
+        elseif not carryCrate("bought crate", hit.m) then
             log("seed crate: the bought crate didn't come to hand — pick it up by hand (E) and the seeder fill is next time")
             return true
         end
@@ -10519,7 +10745,9 @@ local okBuild, errBuild = pcall(function()
                 log(string.format("feed: the fill did not register (%s -> %s) - the game offers: %s",
                     tostring(before), tostring(after), milkFeedActs()))
                 if carrying() then
-                    pressKey(Enum.KeyCode.X) -- Drop = X: never leave a box stuck in hand
+                    if not spudDropRemote() then
+                        pressKey(Enum.KeyCode.X) -- Drop = X: never leave a box stuck in hand
+                    end
                     task.wait(0.5)
                 end
                 break
@@ -11292,7 +11520,9 @@ local okBuild, errBuild = pcall(function()
                     log("store: the fill did not register — the game offers: " .. milkFeedActs())
                 end
                 if picked then
-                    pressKey(Enum.KeyCode.X) -- Drop = X: never leave OUR jug in hand
+                    if not spudDropRemote() then
+                        pressKey(Enum.KeyCode.X) -- Drop = X: never leave OUR jug in hand
+                    end
                     milkPollFor(function() return milkStoreHolding() == nil end, 0.5)
                 end
                 break
