@@ -12,7 +12,7 @@ local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/release
     .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
     .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.52 · fluent gui"
+local VERSION    = "rebuild v1.53 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -6807,6 +6807,159 @@ local okBuild, errBuild = pcall(function()
         return took, dry
     end
 
+    -- ▸ SWEEP + FIRE (owner's pick, 2026-10-30: "make it tween and do that
+    --   every 500ms so it's super fast"). Hopping cell→cell is a teleport per
+    --   id; one serpentine tween over the field fires every 0.5 s at the
+    --   cells the blade is passing, so a whole field is covered in one smooth
+    --   ~12–15 s run. A cell that a burst skipped gets a second lap offset by
+    --   half a row; whatever is still standing after that is the hop's and
+    --   then the drive's, so this can only add speed. The seed/harvest budget
+    --   is the machine's own (seeds / free tank space).
+    function spudSweepCells(job, field, ride, impl, stage, baseCF, baseSize, att, speed)
+        local pts = cellsAtStage(field, stage, baseCF, baseSize)
+        if not pts or #pts == 0 then return 0, false end
+        local before = #pts
+        local off = nil
+        pcall(function()
+            local part = att and att.Parent
+            if part and part.Position then
+                off = part.Position - ride:GetPivot().Position
+            end
+        end)
+        local budget, dry = nil, false
+        if job.verb == "seed" or job.verb == "harvest" then
+            pcall(function()
+                local conf = impl and impl:FindFirstChild("Configurations")
+                local c = conf and conf:FindFirstChild("Capacity")
+                local m = conf and conf:FindFirstChild("MaxCapacity")
+                local cur = c and c:IsA("IntValue") and tonumber(c.Value) or nil
+                if job.verb == "seed" then
+                    budget = cur
+                elseif cur and m and m:IsA("IntValue") then
+                    budget = math.max(0, m.Value - cur)
+                end
+            end)
+        end
+        local spd = speed or 20          -- studs/s: 10 studs between bursts
+        local fireEvery = 0.5            -- the owner's cadence
+        local gap = spd * fireEvery
+        local radius = 6                 -- the tool is 10 wide: half + 1
+        local tick = 0.03
+        local rowGap = 10                -- the field's own grid
+        local fired, took = 0, 0
+        local t0 = os.clock()
+        local left = nil
+        for lap = 1, 2 do
+            local live = {}
+            for _, c in ipairs(pts) do
+                if c.id and not c.fired then live[#live + 1] = c end
+            end
+            if #live == 0 then break end
+            -- lap 2 runs between lap 1's rows: half a row over
+            local shift = (lap - 1) * rowGap / 2
+            local minX, maxX, minZ, maxZ = live[1].X, live[1].X, live[1].Z, live[1].Z
+            local y0 = live[1].Y
+            for _, c in ipairs(live) do
+                if c.X < minX then minX = c.X end
+                if c.X > maxX then maxX = c.X end
+                if c.Z < minZ then minZ = c.Z end
+                if c.Z > maxZ then maxZ = c.Z end
+                if c.Y < y0 then y0 = c.Y end
+            end
+            local alongX = (maxX - minX) >= (maxZ - minZ)
+            local path = {}
+            if alongX then
+                local z, dir = minZ + shift, 1
+                while z <= maxZ + 0.5 do
+                    local a = Vector3.new(minX, y0, z)
+                    local b = Vector3.new(maxX, y0, z)
+                    if dir < 0 then a, b = b, a end
+                    path[#path + 1] = a
+                    path[#path + 1] = b
+                    z += rowGap
+                    dir = -dir
+                end
+            else
+                local x, dir = minX + shift, 1
+                while x <= maxX + 0.5 do
+                    local a = Vector3.new(x, y0, minZ)
+                    local b = Vector3.new(x, y0, maxZ)
+                    if dir < 0 then a, b = b, a end
+                    path[#path + 1] = a
+                    path[#path + 1] = b
+                    x += rowGap
+                    dir = -dir
+                end
+            end
+            local cum = { 0 }
+            for i = 2, #path do
+                local a, b = path[i - 1], path[i]
+                local dx, dz = b.X - a.X, b.Z - a.Z
+                cum[i] = cum[i - 1] + math.sqrt(dx * dx + dz * dz)
+            end
+            local total = math.max(cum[#path] or 0, 0.001)
+            local function pointAt(d)
+                local i = 1
+                while i < #path - 1 and cum[i + 1] < d do i += 1 end
+                local a, b = path[i], path[i + 1] or path[i]
+                local span = cum[i + 1] - cum[i]
+                local t = span > 0 and math.clamp((d - cum[i]) / span, 0, 1) or 0
+                return a.X + (b.X - a.X) * t, a.Y + (b.Y - a.Y) * t, a.Z + (b.Z - a.Z) * t
+            end
+            local stopped = false
+            local travelled, lastFire = 0, -1e9
+            while travelled < total do
+                if stopping() then stopped = true break end
+                travelled = math.min(total, travelled + spd * tick)
+                local px, py, pz = pointAt(travelled)
+                local cf = ride:GetPivot()
+                local rot = cf - cf.Position
+                local target
+                if off then
+                    target = Vector3.new(px, py, pz) - off
+                else
+                    target = Vector3.new(px, py + 2, pz)
+                end
+                ride:PivotTo(CFrame.new(target) * rot)
+                if travelled - lastFire >= gap or travelled >= total then
+                    lastFire = travelled
+                    for _, c in ipairs(live) do
+                        if not c.fired then
+                            local dx, dz = c.X - px, c.Z - pz
+                            if dx * dx + dz * dz <= radius * radius then
+                                if budget and fired >= budget then
+                                    dry = true
+                                    stopped = true
+                                    break
+                                end
+                                spudFieldRemoteCall(job.verb, field, c.id, att)
+                                c.fired = true
+                                fired += 1
+                            end
+                        end
+                    end
+                    if stopped then break end
+                end
+                task.wait(tick)
+            end
+            local after = cellsAtStage(field, stage, baseCF, baseSize)
+            if not after then break end
+            left = #after
+            if left == 0 or stopped then break end
+            -- keep the list for the next lap, minus this lap's cells
+            local keep = {}
+            for _, c in ipairs(after) do
+                if c.id then keep[#keep + 1] = c end
+            end
+            pts = keep
+        end
+        took = left and math.max(0, before - left) or 0
+        log(string.format("remote %s: swept %d cell(s) in %.1fs firing every %.1fs — %d took, %s left",
+            job.verb, fired, os.clock() - t0, fireEvery, took,
+            left and tostring(left) or "unreadable"))
+        return took, dry
+    end
+
     local function sweepField(tr, field, seat, job, impl)
         local baseCF, baseSize = fieldFrame(field)
         if not baseCF then return false, "no bounds" end
@@ -6891,8 +7044,33 @@ local okBuild, errBuild = pcall(function()
                 return true
             end
             -- ▸ one call per cell only lands where the blade is (live: 6 of 46),
-            --   so hop onto each remaining cell and fire that one id before
+            --   so sweep the field in one tween, firing at the cells the blade
+            --   passes; then hop onto whatever is still standing before
             --   giving up and driving. The stage re-read decides.
+            if need0 and need0 > 0 then
+                local swept, sweepDry = spudSweepCells(job, field, tr, impl,
+                    job.grown and grownStage or job.stage, baseCF, baseSize,
+                    spudToolAttachment(impl))
+                if swept and swept > 0 then
+                    st0 = countStages(field) or st0
+                    need0 = st0 and whichNeed(job, st0) or need0
+                    if need0 == 0 then
+                        if job.selfPropelled then
+                            harvestSellIfFull(tr, seat, field, "after the sweep")
+                        end
+                        return true
+                    end
+                end
+                if sweepDry then
+                    if job.selfPropelled then
+                        harvestSellIfFull(tr, seat, field, "after the sweep")
+                    else
+                        log(string.format("%s: seeder empty with %d cell(s) still to seed here — refilling before driving",
+                            job.verb, need0 or 0))
+                    end
+                    return true
+                end
+            end
             if need0 and need0 > 0 then
                 local hopped, hopDry = spudHopCells(job, field, tr, impl,
                     job.grown and grownStage or job.stage, baseCF, baseSize, spudToolAttachment(impl))

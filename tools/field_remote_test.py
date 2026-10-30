@@ -32,6 +32,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 SRC = ROOT / "SpudFarm_Full.lua"
 WANTED = [
     "cellsAtStage",
+    "spudSweepCells",
     "spudHopCells",
     "spudFieldRemoteKit",
     "spudFieldCellIds",
@@ -144,6 +145,7 @@ local function newRemote(name, class, handler)
 end
 
 local mode = { seed = "all", fill = "ok" }
+local acceptR = 2 -- how close the blade must be for the server to take a cell
 local tries = {}
 spudBatchRemotes = false
 
@@ -170,7 +172,7 @@ local function seedHandler(field, ids)
             if take and mode.atCell then
                 -- the live rule: only a cell the blade is over is accepted
                 local p = ATTPARENT and ATTPARENT.Position
-                if not (p and (p - cellPosOf(id)).Magnitude <= 2) then take = false end
+                if not (p and (p - cellPosOf(id)).Magnitude <= acceptR) then take = false end
             end
             if take then cell.Stage = "Seeded" end
         end
@@ -487,8 +489,10 @@ hopAtt.Parent = hopAttPart
 ATTPARENT = hopAttPart
 RIDE_POS = Vector3.new(0, 0, 0)
 local hopRide = {}
+local rides = 0
 function hopRide:GetPivot() return setmetatable({ Position = RIDE_POS }, CF) end
 function hopRide:PivotTo(cf)
+    rides = rides + 1
     RIDE_POS = cf.pos
     ATTPARENT.Position = RIDE_POS + Vector3.new(0, 0, -5)
 end
@@ -519,6 +523,68 @@ check("hop: one seed hops one cell and hands back",
     string.format("%s,%s", tostring(tookOne), tostring(dryOne)))
 capVal.Value = 50
 mode.atCell = false
+
+-- 12. SWEEP + FIRE: one serpentine tween, a burst every 0.5 s (10 studs at
+--     the 20 studs/s default) at the cells the blade is passing
+local function sweepGrid()
+    fieldState[field] = {}
+    for x = 1, 5 do
+        for y = 1, 3 do
+            fieldState[field][x * 128 + y] = { Stage = "Cultivated" }
+        end
+    end
+end
+
+mode.seed = "all"
+mode.atCell = true
+acceptR = 8
+capVal.Value = 50
+sweepGrid()
+resetState()
+local r0 = rides
+local s0 = seedRemote.invokeCalls
+local tookS, dryS = spudSweepCells(seedJob, field, hopRide, tool, "Cultivated",
+    baseCF, baseSize, hopAtt)
+check("sweep: every cell of the field is taken", tookS == 15, tostring(tookS))
+check("sweep: one call per cell", seedRemote.invokeCalls - s0 == 15,
+    (seedRemote.invokeCalls - s0) .. " call(s)")
+check("sweep: the field is empty afterwards",
+    #spudFieldCellIds(field, "Cultivated") == 0)
+check("sweep: a full seeder means not dry", dryS == false, tostring(dryS))
+check("sweep: the ride is tweened, not teleported", rides - r0 > 50,
+    (rides - r0) .. " pivot(s)")
+check("sweep: the log says what the sweep did",
+    loggedText():find("swept 15 cell") ~= nil)
+
+-- a seeder can only fire as many calls as it holds seeds
+capVal.Value = 3
+sweepGrid()
+resetState()
+s0 = seedRemote.invokeCalls
+local tookB, dryB = spudSweepCells(seedJob, field, hopRide, tool, "Cultivated",
+    baseCF, baseSize, hopAtt)
+check("sweep: 3 seeds fire 3 calls", seedRemote.invokeCalls - s0 == 3,
+    (seedRemote.invokeCalls - s0) .. " call(s)")
+check("sweep: the seeder runs dry mid-field", dryB == true and tookB == 3,
+    string.format("%s,%s", tostring(tookB), tostring(dryB)))
+
+-- a server that takes nothing leaves the whole field for the hop/drive
+acceptR = -1
+capVal.Value = 50
+sweepGrid()
+resetState()
+s0 = seedRemote.invokeCalls
+local tookI, dryI = spudSweepCells(seedJob, field, hopRide, tool, "Cultivated",
+    baseCF, baseSize, hopAtt)
+check("sweep: an ignored sweep takes nothing", tookI == 0, tostring(tookI))
+check("sweep: every cell is still standing",
+    #spudFieldCellIds(field, "Cultivated") == 15)
+check("sweep: an ignored sweep never switches the job off",
+    spudFieldRemoteState.off.seed ~= true)
+check("sweep: an ignored sweep is not dry", dryI == false, tostring(dryI))
+resetCells()
+mode.atCell = false
+acceptR = 2
 
 print(fails == 0 and "ALL OK" or (fails .. " FAILED"))
 """
