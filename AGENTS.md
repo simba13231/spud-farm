@@ -640,7 +640,7 @@ ReplicatedStorage.Modules.Larry.FNCFillSeeder:InvokeServer(Workspace.Objects.Equ
     nothing) and prints each packet's argument shape (`buffer(48)`,
     `table{…}`, instance names). A forged packet is the next experiment, and it
     needs this shape first.
-  - **Forge packet** (v1.62, sharpened in v1.63) — the watch captured
+  - **Forge packet** (v1.62, sharpened in v1.63–v1.64) — the watch captured
     `buffer(10)` and `buffer(22)` while `CellToBuffer` makes **6 bytes per
     cell**, so a packet is a **4-byte header + 6-byte cell records** (v1.62 sent
     a bare record, which is why it changed nothing). v1.63 captures a **real**
