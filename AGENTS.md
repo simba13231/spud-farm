@@ -8,7 +8,7 @@ asked and fixed, and the exact loop to prove a change works.
 description — it is the long-form manual and it is kept in sync with behaviour.
 
 - Main script: [SpudFarm_Full.lua](SpudFarm_Full.lua) — one paste-and-run Luau
-  file for the Roblox game *Farming and Friends*, currently `rebuild v1.59 ·
+  file for the Roblox game *Farming and Friends*, currently `rebuild v1.60 ·
   fluent gui` (`VERSION`, line 15). ≈12.3k lines.
 - Target: Windows + Git Bash. Luau toolchain lives in
   `%LOCALAPPDATA%\Temp\opencode\luau\` (`luau.exe`, `luau-compile.exe`,
@@ -72,7 +72,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 ### 1.4 Script limits (these have broken the build before)
 
 13. **Luau's 200-local limit is real and we are 2 away from the practical
-    ceiling.** Run `python tools/local_budget.py`. As of v1.59:
+    ceiling.** Run `python tools/local_budget.py`. As of v1.60:
     `4-space locals before milkCycle: 183 (practical ceiling 185)`,
     whole body `190 / 200`, **headroom 2**. Do **not** add a `local` inside the
     main build closure. Reuse an existing local, convert the feature to a
@@ -105,7 +105,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 
 ### 1.6 Working tree state (read before editing)
 
-`HEAD` is the latest committed build (v1.59, remote list + wrong-tool test),
+`HEAD` is the latest committed build (v1.60, trimmed Tests tab),
 `main`
 tracks `origin/main`, and the tree is clean. Keep it that way: make the change,
 run the gates, and commit only the files the change touches. `git add -A` is
@@ -140,10 +140,10 @@ The one command that runs everything — compile, budget, name audit and every
 harness, checking both the exit code and the text — is:
 
 ```bash
-python tools/run_all.py        # 30/30 checks on v1.59
+python tools/run_all.py        # 30/30 checks on v1.60
 ```
 
-Last full run (v1.59): **30/30 checks passed** (27 harnesses + 3 gates).
+Last full run (v1.60): **30/30 checks passed** (27 harnesses + 3 gates).
 
 | Script | What it actually proves |
 |---|---|
@@ -621,31 +621,14 @@ ReplicatedStorage.Modules.Larry.FNCFillSeeder:InvokeServer(Workspace.Objects.Equ
   normal per-cell pass runs. It is **off by default**, session-only, and an
   ignored list never switches a job off. The batch's own takes are counted into
   the final `✅ remote …` line.
-- **Tests tab · bug finder** (v1.44, user: *"maybe you can make a dump to try to
-  find bugs to abuse"*; widened in v1.45 by *"add a button to test ALL bugs you
-  can think of … and add a copy button"*). Each button fires **one** captured
-  call and lets the game's own state decide (`spudTestRun`, `spudTestWork`,
-  `spudTestSay`; results in the Tests paragraph and as `test:` lines;
-  `spudTestRunAll` runs the lot; `spudTestCopy` puts place id + build + player +
-  the whole `spudTestLog` on the clipboard with `setclipboard`):
-  - **From here** — a cell call with nobody seated and the tool not hitched
-    (`findImplement` picks the tool, `spudToolAttachment` its attachment).
-  - **Wrong stage** — `FNCSeedFieldCell` on a cell whose stage is **not**
-    `Cultivated`; the cell's own `Stage` before/after is the answer.
-  - **No attachment** — the same call with an empty attachment table.
-  - **All at once** — every remaining id fired back-to-back, no 40 ms spacing.
-  - **Sell abuse** — needs a FULL tank: fires `EVTSellAtStore(ride, pad)` twice
-    from off the pad, then again on the emptied tank. Answers distance
-    validation **and** double-sell (tank + `coinBalance` are the proof). Pads
-    come from `findSellSpots()`, then `spudFulfillSpots()`, then a raw scan of
-    `GameplayVisuals.SellArea` + `Stores.DropOffs`; nothing streamed = the test
-    says so and fires nothing.
-  - **Grab from afar** — `EVTRequestToCarry` on the nearest SeedBox; `carrying()`
-    proves it, then `EVTRequestToDrop` puts it back.
-  - **Spawn from afar** — `FNCSpawnEquipment` on a stored machine of mine;
-    `InStorage` flipping (or a >100-stud rebuild) is the proof.
-  - **Remote list** (v1.59, user: *"we need to find another way of forcing
-    the seeding and plowing"*) — read-only. Walks `ReplicatedStorage` (Modules
+- **Tests tab · live probes** (trimmed in v1.60, user: *"remove any tool we arenet
+  using anymore in the bugs tab becuase it's getting crowsed"*). The tab now
+  holds the **Batch field remote** toggle and two probes (`spudTestRun`,
+  `spudTestWork`, `spudTestSay`; lines land in the Tests paragraph and as
+  `test:` lines, and `spudTestCopy` puts place id + build + player + the whole
+  `spudTestLog` on the clipboard with `setclipboard`):
+  - **Remote list** (v1.59, user: *"we need to find another way of forcing the
+    seeding and plowing"*) — read-only. Walks `ReplicatedStorage` (Modules
     first, depth 4, 600 nodes) and lists every `RemoteEvent`/`RemoteFunction`/
     `UnreliableRemoteEvent` by path. The per-cell field calls are only the ones
     the game fired by hand; a bulk/field door that was never fired would show
@@ -658,44 +641,24 @@ ReplicatedStorage.Modules.Larry.FNCFillSeeder:InvokeServer(Workspace.Objects.Equ
     that verb with the hitched tool's own attachment, and waits on the stage.
     A take means one tool could plow, cultivate and seed in **one sweep** — the
     owner's "all in one go" without swapping implements.
-  - **Field API** (v1.56, user: *"isnt there a way we can force a tile to
-    become tiles"*) — read-only. Lists `FieldHelper`'s exports and children,
-    what one `GetCells` entry actually holds (key = value + typeof), whether
-    any export looks like a cell setter, the values of `CELL_STAGES`,
-    `SEED_TYPE` and `STAGE_MASK`, and whether `UpdateCell`/`UpdateCells`/
-    `CellsUpdated` exist (v1.57). Live dump (owner, 2026-10-30, place
-    2772610559): the module exports **no setter** — `UpdateCell`/`UpdateCells`
-    are the client's own writers, `CellsUpdated` a table — and a cell holds
-    `Alternate, GrowthMultiplier, IsWatered, PlantGrowth, Position, SeedType,
-    Stage` (50 cells, `Stage=Plowed`).
-  - **Force a tile** — picks a cell the seed call would refuse (**Empty**
-    first, then any stage that is not `Cultivated` — so a Plowed field works),
-    writes `Stage = "Cultivated"` into the client mirror (`GetCells`' table)
-    and any instance the entry points at, runs the game's own `UpdateCell` on
-    it, waits 2 s and re-reads. A rewritten mirror ends the test with `nothing
-    fired — a rewritten mirror cannot fool the call`; a sticky one fires
-    `FNCSeedFieldCell` on it and reports `TAKEN: the server trusted the forced
-    stage` or `IGNORED: the server keeps its own stage, the blade is the only
-    door`. The forged value is restored afterwards.
-    **First live run (owner, 2026-10-30): the mirror is WRITABLE — `UpdateCell`
-    kept the forged `Cultivated` for 2 s — but the first verdict read its own
-    write back, so v1.58 judges the TARGET stage instead (a seed take reads
-    `Seeded`; a refusal sends no update, so the forged value just stays).**
-  - **Fill from afar** — `FNCFillSeeder` on a distant seeder; the seeder's
-    `Capacity`/`MaxCapacity` pair (the live dump: `Capacity=0, MaxCapacity=50`,
-    the same fields the harvester uses for its tank) and `coinBalance` show
-    whether it refilled and whether it charged. Still unreadable → it dumps the
-    seeder's `Configurations` children and attributes.
-  Live results (owner, 2026-10-30): **From here / Wrong stage / No attachment
-  all IGNORED** — the server checks seat, stage and attachment. Each test
-  reverts nothing and touches no animals or other plots; it refuses while
-  `loopThread` is live. There is **no harness** for these — they are manual
-  experiments whose only verdict is the live read.
+  **Run all** runs both; both refuse while `loopThread` is live and touch no
+  animals or other plots. There is **no harness** for them — the live read is
+  the only verdict.
+  **Removed once answered** (v1.44–v1.58; every result is in §5 and the console):
+  From here / Wrong stage / No attachment / All at once (seat, stage and
+  attachment are checked, and a multi-id list is only partly taken), Sell abuse
+  (`EVTSellAtStore` ignores distance; an empty tank never pays twice), Grab from
+  afar (carry works at 35 studs), Spawn from afar (works from anywhere), Fill
+  from afar (refused at 963 studs), Field API (the module exports **no setter**;
+  `UpdateCell`/`UpdateCells` are the client's own writers) and Force a tile.
 
-**Is a tile forceable?** The server keeps the stage (the Wrong-stage test
-answered IGNORED), so the client mirror is only a copy; Tests → **Field API**
-/ **Force a tile** are what settle whether any build disagrees. `spudSweepCells`
-therefore forces *position*, not state — the only input the server accepts.
+**Is a tile forceable?** No. The live dump shows no setter, and Force a tile
+(2026-10-30) ended `the client cell table is writable — UpdateCell kept the
+forged Cultivated for 2 s` then `reads Cultivated — IGNORED: no update arrived`:
+the server never reads the client's copy. A cell only holds `Alternate,
+GrowthMultiplier, IsWatered, PlantGrowth, Position, SeedType, Stage` (50 cells,
+`Stage=Plowed` on the live field). `spudSweepCells` therefore forces *position*,
+not state — the only input the server accepts.
 
 `field_remote_test.py` pins the ids, the attachment pick, the call shape, the
 full/partial/ignored outcomes, the session switch-off, the fill fallback, the
@@ -755,7 +718,7 @@ UI/key fallbacks and the three-miss switch-off.
 | Whose machine | global `equipOwnerRank(m)` (farm being worked → mine → no readable owner → never another account), used by `findTractor` / `findImplement`; owner tag read by `milkStoreOwnerOf` |
 | Tree soil | global `spudTreeField(typeName, modelName)` (wood/tree/log/forest/timber/lumber/sawmill/stump → no crop harvest) and `spudNoCells(st)` (successful 0-cell read is empty, `nil` read is unknown); used in `probeWork`, `runPass`, `needLeft`, `grownLeft`, growth wait |
 | Field remotes | global `spudFieldRemoteKit()` (Modules.Larry: plow/cultivate/seed/harvest/fillSeeder), `spudFieldCellIds(field, stage)` (GetCells keys), `spudToolAttachment(impl)`, `spudFieldRemoteCall`, `spudFieldRemoteCallMany` (Tests batch), `spudFieldRemotePass` (fires, re-reads, self-disables a job), `spudSweepCells` (serpentine tween, a burst every 0.5 s), `spudHopCells` (one cell at a time), `spudFillSeederRemote`; state `spudFieldRemoteState`, `spudBatchRemotes` (Tests toggle, default false); wired at the top of `sweepField` and in `buySeedAndFill` |
-| Tests tab | `spudTestRun(kind)` (busy guard + pcall), `spudTestWork(kind)` (`ride` / `stage` / `tool` / `burst` / `sell` / `carry` / `spawn` / `fill`, one captured call + a game read as the verdict), `spudTestRunAll`, `spudTestCopy` (`setclipboard`), `spudTestSay`, `spudTestLog`, `spudTestPara`/`spudTestShow`; buttons **From here**, **Wrong stage**, **No attachment**, **All at once**, **Sell abuse**, **Grab from afar**, **Spawn from afar**, **Fill from afar**, **Run all**, **Copy report** |
+| Tests tab | `spudTestRun(kind)` (busy guard + pcall), `spudTestWork(kind)` (`remotes` / `wrongtool`), `spudTestRunAll`, `spudTestCopy` (`setclipboard`), `spudTestSay`, `spudTestLog`, `spudTestPara`/`spudTestShow`; buttons **Remote list**, **Wrong tool**, **Run all**, **Copy report** (the settled one-shots were removed in v1.60) |
 | Equipment remotes | global `spudEquipRemoteKit/State` (enter/hitch/unhitch/spawn/store/carry/drop/sell/purchase), `spudEquipRemoteCall`, `spudEquipRemoteMiss`, `spudEquipRemoteAct` (spawn/store proof), `spudEnterRemote`, `spudHitchParts`, `spudHitchRemote`, `spudUnhitchRemote`, `spudCarryRemote`, `spudDropRemote`, `spudSellRemote`, `spudPurchaseRemote`; wired in `managerAction`, `mountTractor`, `attemptHitch`, `dropImplementAtOrigin`, `carryCrate`, the two held-item drops, `trySellAt` and `buySeedAndFill` |
 | Row driving | `keyRow(tr, seat, from, goal, who)` drives rows on real W (the game auto-steers); global `spudRowSteer(angDeg, crossY, cross, tol)` (heading > 8°, cross-track > 2.5 studs → re-center); travel `ALIGN_MAXVEL = 34`, fallback row speed 18 |
 | Dirt line | global `milkDirtLine = 24`; `milkDirtHigh(spot)` (the single "is this dirty?" answer) |
@@ -1184,7 +1147,7 @@ then fire seed on it — TAKEN would mean the server trusts the mirror). The
 sweep therefore forces *position*, not state, since position is the only input
 the server checks.
 
-**Where it stands:** `rebuild v1.56 · fluent gui`, whole suite green (30/30),
+**Where it stands:** `rebuild v1.60 · fluent gui`, whole suite green (30/30),
 harness verified. **Not yet reloaded in game** after v1.22–v1.46 — the next real
 test is a live pass watching `path: … theta* N pops / N ms, min clear N`, the
 new width line (`tool … — 3-wide …; rows every 30`), the Farm owner picker

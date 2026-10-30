@@ -83,43 +83,20 @@ Everything merged into one paste-and-run file:
 - **Tests tab** — experiments, off by default, none of them a dependency of a
   normal pass. **Batch field remote** tries the abuse the captured shape allows:
   that call already carries a *list* of ids (`{cellId}`), so with the toggle on
-  a field job fires **one call with every remaining id**. The stage re-read is
-  the proof — a server that loops the list finishes the whole field in one call
-  (`✅ batch test: 50 cell(s) in ONE call`), a partial take sends only the rest
-  one call per cell (`batch test: N of M cell(s) took the id list`), and a
-  server that validates one id per call ignores it (`batch test: the server
-  ignored the id list … — one call per cell`) and the job stays on.
-  **Bug finder** — buttons that each fire **one** captured call and let the
-  game's own state answer, logged as `test:` lines, shown in the tab and
-  copyable with **Copy report** (place id, build, player + every line):
-  **From here** (a cell call with nobody seated, no hitch — does the server
-  need the ride?), **Wrong stage** (seed a cell that is not cultivated — is the
-  stage checked?), **No attachment** (empty attachment table — is the tool
-  checked?), **All at once** (every id back-to-back — how many land without the
-  40 ms pacing?), **Sell abuse** (fire `EVTSellAtStore` twice from off the pad
-  and again on the empty tank — distance check and double-sell), **Grab from
-  afar** (carry a seed box from across the map, then drop it back), **Spawn from
-  afar** (spawn a stored machine from where you stand), **Fill from afar**
-  (`FNCFillSeeder` on a distant seeder — does it refill, and does it charge?),
-  **Remote list** (every `RemoteEvent`/`RemoteFunction` the client can see — a
-  bulk field door we never fired would only show up here), **Wrong tool** (fires
-  a different job's call on the cell the hitched blade is over: if it takes, the
-  server checks the blade's position, not which implement it belongs to, and one
-  tool could plow, cultivate and seed in one sweep), **Field API** (read-only:
-  what `FieldHelper` exports, what one cell actually holds, the
-  `CELL_STAGES`/`SEED_TYPE`/`STAGE_MASK` values and the client's own cell
-  writer) and **Force a tile** (forges a cell the seed call would refuse —
-  any stage that is not `Cultivated`, so a Plowed field needs no Empty cell —
-  lets the game's `UpdateCell` run on it, waits 2 s and re-reads, then fires
-  the call and judges the **target** stage (`Seeded` = the server believed the
-  forged cell; still the forged value = no update arrived, so the blade is
-  still the only door).
-  **Run all** runs the whole set. Nothing touches animals or another player's
-  plot, and the tests refuse to run while a farm pass is going. Sell takes its
-  pad from the sell board, then the fulfillment pad, then a raw scan of both
-  folders — with no pad streamed it says so and fires nothing; fill reads the
-  seeder's `Capacity`/`MaxCapacity` (its seed count) and falls back to dumping
-  the seeder's `Configurations` when that is unreadable.
+  a field job fires **one call with every remaining id** — the live answer is
+  that the server takes only the ids under the blade (`batch test: N of M
+  cell(s) took the id list`), so the normal one-call-per-cell pass finishes it.
+  **Remote list** prints every `RemoteEvent`/`RemoteFunction` the client can
+  see — a bulk field door we never fired would only show up there. **Wrong
+  tool** fires a different job's call at the cell the hitched blade is over: if
+  it takes, the server checks the blade's position, not which implement it
+  belongs to, and one tool could plow, cultivate and seed in one sweep. Every
+  line is logged as `test:` and **Copy report** puts place id, build, player
+  and the whole run on the clipboard. Nothing touches animals or another
+  player's plot, and the tests refuse to run while a farm pass is going.
+  (The settled experiments — seat/stage/attachment checks, the burst, sell,
+  carry, spawn, fill, the FieldHelper dump and force-a-tile — were removed once
+  they had their answer; their results are in the console history.)
 - **Equipment on the game's own remotes** — the same capture pass recorded the
   equipment calls, so the script fires them instead of pressing keys or driving
   the Equipment Manager UI: `FNCEnterEquipment(vehicle, seat)` to mount,
