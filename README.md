@@ -83,7 +83,10 @@ Everything merged into one paste-and-run file:
   afar** (spawn a stored machine from where you stand) and **Fill from afar**
   (`FNCFillSeeder` on a distant seeder — does it refill, and does it charge?).
   **Run all** runs the whole set. Nothing touches animals or another player's
-  plot, and the tests refuse to run while a farm pass is going.
+  plot, and the tests refuse to run while a farm pass is going. Sell takes its
+  pad from the sell board, then the fulfillment pad, then a raw scan of both
+  folders — with no pad streamed it says so and fires nothing; fill dumps the
+  seeder's `Configurations` when it cannot find a seed count.
 - **Equipment on the game's own remotes** — the same capture pass recorded the
   equipment calls, so the script fires them instead of pressing keys or driving
   the Equipment Manager UI: `FNCEnterEquipment(vehicle, seat)` to mount,

@@ -8,7 +8,7 @@ asked and fixed, and the exact loop to prove a change works.
 description — it is the long-form manual and it is kept in sync with behaviour.
 
 - Main script: [SpudFarm_Full.lua](SpudFarm_Full.lua) — one paste-and-run Luau
-  file for the Roblox game *Farming and Friends*, currently `rebuild v1.45 ·
+  file for the Roblox game *Farming and Friends*, currently `rebuild v1.46 ·
   fluent gui` (`VERSION`, line 15). ≈12.3k lines.
 - Target: Windows + Git Bash. Luau toolchain lives in
   `%LOCALAPPDATA%\Temp\opencode\luau\` (`luau.exe`, `luau-compile.exe`,
@@ -72,7 +72,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 ### 1.4 Script limits (these have broken the build before)
 
 13. **Luau's 200-local limit is real and we are 2 away from the practical
-    ceiling.** Run `python tools/local_budget.py`. As of v1.45:
+    ceiling.** Run `python tools/local_budget.py`. As of v1.46:
     `4-space locals before milkCycle: 183 (practical ceiling 185)`,
     whole body `190 / 200`, **headroom 2**. Do **not** add a `local` inside the
     main build closure. Reuse an existing local, convert the feature to a
@@ -105,7 +105,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 
 ### 1.6 Working tree state (read before editing)
 
-`HEAD` is the latest committed build (v1.45, full bug sweep + copy), `main`
+`HEAD` is the latest committed build (v1.46, test fixes), `main`
 tracks `origin/main`, and the tree is clean. Keep it that way: make the change,
 run the gates, and commit only the files the change touches. `git add -A` is
 banned here. **Commit and push after every completed change** (owner's standing
@@ -139,10 +139,10 @@ The one command that runs everything — compile, budget, name audit and every
 harness, checking both the exit code and the text — is:
 
 ```bash
-python tools/run_all.py        # 30/30 checks on v1.45
+python tools/run_all.py        # 30/30 checks on v1.46
 ```
 
-Last full run (v1.45): **30/30 checks passed** (27 harnesses + 3 gates).
+Last full run (v1.46): **30/30 checks passed** (27 harnesses + 3 gates).
 
 | Script | What it actually proves |
 |---|---|
@@ -614,13 +614,18 @@ ReplicatedStorage.Modules.Larry.FNCFillSeeder:InvokeServer(Workspace.Objects.Equ
   - **All at once** — every remaining id fired back-to-back, no 40 ms spacing.
   - **Sell abuse** — needs a FULL tank: fires `EVTSellAtStore(ride, pad)` twice
     from off the pad, then again on the emptied tank. Answers distance
-    validation **and** double-sell (tank + `coinBalance` are the proof).
+    validation **and** double-sell (tank + `coinBalance` are the proof). Pads
+    come from `findSellSpots()`, then `spudFulfillSpots()`, then a raw scan of
+    `GameplayVisuals.SellArea` + `Stores.DropOffs`; nothing streamed = the test
+    says so and fires nothing.
   - **Grab from afar** — `EVTRequestToCarry` on the nearest SeedBox; `carrying()`
     proves it, then `EVTRequestToDrop` puts it back.
   - **Spawn from afar** — `FNCSpawnEquipment` on a stored machine of mine;
     `InStorage` flipping (or a >100-stud rebuild) is the proof.
-  - **Fill from afar** — `FNCFillSeeder` on a distant seeder; the seed IntValue
-    and `coinBalance` show whether it refilled and whether it charged.
+  - **Fill from afar** — `FNCFillSeeder` on a distant seeder; the seed
+    IntValue/attribute and `coinBalance` show whether it refilled and whether it
+    charged. No seed field readable → it dumps the seeder's `Configurations`
+    children and attributes, so the next run names the real field.
   Live results (owner, 2026-10-30): **From here / Wrong stage / No attachment
   all IGNORED** — the server checks seat, stage and attachment. Each test
   reverts nothing and touches no animals or other plots; it refuses while
@@ -1015,11 +1020,25 @@ double-sell, judged by the tank and `coinBalance`), **Grab from afar**
 from afar** (`FNCSpawnEquipment` on a stored machine), **Fill from afar**
 (`FNCFillSeeder` on a distant seeder, seeds and coins read), **Run all** and
 **Copy report** (`setclipboard` of place id + build + player + every line).
-The live answers so far (owner's screenshot): seat, stage and attachment are all
-**IGNORED** — the remote door is closed; a 48-id list is ignored too.
+The live answers so far (owner's report, 2026-10-30): seat, stage and
+attachment are **IGNORED**, and a 48-id list is ignored — the field door is
+closed — but **carry worked from 35 studs** (`SeedBox` grabbed and dropped
+back) and **spawn worked from anywhere** (`S4204` rebuilt >100 studs away). The
+fill and sell tests reported no seed field / no streamed pad, which is what
+v1.46 fixes.
 
-**Where it stands:** `rebuild v1.45 · fluent gui`, whole suite green (30/30),
-harness verified. **Not yet reloaded in game** after v1.22–v1.44 — the next real
+**First live bug report from the Tests tab** → v1.46. The user ran **Run all**
+and copied the report: ride/stage/tool IGNORED (seat, stage and attachment are
+checked), carry **TAKEN at 35 studs**, spawn **TAKEN from anywhere**; fill said
+`seeds nil` and sell said `no sell pad found`, so both tests could not measure.
+Fixes: sell pads now fall back to `spudFulfillSpots()` and a raw scan of
+`SellArea`/`DropOffs`, and no streamed pad is stated instead of fired; the
+seeder read accepts IntValue/NumberValue/attributes and, when still nil, dumps
+the seeder's `Configurations` and attributes so the real seed field can be
+named next run.
+
+**Where it stands:** `rebuild v1.46 · fluent gui`, whole suite green (30/30),
+harness verified. **Not yet reloaded in game** after v1.22–v1.45 — the next real
 test is a live pass watching `path: … theta* N pops / N ms, min clear N`, the
 new width line (`tool … — 3-wide …; rows every 30`), the Farm owner picker
 showing ONLY that owner's fields (`Field · Miou2251`), the equipment owner
@@ -1097,7 +1116,10 @@ for this session`), and the equipment lines (`✅ mounted … (FNCEnterEquipment
    the cell's own stage, so quote the before → after in the report) and v1.45
    (Tests → **Run all** then **Copy report**: the copy must carry place/build/
    player and every line; the sell test needs a FULL harvester, the fill test a
-   spawned KADL, the spawn test a stored machine of mine).
+   spawned KADL, the spawn test a stored machine of mine) and v1.46 (the sell
+   test must name the pad it picked or say no pad is streamed; the fill test
+   must either read the seed count or dump the seeder's fields so the next run
+   can name it).
    Harness green ≠ game green.
 2. **The 24 % baseline may differ per build.** If stalls sit higher, the first
    pass logs `reads X% but the game offers no Clean there - the dirty line moves

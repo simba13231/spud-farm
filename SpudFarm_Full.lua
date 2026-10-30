@@ -12,7 +12,7 @@ local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/release
     .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
     .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.45 · fluent gui"
+local VERSION    = "rebuild v1.46 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -6267,13 +6267,23 @@ local okBuild, errBuild = pcall(function()
         end
         local function seedCountOf(model)
             local conf = model and model:FindFirstChild("Configurations")
-            if not conf then return nil end
-            for _, v in ipairs(conf:GetChildren()) do
-                if v:IsA("IntValue") and v.Name:lower():find("seed", 1, true) then
-                    return v.Value
+            for _, v in ipairs(conf and conf:GetChildren() or {}) do
+                if (v:IsA("IntValue") or v:IsA("NumberValue"))
+                    and v.Name:lower():find("seed", 1, true) then
+                    return tonumber(v.Value)
                 end
             end
-            return nil
+            local found
+            pcall(function()
+                for k, v in pairs(model:GetAttributes()) do
+                    if type(v) == "number"
+                        and tostring(k):lower():find("seed", 1, true) then
+                        found = v
+                        break
+                    end
+                end
+            end)
+            return found
         end
 
         if kind == "burst" then
@@ -6345,9 +6355,53 @@ local okBuild, errBuild = pcall(function()
                     tostring(cur), tostring(max)))
                 return
             end
-            local spots = findSellSpots()
+            -- every known pad source, not just the crop sell board: the world
+            -- only streams the store area when you are near it, so a run at
+            -- the farm can have no SellArea at all. Stores.DropOffs and a raw
+            -- scan of both folders are tried before giving up.
+            local spots = {}
+            for _, s in ipairs(findSellSpots()) do spots[#spots + 1] = s end
+            if #spots == 0 then
+                for _, s in ipairs(spudFulfillSpots()) do
+                    s.what = "Fulfillment " .. tostring(s.what)
+                    spots[#spots + 1] = s
+                end
+            end
+            if #spots == 0 then
+                local scanned, best, bd = 0, nil, nil
+                local function considerPart(d)
+                    if d:IsA("BasePart") then
+                        scanned += 1
+                        local n = d.Name:lower()
+                        local hit = n:find("sell", 1, true) or n:find("pad", 1, true)
+                            or n:find("drop", 1, true) or n:find("load", 1, true)
+                        if hit then
+                            local dd = (d.Position - ride:GetPivot().Position).Magnitude
+                            if not bd or dd < bd then best, bd = d, dd end
+                        end
+                    end
+                end
+                pcall(function()
+                    local gv = workspace:FindFirstChild("GameplayVisuals")
+                    local sa = gv and gv:FindFirstChild("SellArea")
+                    for _, d in ipairs(sa and sa:GetDescendants() or {}) do considerPart(d) end
+                end)
+                pcall(function()
+                    local st = workspace:FindFirstChild("Stores")
+                    local dr = st and st:FindFirstChild("DropOffs")
+                    for _, d in ipairs(dr and dr:GetChildren() or {}) do considerPart(d) end
+                end)
+                if best then
+                    spots[#spots + 1] = { p = best.Position, part = best,
+                        what = "scanned " .. best:GetFullName() }
+                else
+                    spudTestSay(string.format(
+                        "sell: no pad is streamed here (%d part(s) scanned) — stand near the sell or fulfillment area and press again. Nothing was fired.",
+                        scanned))
+                    return
+                end
+            end
             local spot = spots[1]
-            if not (spot and spot.part) then spudTestSay("sell: no sell pad found in the world") return end
             local dist = (ride:GetPivot().Position - spot.part.Position).Magnitude
             local coins0 = coinBalance()
             spudTestSay(string.format(
@@ -6446,6 +6500,24 @@ local okBuild, errBuild = pcall(function()
             end
             if not seeder then spudTestSay("fill: no seeder is out (KADL) — bring one close") return end
             local s0, c0 = seedCountOf(seeder), coinBalance()
+            -- cannot guess the field the game stores seeds in: when nothing
+            -- named "seed" is an IntValue, dump what the seeder actually holds
+            -- so the next run names it (probe before implementing).
+            if s0 == nil then
+                local parts = {}
+                pcall(function()
+                    local conf = seeder:FindFirstChild("Configurations")
+                    for _, v in ipairs(conf and conf:GetChildren() or {}) do
+                        parts[#parts + 1] = string.format("%s(%s)=%s", v.Name,
+                            v.ClassName, tostring(v.Value))
+                    end
+                    for k, v in pairs(seeder:GetAttributes()) do
+                        parts[#parts + 1] = "attr " .. tostring(k) .. "=" .. tostring(v)
+                    end
+                end)
+                spudTestSay("fill: no seed IntValue on the seeder — it holds: "
+                    .. (#parts > 0 and table.concat(parts, ", ") or "nothing readable"))
+            end
             spudTestSay(string.format("fill: FNCFillSeeder(%s) from %.0f studs away (seeds %s, coins %s)",
                 seeder.Name, dist, tostring(s0), tostring(c0)))
             spudFillSeederRemote(seeder)
