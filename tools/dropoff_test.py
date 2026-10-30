@@ -25,7 +25,7 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SRC = ROOT / "SpudFarm_Full.lua"
-WANTED = ["spudSellNow", "spudFulfillSpots", "trySellAt"]
+WANTED = ["spudSellNow", "spudFulfillSpots", "trySellAt", "sellHarvester"]
 
 PRE = r"""
 local V = {}
@@ -172,6 +172,66 @@ local pressed = table.concat(keys, ",")
 check("sell pad: an ignored remote is not a sale", okIgnored == false)
 check("sell pad: it falls back to Q and E", pressed:find("Q") ~= nil and pressed:find("E") ~= nil, pressed)
 check("sell pad: the failure line names the pad", loggedText():find("DropOff") ~= nil)
+
+-- 6. a full tank still finds the store when no pad is streamed yet
+local hops = {}
+function hopTo(ride, target, speed)
+    hops[#hops + 1] = { X = target.X, Y = target.Y, Z = target.Z }
+    return true
+end
+local soldAt = nil
+function trySellAt(ride, what, pad, autoPad)
+    soldAt = { what = what, pad = pad, autoPad = autoPad }
+    return true
+end
+function harvesterLoad(ride) return 50, 50 end
+local ride = { GetPivot = function() return { Position = Vector3.new(10, 170, 10) } end }
+local scanPad = { what = "SellArea.Pad", part = "padpart", p = Vector3.new(-300, 140, -90) }
+local scanState = "pad"
+function findSellSpots()
+    if scanState == "pad" then return { scanPad } end
+    if scanState == "none" then return {} end
+    return scanPad -- "late": empty first scan, pad after the store hop
+end
+function spudFulfillSpots() return {} end
+function storeAnchors() return { FarmCo = Vector3.new(-900, 140, -900) } end
+spudDropOff = "Sell"
+spudSellNow = function() return true end
+
+-- 6a. a pad already streamed: no store hop, one sale
+scanState = "pad"
+hops, soldAt = {}, nil
+local okSell = sellHarvester(ride, nil, nil)
+check("sell: a streamed pad sells with only the pad hop",
+    okSell == true and #hops == 1 and hops[1].X == -300,
+    #hops .. " hop(s)")
+check("sell: the sale happens at that pad", soldAt ~= nil and soldAt.what == "SellArea.Pad")
+
+-- 6b. nothing streamed, then the store hop makes the pad appear
+local scans = 0
+function findSellSpots()
+    scans += 1
+    if scans == 1 then return {} end
+    return { scanPad }
+end
+hops, soldAt = {}, nil
+local fieldStub = { Parent = true, Name = "Field" }
+local okLate = sellHarvester(ride, nil, fieldStub)
+check("sell: no pad -> it hops to the store first", #hops >= 1 and hops[1].X == -900,
+    #hops .. " hop(s)")
+check("sell: after the hop it sells", okLate == true and soldAt ~= nil)
+check("sell: the trip back returns to the field, not the store",
+    hops[#hops].X == 10 and hops[#hops].Z == 10,
+    hops[#hops] and string.format("%.0f,%.0f", hops[#hops].X, hops[#hops].Z) or "no hop")
+
+-- 6c. nothing streamed and no marker at all: it says so and fires nothing
+function findSellSpots() return {} end
+function storeAnchors() return {} end
+hops, soldAt = {}, nil
+local okNone = sellHarvester(ride, nil, nil)
+check("sell: no pad and no marker -> no sale, no hop", okNone == false and #hops == 0 and soldAt == nil)
+check("sell: the log says the unload was skipped",
+    loggedText():find("pad found") ~= nil and loggedText():find("skipped") ~= nil)
 
 print(fails == 0 and "ALL OK" or (fails .. " FAILED"))
 """

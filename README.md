@@ -85,8 +85,9 @@ Everything merged into one paste-and-run file:
   **Run all** runs the whole set. Nothing touches animals or another player's
   plot, and the tests refuse to run while a farm pass is going. Sell takes its
   pad from the sell board, then the fulfillment pad, then a raw scan of both
-  folders — with no pad streamed it says so and fires nothing; fill dumps the
-  seeder's `Configurations` when it cannot find a seed count.
+  folders — with no pad streamed it says so and fires nothing; fill reads the
+  seeder's `Capacity`/`MaxCapacity` (its seed count) and falls back to dumping
+  the seeder's `Configurations` when that is unreadable.
 - **Equipment on the game's own remotes** — the same capture pass recorded the
   equipment calls, so the script fires them instead of pressing keys or driving
   the Equipment Manager UI: `FNCEnterEquipment(vehicle, seat)` to mount,
@@ -115,6 +116,11 @@ Everything merged into one paste-and-run file:
   after which the trip backs off 60 s and the harvest carries on. Every hop
   lands at the **higher** of the two heights and arcs above it, so the trip
   back from a lower pad drops down onto the field instead of flying under it.
+  The store area only streams when you are near it, so a full tank out at the
+  farm that finds **no pad at all** first hops the harvester to the store's own
+  waypoint, waits for the pads to stream, and looks again (`no Sell pad is
+  streamed from here — arc hop to the store, then looking again`); the trip
+  back still returns to the field.
 - **Trees are left alone** — the harvester never drives a field whose type or
   model name says wood / tree / log / forest / timber / lumber / sawmill / stump,
   so standing trees are not cut. A field whose cell read succeeds but returns

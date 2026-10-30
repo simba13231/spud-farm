@@ -8,7 +8,7 @@ asked and fixed, and the exact loop to prove a change works.
 description — it is the long-form manual and it is kept in sync with behaviour.
 
 - Main script: [SpudFarm_Full.lua](SpudFarm_Full.lua) — one paste-and-run Luau
-  file for the Roblox game *Farming and Friends*, currently `rebuild v1.46 ·
+  file for the Roblox game *Farming and Friends*, currently `rebuild v1.47 ·
   fluent gui` (`VERSION`, line 15). ≈12.3k lines.
 - Target: Windows + Git Bash. Luau toolchain lives in
   `%LOCALAPPDATA%\Temp\opencode\luau\` (`luau.exe`, `luau-compile.exe`,
@@ -72,7 +72,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 ### 1.4 Script limits (these have broken the build before)
 
 13. **Luau's 200-local limit is real and we are 2 away from the practical
-    ceiling.** Run `python tools/local_budget.py`. As of v1.46:
+    ceiling.** Run `python tools/local_budget.py`. As of v1.47:
     `4-space locals before milkCycle: 183 (practical ceiling 185)`,
     whole body `190 / 200`, **headroom 2**. Do **not** add a `local` inside the
     main build closure. Reuse an existing local, convert the feature to a
@@ -105,7 +105,7 @@ description — it is the long-form manual and it is kept in sync with behaviour
 
 ### 1.6 Working tree state (read before editing)
 
-`HEAD` is the latest committed build (v1.46, test fixes), `main`
+`HEAD` is the latest committed build (v1.47, sell reaches the store), `main`
 tracks `origin/main`, and the tree is clean. Keep it that way: make the change,
 run the gates, and commit only the files the change touches. `git add -A` is
 banned here. **Commit and push after every completed change** (owner's standing
@@ -139,10 +139,10 @@ The one command that runs everything — compile, budget, name audit and every
 harness, checking both the exit code and the text — is:
 
 ```bash
-python tools/run_all.py        # 30/30 checks on v1.46
+python tools/run_all.py        # 30/30 checks on v1.47
 ```
 
-Last full run (v1.46): **30/30 checks passed** (27 harnesses + 3 gates).
+Last full run (v1.47): **30/30 checks passed** (27 harnesses + 3 gates).
 
 | Script | What it actually proves |
 |---|---|
@@ -622,10 +622,11 @@ ReplicatedStorage.Modules.Larry.FNCFillSeeder:InvokeServer(Workspace.Objects.Equ
     proves it, then `EVTRequestToDrop` puts it back.
   - **Spawn from afar** — `FNCSpawnEquipment` on a stored machine of mine;
     `InStorage` flipping (or a >100-stud rebuild) is the proof.
-  - **Fill from afar** — `FNCFillSeeder` on a distant seeder; the seed
-    IntValue/attribute and `coinBalance` show whether it refilled and whether it
-    charged. No seed field readable → it dumps the seeder's `Configurations`
-    children and attributes, so the next run names the real field.
+  - **Fill from afar** — `FNCFillSeeder` on a distant seeder; the seeder's
+    `Capacity`/`MaxCapacity` pair (the live dump: `Capacity=0, MaxCapacity=50`,
+    the same fields the harvester uses for its tank) and `coinBalance` show
+    whether it refilled and whether it charged. Still unreadable → it dumps the
+    seeder's `Configurations` children and attributes.
   Live results (owner, 2026-10-30): **From here / Wrong stage / No attachment
   all IGNORED** — the server checks seat, stage and attachment. Each test
   reverts nothing and touches no animals or other plots; it refuses while
@@ -1037,8 +1038,24 @@ seeder read accepts IntValue/NumberValue/attributes and, when still nil, dumps
 the seeder's `Configurations` and attributes so the real seed field can be
 named next run.
 
-**Where it stands:** `rebuild v1.46 · fluent gui`, whole suite green (30/30),
-harness verified. **Not yet reloaded in game** after v1.22–v1.45 — the next real
+**"the harverster's contents arente getting sold vbro"** → v1.47. The v1.45
+reports showed `sell: no sell pad found in the world` at three different spots:
+`GameplayVisuals.SellArea` and `Stores.DropOffs` are streamed **with distance**,
+so a full tank at the farm got an empty list and `sellHarvester` skipped the
+unload entirely. It now hops the harvester to the store's own waypoint
+(`storeAnchors`, then any `GotoLocations` marker named fulfil/ship/store/market),
+waits 1.2 s for the area to stream, and looks again; `back` (the return target)
+is captured before that hop so the trip back goes to the field, not the market.
+Two more bugs from the same report: the `SellBoardSeeds` candidate had no `part`,
+so `EVTSellAtStore` was never fired at the crop board (and the test crashed on
+`s.part.Position`) — it now carries `part = g`; and the seeder's seeds are
+`Capacity`/`MaxCapacity` (live dump: 0/50), not a "seed"-named value, so the
+fill test read nil — it now reads that pair and reports `seeds s/m`.
+`dropoff_test.py` grew 7 checks (streamed pad = one hop, no pad → store hop →
+sell, trip back to the field, no marker = honest skip).
+
+**Where it stands:** `rebuild v1.47 · fluent gui`, whole suite green (30/30),
+harness verified. **Not yet reloaded in game** after v1.22–v1.46 — the next real
 test is a live pass watching `path: … theta* N pops / N ms, min clear N`, the
 new width line (`tool … — 3-wide …; rows every 30`), the Farm owner picker
 showing ONLY that owner's fields (`Field · Miou2251`), the equipment owner
@@ -1119,7 +1136,9 @@ for this session`), and the equipment lines (`✅ mounted … (FNCEnterEquipment
    spawned KADL, the spawn test a stored machine of mine) and v1.46 (the sell
    test must name the pad it picked or say no pad is streamed; the fill test
    must either read the seed count or dump the seeder's fields so the next run
-   can name it).
+   can name it) and v1.47 (a full harvester with no pad streamed must log
+   `no Sell pad is streamed from here — arc hop to the store`, then sell at the
+   board; the fill test must read `seeds 0/50` and say whether the fill took).
    Harness green ≠ game green.
 2. **The 24 % baseline may differ per build.** If stalls sit higher, the first
    pass logs `reads X% but the game offers no Clean there - the dirty line moves

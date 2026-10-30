@@ -12,7 +12,7 @@ local LIB_URL    = "https://github.com/ActualMasterOogway/Fluent-Renewed/release
     .. (FLUENT_TAG == "latest" and "latest/download/" or ("download/" .. FLUENT_TAG .. "/"))
     .. "Fluent.luau"
 local SCRIPT_URL = "https://raw.githubusercontent.com/simba13231/spud-farm/main/SpudFarm_Full.lua"
-local VERSION    = "rebuild v1.46 · fluent gui"
+local VERSION    = "rebuild v1.47 · fluent gui"
 
 local Players    = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
@@ -5765,7 +5765,7 @@ local okBuild, errBuild = pcall(function()
             local top = g.Position + Vector3.new(0, g.Size.Y / 2, 0)
             cands[#cands + 1] = {
                 p = top, what = "SellBoardSeeds (crop sell board)", named = true,
-                board = true, store = "FarmCo",
+                board = true, store = "FarmCo", part = g,
                 dist = farm and (top - farm).Magnitude or 1e9,
                 y = top.Y, area = g.Size.X * g.Size.Z,
             }
@@ -6096,19 +6096,56 @@ local okBuild, errBuild = pcall(function()
             return false
         end
         local sellMode = spudDropOff == "Sell"
-        local dest = sellMode and "sell" or "Fulfillment"
+        local dest = sellMode and "Sell" or "Fulfillment"
         log(string.format("harvester FULL (%d/%s) — going to %s", cur, tostring(max), dest))
-        local spots = (spudDropOff == "Sell") and findSellSpots() or spudFulfillSpots()
+        -- where it left the rows: the trip back is ONE arc hop to this exact
+        -- spot (user: "use arch tween thing to go to and back from the sell").
+        -- Captured BEFORE any store hop, or the trip back would return to the
+        -- market instead of the field.
+        local back = ride:GetPivot().Position
+        local spots = sellMode and findSellSpots() or spudFulfillSpots()
+        -- ▸ THE STORE STREAMS WITH DISTANCE (user: "the harvester's contents
+        --   arent getting sold"). Both pad folders live at the market, so a
+        --   full tank at the farm used to find an EMPTY list and skip the
+        --   unload entirely. Hop the harvester to the store's own waypoint,
+        --   give the area a beat to stream, and look again.
         if #spots == 0 then
-            log("⚠ no " .. dest .. " pad found — unload skipped")
+            local anchors = storeAnchors()
+            local order = { "FarmCo", "LumberStore", "LumberCo", "AnimalCo" }
+            local found = nil
+            for _, nm in ipairs(order) do
+                if anchors[nm] then found = anchors[nm] break end
+            end
+            if not found then
+                -- a store whose marker is not one of the four known names
+                pcall(function()
+                    local markers = workspace:FindFirstChild("Markers")
+                    local gotos = markers and markers:FindFirstChild("GotoLocations")
+                    for _, g in ipairs(gotos and gotos:GetChildren() or {}) do
+                        local n = g.Name:lower()
+                        if n:find("fulfil", 1, true) or n:find("ship", 1, true)
+                            or n:find("store", 1, true) or n:find("market", 1, true) then
+                            if g:IsA("BasePart") then found = g.Position return end
+                            local p = g:IsA("Model") and g:GetPivot().Position or nil
+                            if p then found = p return end
+                        end
+                    end
+                end)
+            end
+            if found then
+                log("no " .. dest .. " pad is streamed from here — arc hop to the store, then looking again")
+                hopTo(ride, found, SELL_HOP_SPEED)
+                task.wait(1.2)
+                spots = sellMode and findSellSpots() or spudFulfillSpots()
+            end
+        end
+        if #spots == 0 then
+            log("⚠ no " .. dest .. " pad found (not even after a store hop) — unload skipped")
             return false
         end
         -- the 1-second watch is muted for the whole trip: the tank is STILL
         -- full while driving to the pad, and it must not abort that drive
         sellingNow = true
-        -- where it left the rows: the trip back is ONE arc hop to this exact
-        -- spot (user: "use arch tween thing to go to and back from the sell")
-        local back = ride:GetPivot().Position
         for i, s in ipairs(spots) do
             if stopping() then sellingNow = false return false end
             log(string.format("drop-off %d/%d: %s at (%.0f, %.0f) — arc hop, no pathfinding", i, #spots,
@@ -6267,23 +6304,34 @@ local okBuild, errBuild = pcall(function()
         end
         local function seedCountOf(model)
             local conf = model and model:FindFirstChild("Configurations")
-            for _, v in ipairs(conf and conf:GetChildren() or {}) do
+            if not conf then return nil, nil end
+            local named
+            for _, v in ipairs(conf:GetChildren()) do
                 if (v:IsA("IntValue") or v:IsA("NumberValue"))
                     and v.Name:lower():find("seed", 1, true) then
-                    return tonumber(v.Value)
+                    named = tonumber(v.Value)
                 end
             end
-            local found
+            if named then return named, nil end
             pcall(function()
                 for k, v in pairs(model:GetAttributes()) do
                     if type(v) == "number"
                         and tostring(k):lower():find("seed", 1, true) then
-                        found = v
+                        named = v
                         break
                     end
                 end
             end)
-            return found
+            if named then return named, nil end
+            -- the live dump (KADL): CarryType=Crop, Capacity=0, MaxCapacity=50 —
+            -- the seeder keeps its seeds in the SAME pair the harvester uses
+            -- for its tank, so nothing named "seed" exists on it.
+            local cur, max = conf:FindFirstChild("Capacity"), conf:FindFirstChild("MaxCapacity")
+            local function num(v)
+                return (v and (v:IsA("IntValue") or v:IsA("NumberValue")))
+                    and tonumber(v.Value) or nil
+            end
+            return num(cur), num(max)
         end
 
         if kind == "burst" then
@@ -6401,7 +6449,14 @@ local okBuild, errBuild = pcall(function()
                     return
                 end
             end
-            local spot = spots[1]
+            local spot
+            for _, s in ipairs(spots) do
+                if s.part then spot = s break end
+            end
+            if not spot then
+                spudTestSay("sell: the pads found carry no part to fire at — nothing was fired")
+                return
+            end
             local dist = (ride:GetPivot().Position - spot.part.Position).Magnitude
             local coins0 = coinBalance()
             spudTestSay(string.format(
@@ -6499,10 +6554,10 @@ local okBuild, errBuild = pcall(function()
                 end
             end
             if not seeder then spudTestSay("fill: no seeder is out (KADL) — bring one close") return end
-            local s0, c0 = seedCountOf(seeder), coinBalance()
-            -- cannot guess the field the game stores seeds in: when nothing
-            -- named "seed" is an IntValue, dump what the seeder actually holds
-            -- so the next run names it (probe before implementing).
+            local s0, m0 = seedCountOf(seeder)
+            local c0 = coinBalance()
+            -- still unreadable: dump what the seeder actually holds, so the
+            -- next run names the real field (probe before implementing).
             if s0 == nil then
                 local parts = {}
                 pcall(function()
@@ -6515,21 +6570,31 @@ local okBuild, errBuild = pcall(function()
                         parts[#parts + 1] = "attr " .. tostring(k) .. "=" .. tostring(v)
                     end
                 end)
-                spudTestSay("fill: no seed IntValue on the seeder — it holds: "
+                spudTestSay("fill: no seed count on the seeder — it holds: "
                     .. (#parts > 0 and table.concat(parts, ", ") or "nothing readable"))
             end
-            spudTestSay(string.format("fill: FNCFillSeeder(%s) from %.0f studs away (seeds %s, coins %s)",
-                seeder.Name, dist, tostring(s0), tostring(c0)))
+            spudTestSay(string.format("fill: FNCFillSeeder(%s) from %.0f studs away (seeds %s/%s, coins %s)",
+                seeder.Name, dist, tostring(s0), tostring(m0), tostring(c0)))
             spudFillSeederRemote(seeder)
             task.wait(1.5)
-            local s1, c1 = seedCountOf(seeder), coinBalance()
+            local s1, m1 = seedCountOf(seeder)
+            local c1 = coinBalance()
             local up = s0 and s1 and s1 > s0
             local paid = c0 and c1 and c1 < c0
-            spudTestSay(string.format("fill: seeds %s → %s, coins %s → %s — %s",
-                tostring(s0), tostring(s1), tostring(c0), tostring(c1),
-                up and (paid and "TAKEN but it charged coins"
-                    or "TAKEN and FREE — refilling cost nothing")
-                    or "no change: already full, or refused"))
+            local verdict
+            if up then
+                verdict = paid and "TAKEN but it charged coins"
+                    or "TAKEN and FREE — refilling cost nothing"
+            elseif s0 and m0 and s0 < m0 then
+                verdict = string.format(
+                    "IGNORED — an empty seeder (%s/%s) stayed empty: the fill did not take from here",
+                    tostring(s1), tostring(m1 or m0))
+            else
+                verdict = "no change (already full, or refused)"
+            end
+            spudTestSay(string.format("fill: seeds %s/%s → %s/%s, coins %s → %s — %s",
+                tostring(s0), tostring(m0), tostring(s1), tostring(m1),
+                tostring(c0), tostring(c1), verdict))
             return
         end
 
